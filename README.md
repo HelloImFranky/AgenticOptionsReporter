@@ -29,11 +29,17 @@ poetry install
 poetry run uvicorn agentic_options_reporter.main:app --reload
 ```
 
-Then:
+Then, in another terminal, use the bundled CLI client (a `requests`-based
+HTTP client with an `argparse` command interface — see
+`src/agentic_options_reporter/cli.py`) instead of `curl`:
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/analyze/AAPL
+poetry run agentic-options-reporter health
+poetry run agentic-options-reporter analyze AAPL
+poetry run agentic-options-reporter analyze AAPL --lookback-days 90 --expiration 2026-01-16
+poetry run agentic-options-reporter runs --symbol AAPL --limit 5
+poetry run agentic-options-reporter run 1
+poetry run agentic-options-reporter --base-url http://localhost:8000 health
 ```
 
 ## Testing
