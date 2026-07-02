@@ -1,0 +1,75 @@
+schema: agentic_options_reporter
+version: 1
+description: >
+  SQLAlchemy models implemented in agentic_options_reporter.models.db.
+  Persistence entrypoints are declared in workflow.yaml's persist_results
+  step.
+tables:
+  analysis_run:
+    columns:
+      id: int primary_key autoincrement
+      symbol: str index
+      generated_at: datetime
+      lookback_days: int
+      expiration: str | null
+    relationships:
+      - indicator_snapshot: one-to-one
+      - scored_candidates: one-to-many
+      - recommendation: one-to-one
+
+  indicator_snapshot:
+    columns:
+      id: int primary_key autoincrement
+      run_id: int foreign_key(analysis_run.id)
+      sma_20: float
+      sma_50: float
+      sma_200: float | null
+      ema_12: float
+      ema_26: float
+      adx_14: float
+      rsi_14: float
+      macd: float
+      macd_signal: float
+      macd_histogram: float
+      stoch_k: float
+      stoch_d: float
+      bb_upper: float
+      bb_middle: float
+      bb_lower: float
+      atr_14: float
+      obv: float
+      volume_sma_20: float
+
+  scored_candidate:
+    columns:
+      id: int primary_key autoincrement
+      run_id: int foreign_key(analysis_run.id)
+      contract_symbol: str
+      option_type: str  # call | put
+      strike: float
+      expiration: date
+      delta: float
+      gamma: float
+      theta: float
+      vega: float
+      rho: float
+      max_loss: float
+      max_gain: float | null
+      breakeven: float
+      reward_risk_ratio: float | null
+      probability_of_profit: float
+      score: float
+      score_breakdown: json
+
+  recommendation:
+    columns:
+      id: int primary_key autoincrement
+      run_id: int foreign_key(analysis_run.id)
+      action: str  # STRONG_BUY | BUY | HOLD | AVOID
+      contract_symbol: str | null
+      confidence: float
+      rationale: str
+
+indexes:
+  - table: analysis_run
+    columns: [symbol, generated_at]

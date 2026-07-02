@@ -1,0 +1,61 @@
+openapi_extension: agentic_options_reporter
+version: 1
+description: >
+  Authoritative contract for the FastAPI surface implemented in
+  agentic_options_reporter.main. Handlers must not expose fields not
+  declared here without updating this file first.
+endpoints:
+  - path: /health
+    method: GET
+    summary: Liveness probe.
+    response:
+      status: str
+
+  - path: /analyze/{symbol}
+    method: GET
+    summary: Run the full analysis workflow for a symbol and persist the result.
+    path_params:
+      symbol: str
+    query_params:
+      lookback_days: int = 365
+      expiration: str | null = null
+    response: AnalysisResult
+    errors:
+      404: symbol not found / no data returned by provider
+      502: upstream market data provider error
+
+  - path: /runs/{run_id}
+    method: GET
+    summary: Fetch a previously persisted analysis run.
+    path_params:
+      run_id: int
+    response: AnalysisResult
+    errors:
+      404: run not found
+
+  - path: /runs
+    method: GET
+    summary: List recent analysis runs, most recent first.
+    query_params:
+      symbol: str | null = null
+      limit: int = 20
+    response: list[AnalysisRunSummary]
+
+models:
+  AnalysisResult:
+    symbol: str
+    run_id: int
+    generated_at: datetime
+    indicators: IndicatorSnapshot
+    trend: TrendAssessment
+    volume: VolumeAssessment
+    support_resistance: list[SupportResistanceLevel]
+    candidates: list[ScoredCandidate]
+    recommendation: Recommendation
+
+  AnalysisRunSummary:
+    run_id: int
+    symbol: str
+    generated_at: datetime
+    recommendation_action: str
+    recommendation_confidence: float

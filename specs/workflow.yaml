@@ -1,0 +1,71 @@
+workflow: options_analysis
+version: 1
+description: >
+  End-to-end pipeline that turns a ticker symbol into a scored,
+  persisted options recommendation.
+entrypoint: agentic_options_reporter.workflow:run_analysis
+input:
+  symbol: str
+  lookback_days: int = 365
+  expiration: str | null = null   # ISO date; null = nearest expiration
+steps:
+  - name: download_data
+    module: agentic_options_reporter.data.market_data
+    function: MarketDataProvider.get_price_history + get_option_chain
+    input: [symbol, lookback_days, expiration]
+    output: [PriceHistory, OptionChain]
+  - name: compute_indicators
+    module: agentic_options_reporter.analysis.indicators
+    function: compute_indicators
+    input: [PriceHistory]
+    output: IndicatorSnapshot
+  - name: detect_trend
+    module: agentic_options_reporter.analysis.trend
+    function: detect_trend
+    input: [PriceHistory, IndicatorSnapshot]
+    output: TrendAssessment
+  - name: analyze_volume
+    module: agentic_options_reporter.analysis.volume
+    function: analyze_volume
+    input: [PriceHistory, IndicatorSnapshot]
+    output: VolumeAssessment
+  - name: detect_support_resistance
+    module: agentic_options_reporter.analysis.support_resistance
+    function: detect_levels
+    input: [PriceHistory]
+    output: list[SupportResistanceLevel]
+  - name: evaluate_option_chain
+    module: agentic_options_reporter.analysis.options
+    function: evaluate_chain
+    input: [OptionChain, PriceHistory]
+    output: list[EvaluatedContract]
+  - name: compute_risk
+    module: agentic_options_reporter.analysis.risk
+    function: compute_risk
+    input: [list[EvaluatedContract]]
+    output: list[RiskProfile]
+  - name: score_opportunity
+    module: agentic_options_reporter.analysis.scoring
+    function: score_candidates
+    input:
+      - list[EvaluatedContract]
+      - list[RiskProfile]
+      - TrendAssessment
+      - VolumeAssessment
+      - list[SupportResistanceLevel]
+    output: list[ScoredCandidate]
+  - name: generate_recommendation
+    module: agentic_options_reporter.analysis.scoring
+    function: build_recommendation
+    input: [list[ScoredCandidate]]
+    output: Recommendation
+  - name: persist_results
+    module: agentic_options_reporter.persistence
+    function: persist_analysis_run
+    input:
+      - symbol
+      - IndicatorSnapshot
+      - list[ScoredCandidate]
+      - Recommendation
+    output: AnalysisRunId
+output: AnalysisResult

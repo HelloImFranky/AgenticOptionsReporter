@@ -1,0 +1,57 @@
+scoring_model: opportunity_score
+version: 1
+description: >
+  Weighted-sum model producing a 0-100 opportunity score per option
+  candidate. Implemented in agentic_options_reporter.analysis.scoring.
+range: [0, 100]
+factors:
+  - name: trend_alignment
+    weight: 0.30
+    description: >
+      1.0 if the candidate's directional bias matches the detected trend
+      direction and strength is moderate+; 0.5 if trend is neutral;
+      0.0 if the candidate opposes the trend.
+  - name: volume_confirmation
+    weight: 0.15
+    description: >
+      1.0 if relative volume >= 1.5 in the direction of the trend,
+      0.5 for normal volume, 0.0 for low volume or bearish divergence
+      against a bullish candidate (and vice versa).
+  - name: support_resistance_proximity
+    weight: 0.15
+    description: >
+      Score decays linearly from 1.0 (price at a supporting level) to 0.0
+      at >5% away from the nearest relevant level.
+  - name: liquidity
+    weight: 0.20
+    description: >
+      Combination of normalized open interest and bid/ask spread
+      tightness: 0.5 * min(open_interest / 500, 1) +
+      0.5 * max(0, 1 - spread_pct / 0.10).
+  - name: risk_reward
+    weight: 0.20
+    description: >
+      Score decays from 1.0 at reward:risk >= 2.0 to 0.0 at
+      reward:risk <= 0.5, linear in between.
+thresholds:
+  strong_buy: 75
+  buy: 60
+  hold: 40
+  avoid: 0
+recommendation:
+  action_map:
+    - min_score: 75
+      action: STRONG_BUY
+    - min_score: 60
+      action: BUY
+    - min_score: 40
+      action: HOLD
+    - min_score: 0
+      action: AVOID
+  confidence: score / 100
+  rationale_fields:
+    - trend_alignment
+    - volume_confirmation
+    - support_resistance_proximity
+    - liquidity
+    - risk_reward

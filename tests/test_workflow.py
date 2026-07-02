@@ -1,0 +1,38 @@
+from agentic_options_reporter.persistence import make_session_factory
+from agentic_options_reporter.workflow import run_analysis
+
+
+def test_run_analysis_end_to_end(fake_provider):
+    session_factory = make_session_factory("sqlite:///:memory:")
+
+    result = run_analysis(
+        symbol="TEST",
+        lookback_days=260,
+        provider=fake_provider,
+        session_factory=session_factory,
+    )
+
+    assert result.symbol == "TEST"
+    assert result.run_id > 0
+    assert result.recommendation.action in {"STRONG_BUY", "BUY", "HOLD", "AVOID"}
+    assert result.candidates
+    assert result.indicators.sma_20 > 0
+
+
+def test_run_analysis_persists_run(fake_provider):
+    session_factory = make_session_factory("sqlite:///:memory:")
+
+    result = run_analysis(
+        symbol="TEST",
+        provider=fake_provider,
+        session_factory=session_factory,
+    )
+
+    from agentic_options_reporter.models.db import AnalysisRun
+
+    with session_factory() as session:
+        run = session.get(AnalysisRun, result.run_id)
+        assert run is not None
+        assert run.symbol == "TEST"
+        assert run.recommendation is not None
+        assert len(run.scored_candidates) == len(result.candidates)
