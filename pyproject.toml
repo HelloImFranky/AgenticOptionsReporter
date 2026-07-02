@@ -7,7 +7,7 @@ readme = "README.md"
 packages = [{ include = "agentic_options_reporter", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.12,<3.13"
+python = ">=3.13,<3.14"
 fastapi = "^0.115.0"
 pydantic = "^2.9.0"
 pydantic-settings = "^2.5.2"

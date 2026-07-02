@@ -44,5 +44,5 @@ poetry run pytest
 
 ## Tooling
 
-Python 3.12 · FastAPI · Pydantic · SQLAlchemy · pandas/numpy/scipy/ta ·
+Python 3.13 · FastAPI · Pydantic · SQLAlchemy · pandas/numpy/scipy/ta ·
 yfinance · Plotly/Matplotlib · pytest · Poetry · Docker · GitHub Actions
