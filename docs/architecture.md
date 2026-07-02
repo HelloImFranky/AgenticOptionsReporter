@@ -63,12 +63,15 @@ narrated in `docs/workflow.md`. At a high level:
 | Workflow | `src/agentic_options_reporter/workflow.py` | Orchestrates the pipeline end-to-end |
 | Persistence | `src/agentic_options_reporter/persistence.py` | Writes results via SQLAlchemy models |
 | API | `src/agentic_options_reporter/main.py` | FastAPI surface over the workflow |
+| CLI client | `src/agentic_options_reporter/cli.py` | `requests`-based HTTP client with an `argparse` command interface for the API |
 
 ## Tooling
 
 - Language: Python 3.13
 - Frameworks: FastAPI, Pydantic, SQLAlchemy, asyncio
 - Data: pandas, numpy, scipy, ta, yfinance
+- HTTP client: requests (CLI only; server-side data access goes through `MarketDataProvider`)
+- CLI: argparse, exposed as the `agentic-options-reporter` console script
 - Visualization: Plotly, Matplotlib
 - Testing: pytest
 - Packaging: Poetry
