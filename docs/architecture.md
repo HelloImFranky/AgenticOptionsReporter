@@ -66,7 +66,7 @@ narrated in `docs/workflow.md`. At a high level:
 
 ## Tooling
 
-- Language: Python 3.12
+- Language: Python 3.13
 - Frameworks: FastAPI, Pydantic, SQLAlchemy, asyncio
 - Data: pandas, numpy, scipy, ta, yfinance
 - Visualization: Plotly, Matplotlib
