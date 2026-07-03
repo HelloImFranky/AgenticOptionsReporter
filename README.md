@@ -74,23 +74,37 @@ export FINNHUB_API_KEY=...   # News Research (finnhub.io, free tier)
 export FRED_API_KEY=...      # Macro Research (fred.stlouisfed.org, free)
 ```
 
-Two providers are supported out of the box, `anthropic` (default) and
-`openai`; each needs its own API key, either set server-side
-(`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) or supplied per request — the
-latter is never logged or persisted, only used to construct that one
-call's LLM client:
+Six LLM providers are supported — `anthropic`, `openai`, `groq`, `gemini`,
+`deepseek`, `openrouter` — each needing its own API key, set server-side:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY, if using --provider openai
-poetry run agentic-options-reporter thesis <run_id>                                     # generate, server's key
+export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...
+export GROQ_API_KEY=gsk_...
+export GEMINI_API_KEY=...
+export DEEPSEEK_API_KEY=sk-...
+export OPENROUTER_API_KEY=sk-or-...
+```
+
+**By default (`--provider auto`), the CLI fails over across every one of
+these that's configured**, in priority order (`anthropic` first, unless
+`AOR_LLM_FALLBACK_ORDER` overrides it) — a quota exhaustion, rate limit,
+or outage on one provider no longer blocks thesis generation, it just
+tries the next one. See `docs/investment_thesis.md` for exactly which
+failures trigger a retry vs. propagate immediately.
+
+```bash
+poetry run agentic-options-reporter thesis <run_id>                                     # generate, auto-failover across configured providers
 poetry run agentic-options-reporter thesis <run_id> --regenerate                        # discard and regenerate
 poetry run agentic-options-reporter thesis <run_id> --fetch-only                        # fetch without generating
-poetry run agentic-options-reporter thesis <run_id> --provider openai --api-key sk-...  # your own key, this call only
+poetry run agentic-options-reporter thesis <run_id> --provider openai --api-key sk-...  # force one provider + your own key, this call only
 ```
 
 Or use the Flet UI's **Agents** tab after running an analysis: pick a
-**Provider** and, optionally, paste your own **API key** (password-masked,
-sent only for that one request), then click "Generate investment thesis"
+**Provider** (Auto is the default and recommended choice) and, optionally,
+paste your own **API key** (password-masked, sent only for that one
+request and only enabled once a specific provider is chosen), then click
+"Generate investment thesis"
 to see a **Final output** verdict (the recommendation action + the
 agents' consensus) and, below it, an **Agent conversation** — Quant
 Interpreter, Financial Research, News Research, Macro Research, Risk

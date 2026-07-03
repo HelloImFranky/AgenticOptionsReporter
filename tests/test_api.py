@@ -265,7 +265,7 @@ def test_generate_thesis_passes_custom_provider_and_api_key(client):
     assert captured["model"] is None
 
 
-def test_generate_thesis_default_provider_uses_settings_model(client):
+def test_generate_thesis_defaults_to_auto_provider(client):
     test_client, session_factory = client
     run_id = _persist_full_run(session_factory)
     fake_result = _fake_thesis_result(run_id)
@@ -283,8 +283,42 @@ def test_generate_thesis_default_provider_uses_settings_model(client):
         response = test_client.post(f"/runs/{run_id}/thesis")
 
     assert response.status_code == 200
+    assert captured["provider"] == "auto"
+    # settings.llm_model is anthropic-specific; "auto" must not receive it.
+    assert captured["model"] is None
+
+
+def test_generate_thesis_explicit_anthropic_provider_uses_settings_model(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    captured = {}
+
+    def fake_build_llm_client(provider, api_key=None, model=None, max_tokens=1024):
+        captured["provider"] = provider
+        captured["model"] = model
+        return MagicMock()
+
+    with patch(
+        "agentic_options_reporter.main.build_llm_client", side_effect=fake_build_llm_client
+    ), patch("agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result):
+        response = test_client.post(f"/runs/{run_id}/thesis", json={"provider": "anthropic"})
+
+    assert response.status_code == 200
     assert captured["provider"] == "anthropic"
     assert captured["model"] == main_module.get_settings().llm_model
+
+
+def test_generate_thesis_auto_provider_with_api_key_returns_422(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    response = test_client.post(
+        f"/runs/{run_id}/thesis", json={"provider": "auto", "api_key": "sk-custom-123"}
+    )
+
+    assert response.status_code == 422
 
 
 def test_generate_thesis_unsupported_provider_returns_502(client):

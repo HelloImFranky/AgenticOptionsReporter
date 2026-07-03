@@ -70,7 +70,7 @@ def test_thesis_parser_defaults():
     assert args.run_id == 42
     assert args.regenerate is False
     assert args.fetch_only is False
-    assert args.provider == "anthropic"
+    assert args.provider == "auto"
     assert args.api_key is None
 
 
@@ -146,7 +146,7 @@ def test_main_thesis_generates_by_default(monkeypatch):
     assert exit_code == 0
     assert captured["method"] == "POST"
     assert captured["url"] == "http://localhost:8000/runs/42/thesis"
-    assert captured["json"] == {"provider": "anthropic", "api_key": None, "regenerate": False}
+    assert captured["json"] == {"provider": "auto", "api_key": None, "regenerate": False}
 
 
 def test_main_thesis_passes_provider_and_api_key(monkeypatch):

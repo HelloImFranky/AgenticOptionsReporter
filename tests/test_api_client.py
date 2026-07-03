@@ -115,7 +115,7 @@ def test_generate_thesis_builds_expected_request(monkeypatch):
     client.generate_thesis(42)
     assert captured["method"] == "POST"
     assert captured["url"] == "http://localhost:8000/runs/42/thesis"
-    assert captured["json"] == {"provider": "anthropic", "api_key": None, "regenerate": False}
+    assert captured["json"] == {"provider": "auto", "api_key": None, "regenerate": False}
 
 
 def test_generate_thesis_passes_regenerate_flag(monkeypatch):

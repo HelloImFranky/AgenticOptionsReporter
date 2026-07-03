@@ -54,10 +54,12 @@ endpoints:
     errors:
       404: run not found
       409: a thesis already exists for this run and regenerate=false
+      422: body.provider is "auto" and body.api_key is set (ambiguous — see specs/llm_providers.yaml)
       502: >
-        the requested provider is unsupported, its LlmClient failed
-        (including a missing API key), or it returned an unparseable
-        response
+        the requested provider is unsupported, no configured provider
+        succeeded (including a missing API key for every provider in
+        provider="auto"'s fallback order), or the response was
+        unparseable — see specs/llm_providers.yaml
     security_note: >
       body.api_key, if supplied, is used only to construct the LlmClient
       for this one request. It is never logged, echoed in the response,
@@ -142,6 +144,6 @@ models:
     consensus: str   # bullish | bearish | neutral | mixed
 
   ThesisGenerationRequest:
-    provider: str = "anthropic"       # see specs/agents.yaml llm_client.providers
-    api_key: str | null = null        # overrides the server's configured key for this request only
+    provider: str = "auto"            # "auto" fails over across every configured provider; see specs/llm_providers.yaml
+    api_key: str | null = null        # overrides the server's configured key for this request only; not valid with provider="auto"
     regenerate: bool = false

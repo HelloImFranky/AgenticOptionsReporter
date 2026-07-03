@@ -455,13 +455,18 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
 
     provider_dropdown = ft.Dropdown(
         label="Provider",
-        value="anthropic",
-        width=160,
+        value="auto",
+        width=180,
         border_radius=10,
         text_size=14,
         options=[
+            ft.dropdown.Option("auto", "Auto (recommended)"),
             ft.dropdown.Option("anthropic", "Anthropic"),
             ft.dropdown.Option("openai", "OpenAI"),
+            ft.dropdown.Option("groq", "Groq"),
+            ft.dropdown.Option("gemini", "Gemini"),
+            ft.dropdown.Option("deepseek", "DeepSeek"),
+            ft.dropdown.Option("openrouter", "OpenRouter"),
         ],
     )
     api_key_field = ft.TextField(
@@ -472,7 +477,17 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         width=320,
         border_radius=10,
         text_size=14,
+        disabled=True,
     )
+
+    def _on_provider_change(_: ft.ControlEvent) -> None:
+        is_auto = provider_dropdown.value == "auto"
+        api_key_field.disabled = is_auto
+        if is_auto:
+            api_key_field.value = ""
+        page.update()
+
+    provider_dropdown.on_change = _on_provider_change
 
     thesis_progress = ft.ProgressRing(visible=False, width=18, height=18, stroke_width=2)
     thesis_button = ft.ElevatedButton(
@@ -605,7 +620,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             result = client.generate_thesis(
                 current_run_id["value"],
                 regenerate=True,
-                provider=provider_dropdown.value or "anthropic",
+                provider=provider_dropdown.value or "auto",
                 api_key=(api_key_field.value or "").strip() or None,
             )
         except ApiError as exc:

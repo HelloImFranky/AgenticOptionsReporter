@@ -365,11 +365,14 @@ class AgentThesisResult(BaseModel):
 class ThesisGenerationRequest(BaseModel):
     """Request body for POST /runs/{run_id}/thesis.
 
+    `provider="auto"` (the default) builds an `LlmRouter` across every
+    provider with a configured API key and fails over between them; a
+    named provider bypasses the router for a single, explicit choice.
     `api_key`, if supplied, is used only to construct the LlmClient for
     this one request; it is never logged or persisted (see
     thesis.llm_client.build_llm_client and main.generate_thesis).
     """
 
-    provider: str = "anthropic"
+    provider: str = "auto"
     api_key: str | None = None
     regenerate: bool = False

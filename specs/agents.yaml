@@ -252,26 +252,24 @@ llm_client:
     Provider-agnostic interface (agentic_options_reporter.thesis.llm_client
     .LlmClient), the same dependency-injection pattern as
     data.market_data.MarketDataProvider. Agents depend on this interface,
-    never on a concrete provider SDK, so a different provider can be
-    substituted without touching agent code.
+    never on a concrete provider SDK, so a different provider — or a
+    failover router across several — can be substituted without touching
+    agent code. Full provider registry, error normalization, and the
+    fallback router are specified in specs/llm_providers.yaml.
   interface:
     complete(system_prompt: str, user_prompt: str) -> str
-  factory: build_llm_client(provider, api_key=None, model=None, max_tokens=1024) -> LlmClient
-  providers:
-    anthropic:
-      implementation: AnthropicLlmClient
-      default_model: claude-sonnet-5
-      api_key_env_var: ANTHROPIC_API_KEY
-    openai:
-      implementation: OpenAiLlmClient
-      default_model: gpt-4o-mini
-      api_key_env_var: OPENAI_API_KEY
+  factory: build_llm_client(provider="auto", api_key=None, model=None, max_tokens=1024) -> LlmClient
+  providers: See specs/llm_providers.yaml for the full registry (anthropic, openai, groq, gemini, deepseek, openrouter).
+  automatic_failover: >
+    provider="auto" (the default) returns an LlmRouter across every
+    provider with a configured API key, instead of a single named
+    provider's client — see specs/llm_providers.yaml.
   api_key_precedence: >
     An api_key passed explicitly (e.g. specs/api.yaml
     ThesisGenerationRequest.api_key, sourced from the Flet UI's Agents tab
     API-key field or the CLI's --api-key flag) overrides the provider's
     environment variable for that one request only. It is never logged
-    or persisted.
+    or persisted. Only valid with a named provider, not provider="auto".
   response_format: >
     Agents instruct the model to respond with a single JSON object
     matching its output model and parse it via
