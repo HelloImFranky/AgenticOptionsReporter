@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_ALEMBIC_DIR = _PROJECT_ROOT / "alembic"
+
+
+def run_migrations(database_url: str) -> None:
+    """Bring the target database up to the latest Alembic revision."""
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(_ALEMBIC_DIR))
+    cfg.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(cfg, "head")
 
 from agentic_options_reporter.models.db import (
     AgentThesisRow,
@@ -41,7 +56,14 @@ def make_engine(database_url: str):
     if poolclass is not None:
         kwargs["poolclass"] = poolclass
     engine = create_engine(database_url, **kwargs)
-    Base.metadata.create_all(engine)
+    if is_memory:
+        # In-memory databases are ephemeral (tests); create the schema directly
+        # rather than paying Alembic's migration overhead on every run.
+        Base.metadata.create_all(engine)
+    else:
+        # Persistent databases are migrated to head so schema changes ship
+        # automatically without manual ALTER TABLE.
+        run_migrations(database_url)
     return engine
 
 
