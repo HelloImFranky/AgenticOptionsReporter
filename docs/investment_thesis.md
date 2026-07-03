@@ -92,11 +92,26 @@ provider raises `<X>ProviderUnsupported` (retryable) for the methods
 outside its specialty rather than being excluded from the router
 entirely — it's still used for the methods it does support. A
 transient failure (rate limit, quota, timeout, 5xx) advances to the next
-configured provider the same way; only when *every* configured provider
-fails does the request surface as a 502 (see `specs/providers.yaml:
+configured provider the same way (see `specs/providers.yaml:
 provider_router` for the full error-classification detail). Since GDELT
 needs no API key, News Research now effectively always has at least one
 provider available.
+
+### When every data provider fails: warnings, not a crash
+
+Even a fully-exhausted data-provider router doesn't fail the request.
+The orchestrator wraps each research step: if its provider errors at
+call time (e.g. GDELT was the only configured news provider and it
+rate-limited), that agent's finding stays `null`, the failure is
+recorded in `AgentThesisResult.pipeline_warnings` (prefixed with the
+agent name, e.g. `"news_research: provider failed during the run — …"`),
+and the rest of the pipeline — quant, risk, strategy, the final thesis —
+completes normally. Warnings are persisted with the thesis, returned by
+both `POST` and `GET /runs/{run_id}/thesis`, and shown in the Agents tab
+as an amber banner, with the affected agent's message reading "Skipped —
+provider failed during the run". Only failures that make the synthesis
+itself impossible (the LLM erroring, an unparseable LLM response) still
+surface as a 502.
 
 Financial Research's `analyst_consensus` field is passed through verbatim
 from the provider's `AnalystEstimates.consensus_rating` — never

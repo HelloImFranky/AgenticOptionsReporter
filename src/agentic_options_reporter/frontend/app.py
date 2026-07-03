@@ -509,6 +509,25 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         ),
     )
 
+    # Non-fatal problems hit mid-pipeline (pipeline_warnings in the API
+    # response): the run still completed, so this renders amber alongside
+    # the results rather than red instead of them.
+    pipeline_warnings_column = ft.Column([], spacing=4, tight=True, expand=True)
+    pipeline_warnings_banner = ft.Container(
+        visible=False,
+        bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.AMBER),
+        border_radius=10,
+        padding=12,
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=ft.Colors.AMBER_800, size=18),
+                pipeline_warnings_column,
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        ),
+    )
+
     # -- final output: a compact, scannable verdict --
     final_action_badge = ft.Container(visible=False)
     final_consensus_badge = ft.Container(visible=False)
@@ -604,6 +623,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
 
     def reset_agents_tab() -> None:
         thesis_error_banner.visible = False
+        pipeline_warnings_banner.visible = False
         thesis_button.text = "Generate investment thesis"
         final_output_card.visible = False
         conversation_card.visible = False
@@ -612,6 +632,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         if current_run_id["value"] is None:
             return
         thesis_error_banner.visible = False
+        pipeline_warnings_banner.visible = False
         thesis_progress.visible = True
         thesis_button.disabled = True
         page.update()
@@ -638,6 +659,19 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         risk = result.get("risk_assessment")
         strategy = result.get("strategy_suggestion")
         investment_thesis = result["investment_thesis"]
+        warnings = result.get("pipeline_warnings") or []
+
+        if warnings:
+            pipeline_warnings_column.controls = [
+                ft.Text(warning, color=ft.Colors.AMBER_800, size=13, selectable=True)
+                for warning in warnings
+            ]
+            pipeline_warnings_banner.visible = True
+
+        def _skip_reason(agent_name: str, not_configured_text: str) -> str:
+            if any(warning.startswith(f"{agent_name}:") for warning in warnings):
+                return "Skipped — provider failed during the run (see warning above)."
+            return not_configured_text
 
         # -- final output verdict --
         final_action_badge.content = ft.Text(
@@ -682,7 +716,9 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             financial_analyst_text.value = ""
             financial_narrative_text.value = ""
             financial_message_body.controls = [
-                _skipped_message("Skipped — no financial data provider configured.")
+                _skipped_message(
+                    _skip_reason("financial_research", "Skipped — no financial data provider configured.")
+                )
             ]
 
         if news is not None:
@@ -713,7 +749,9 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             news_summary_text.value = ""
             news_catalysts_column.controls = []
             news_risks_column.controls = []
-            news_message_body.controls = [_skipped_message("Skipped — no news data provider configured.")]
+            news_message_body.controls = [
+                _skipped_message(_skip_reason("news_research", "Skipped — no news data provider configured."))
+            ]
 
         if macro is not None:
             macro_tone = macro_regime_tone(macro.get("regime", ""))
@@ -734,7 +772,9 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             macro_regime_badge.visible = False
             macro_summary_text.value = ""
             macro_outlook_text.value = ""
-            macro_message_body.controls = [_skipped_message("Skipped — no macro data provider configured.")]
+            macro_message_body.controls = [
+                _skipped_message(_skip_reason("macro_research", "Skipped — no macro data provider configured."))
+            ]
 
         if risk is not None:
             risk_tone = risk_level_tone(risk.get("risk_level", ""))
@@ -803,6 +843,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
                 ),
                 ft.Row([thesis_button, thesis_progress], spacing=10),
                 thesis_error_banner,
+                pipeline_warnings_banner,
             ),
             final_output_card,
             conversation_card,

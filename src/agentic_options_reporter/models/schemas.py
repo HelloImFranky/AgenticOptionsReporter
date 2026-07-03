@@ -360,6 +360,11 @@ class AgentThesisResult(BaseModel):
     risk_assessment: RiskAssessment | None
     strategy_suggestion: StrategySuggestion | None
     investment_thesis: InvestmentThesis
+    # Non-fatal problems hit mid-pipeline (e.g. a configured research
+    # provider rate-limited during the run). Each entry is prefixed with
+    # the agent it affected, e.g. "news_research: ...". The affected
+    # finding is null; the rest of the pipeline still completed.
+    pipeline_warnings: list[str] = []
 
 
 class ThesisGenerationRequest(BaseModel):

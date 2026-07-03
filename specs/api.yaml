@@ -56,10 +56,14 @@ endpoints:
       409: a thesis already exists for this run and regenerate=false
       422: body.provider is "auto" and body.api_key is set (ambiguous — see specs/llm_providers.yaml)
       502: >
-        the requested provider is unsupported, no configured provider
-        succeeded (including a missing API key for every provider in
-        provider="auto"'s fallback order), or the response was
-        unparseable — see specs/llm_providers.yaml
+        the requested LLM provider is unsupported, no configured LLM
+        provider succeeded (including a missing API key for every
+        provider in provider="auto"'s fallback order), or the response
+        was unparseable — see specs/llm_providers.yaml. Research DATA
+        provider failures (financial/news/macro) are NOT a 502: the run
+        completes with a null finding plus an entry in
+        pipeline_warnings (see specs/agents.yaml
+        provider_failure_mid_run).
     security_note: >
       body.api_key, if supplied, is used only to construct the LlmClient
       for this one request. It is never logged, echoed in the response,
@@ -104,6 +108,7 @@ models:
     risk_assessment: RiskAssessment | null
     strategy_suggestion: StrategySuggestion | null
     investment_thesis: InvestmentThesis
+    pipeline_warnings: list[str]   # non-fatal mid-run problems, e.g. a research provider rate limited; [] when clean
 
   QuantInterpretation:
     narrative: str

@@ -204,6 +204,66 @@ def test_pipeline_runs_only_configured_research_agents():
     assert thesis.macro_research is None
 
 
+def test_pipeline_records_no_warnings_when_research_succeeds():
+    llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(result, llm, news_provider=FakeNewsProvider())
+
+    assert thesis.pipeline_warnings == []
+
+
+class RateLimitedNewsProvider(NewsProvider):
+    """Simulates the GDELT-rate-limited case: a provider that IS
+    configured but 429s at call time."""
+
+    def get_company_news(self, ticker: str, limit: int = 20):
+        from agentic_options_reporter.data.news_provider import NewsProviderRateLimited
+
+        raise NewsProviderRateLimited("GDELT rate limited: 429 Too Many Requests")
+
+    def get_market_news(self, limit: int = 20):
+        raise NotImplementedError
+
+    def get_sentiment(self, ticker: str):
+        raise NotImplementedError
+
+
+def test_provider_failure_mid_run_records_warning_instead_of_crashing():
+    """A configured provider failing during the run (e.g. rate limited)
+    must not throw away the rest of the pipeline: the finding is null,
+    the failure lands in pipeline_warnings, and the thesis still
+    synthesizes over what's present."""
+    llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(
+        result,
+        llm,
+        financial_provider=FakeFinancialProvider(),
+        news_provider=RateLimitedNewsProvider(),
+        macro_provider=FakeMacroProvider(),
+    )
+
+    # The failed agent's finding is null; the others still completed.
+    assert thesis.news_research is None
+    assert thesis.financial_research is not None
+    assert thesis.macro_research is not None
+    assert thesis.investment_thesis.consensus == "bullish"
+
+    assert len(thesis.pipeline_warnings) == 1
+    assert thesis.pipeline_warnings[0].startswith("news_research:")
+    assert "rate limited" in thesis.pipeline_warnings[0].lower()
+
+
 def test_research_agents_run_even_without_candidate():
     """Research findings are ticker/market-wide, not contract-specific, so
     they should still run when there's no candidate to size (unlike

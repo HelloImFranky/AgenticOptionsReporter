@@ -272,6 +272,22 @@ def test_gdelt_get_sentiment_uses_tone_timeline(fake_requests_module):
     assert snapshot.article_count == 1
 
 
+def test_gdelt_get_sentiment_uses_modest_article_sample(fake_requests_module):
+    """The sentiment article sample stays small — GDELT rate-limits
+    aggressively, and a 429 here used to take down the whole thesis
+    pipeline."""
+    fake_requests_module.get = FakeRequestsGet(
+        FakeHttpResponse({"articles": []}),
+        FakeHttpResponse({"timeline": []}),
+    )
+    provider = GdeltNewsProvider()
+    provider.get_sentiment("AAPL")
+
+    article_call = fake_requests_module.get.calls[0]
+    assert article_call["params"]["maxrecords"] == GdeltNewsProvider.SENTIMENT_ARTICLE_SAMPLE
+    assert GdeltNewsProvider.SENTIMENT_ARTICLE_SAMPLE <= 50
+
+
 def test_gdelt_get_sentiment_handles_missing_timeline(fake_requests_module):
     fake_requests_module.get = FakeRequestsGet(
         FakeHttpResponse({"articles": []}),

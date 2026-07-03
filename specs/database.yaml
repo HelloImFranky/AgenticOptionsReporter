@@ -135,6 +135,7 @@ tables:
       strategy_rationale: str | null
       thesis: str
       consensus: str               # bullish | bearish | neutral | mixed
+      pipeline_warnings: json | null   # list[str]; non-fatal mid-run problems (specs/agents.yaml provider_failure_mid_run); null on pre-migration rows, read back as []
 
 indexes:
   - table: analysis_run
