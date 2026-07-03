@@ -12,6 +12,7 @@ from agentic_options_reporter.models.schemas import (
     OptionContract,
     PriceHistory,
 )
+from agentic_options_reporter.thesis.llm_client import LlmClient
 
 
 def _make_bars(n: int, start_price: float = 100.0, trend_per_day: float = 0.05) -> list[Bar]:
@@ -101,3 +102,19 @@ class FakeMarketDataProvider(MarketDataProvider):
 @pytest.fixture
 def fake_provider(uptrend_history: PriceHistory, sample_option_chain: OptionChain) -> FakeMarketDataProvider:
     return FakeMarketDataProvider(uptrend_history, sample_option_chain)
+
+
+class FakeLlmClient(LlmClient):
+    """Dispatches canned JSON responses by matching a substring in the
+    system prompt, so a single fake can serve a whole agent pipeline run."""
+
+    def __init__(self, responses: dict[str, str]) -> None:
+        self._responses = responses
+        self.calls: list[tuple[str, str]] = []
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append((system_prompt, user_prompt))
+        for key, response in self._responses.items():
+            if key in system_prompt:
+                return response
+        raise AssertionError(f"No fake response configured for prompt: {system_prompt[:60]!r}")

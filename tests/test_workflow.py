@@ -36,3 +36,29 @@ def test_run_analysis_persists_run(fake_provider):
         assert run.symbol == "TEST"
         assert run.recommendation is not None
         assert len(run.scored_candidates) == len(result.candidates)
+
+
+def test_run_analysis_persists_trend_volume_and_levels(fake_provider):
+    """Regression test: these were previously placeholder-only on replay."""
+    session_factory = make_session_factory("sqlite:///:memory:")
+
+    result = run_analysis(
+        symbol="TEST",
+        provider=fake_provider,
+        session_factory=session_factory,
+    )
+
+    from agentic_options_reporter.models.db import AnalysisRun
+
+    with session_factory() as session:
+        run = session.get(AnalysisRun, result.run_id)
+        assert run.trend_assessment is not None
+        assert run.trend_assessment.direction == result.trend.direction
+        assert run.trend_assessment.strength == result.trend.strength
+        assert run.trend_assessment.adx == result.trend.adx
+
+        assert run.volume_assessment is not None
+        assert run.volume_assessment.relative_volume == result.volume.relative_volume
+        assert run.volume_assessment.flags == result.volume.flags
+
+        assert len(run.support_resistance_levels) == len(result.support_resistance)

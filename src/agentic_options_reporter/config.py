@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     min_open_interest: int = 50
     max_spread_pct: float = 0.15
     cache_ttl_seconds: int = 300
+    llm_model: str = "claude-sonnet-5"
+    llm_max_tokens: int = 1024
 
 
 @lru_cache

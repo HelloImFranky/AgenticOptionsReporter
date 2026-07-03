@@ -6,12 +6,14 @@ from agentic_options_reporter.frontend.formatting import (
     TONE_SUCCESS,
     TONE_WARNING,
     candidates_to_rows,
+    consensus_tone,
     format_indicator_summary,
     format_recommendation,
     format_timestamp,
     format_trend_summary,
     format_volume_summary,
     recommendation_tone,
+    risk_level_tone,
     runs_to_rows,
     trend_tone,
 )
@@ -60,6 +62,21 @@ def test_trend_tone_mapping():
 
 def test_format_timestamp_trims_seconds_and_replaces_t():
     assert format_timestamp("2026-07-03T12:34:56.789") == "2026-07-03 12:34"
+
+
+def test_consensus_tone_mapping():
+    assert consensus_tone("bullish") == TONE_SUCCESS
+    assert consensus_tone("bearish") == TONE_DANGER
+    assert consensus_tone("neutral") == TONE_NEUTRAL
+    assert consensus_tone("mixed") == TONE_WARNING
+    assert consensus_tone("unexpected") == TONE_NEUTRAL
+
+
+def test_risk_level_tone_mapping():
+    assert risk_level_tone("low") == TONE_SUCCESS
+    assert risk_level_tone("medium") == TONE_WARNING
+    assert risk_level_tone("high") == TONE_DANGER
+    assert risk_level_tone("unexpected") == TONE_NEUTRAL
 
 
 def test_format_trend_summary():

@@ -9,16 +9,24 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from agentic_options_reporter.models.db import (
+    AgentThesisRow,
     AnalysisRun,
     Base,
     IndicatorSnapshotRow,
     RecommendationRow,
     ScoredCandidateRow,
+    SupportResistanceLevelRow,
+    TrendAssessmentRow,
+    VolumeAssessmentRow,
 )
 from agentic_options_reporter.models.schemas import (
+    AgentThesisResult,
     IndicatorSnapshot,
     Recommendation,
     ScoredCandidate,
+    SupportResistanceLevel,
+    TrendAssessment,
+    VolumeAssessment,
 )
 
 
@@ -48,6 +56,9 @@ def persist_analysis_run(
     lookback_days: int,
     expiration: str | None,
     indicators: IndicatorSnapshot,
+    trend: TrendAssessment,
+    volume: VolumeAssessment,
+    levels: list[SupportResistanceLevel],
     candidates: list[ScoredCandidate],
     recommendation: Recommendation,
 ) -> int:
@@ -63,6 +74,10 @@ def persist_analysis_run(
     session.add(
         IndicatorSnapshotRow(run_id=run.id, **indicators.model_dump())
     )
+    session.add(TrendAssessmentRow(run_id=run.id, **trend.model_dump()))
+    session.add(VolumeAssessmentRow(run_id=run.id, **volume.model_dump()))
+    for level in levels:
+        session.add(SupportResistanceLevelRow(run_id=run.id, **level.model_dump()))
 
     for candidate in candidates:
         session.add(
@@ -85,3 +100,35 @@ def persist_analysis_run(
 
     session.commit()
     return run.id
+
+
+def persist_thesis(session: Session, thesis_result: AgentThesisResult) -> None:
+    quant = thesis_result.quant_interpretation
+    risk = thesis_result.risk_assessment
+    strategy = thesis_result.strategy_suggestion
+
+    session.add(
+        AgentThesisRow(
+            run_id=thesis_result.run_id,
+            generated_at=thesis_result.generated_at,
+            quant_narrative=quant.narrative,
+            quant_key_factors=quant.key_factors,
+            quant_score_breakdown=quant.score_breakdown,
+            quant_overall_score=quant.overall_score,
+            risk_level=risk.risk_level if risk else None,
+            risk_concerns=risk.concerns if risk else None,
+            risk_position_sizing_note=risk.position_sizing_note if risk else None,
+            strategy=strategy.strategy if strategy else None,
+            strategy_rationale=strategy.rationale if strategy else None,
+            thesis=thesis_result.investment_thesis.thesis,
+            consensus=thesis_result.investment_thesis.consensus,
+        )
+    )
+    session.commit()
+
+
+def delete_thesis(session: Session, run_id: int) -> None:
+    existing = session.query(AgentThesisRow).filter(AgentThesisRow.run_id == run_id).one_or_none()
+    if existing is not None:
+        session.delete(existing)
+        session.commit()

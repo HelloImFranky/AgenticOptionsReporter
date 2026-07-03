@@ -1,0 +1,157 @@
+pipeline: investment_thesis
+version: 1
+description: >
+  A pipeline of LLM-backed agents that interpret, challenge, and narrate
+  the output of the deterministic quant engine (workflow.yaml) into a
+  human-readable investment thesis. Agents never compute technical
+  indicators, Greeks, probability of profit, scoring, or risk metrics —
+  those remain the sole responsibility of analysis/*.py. Agents consume
+  already-computed, already-persisted AnalysisResult data and add
+  interpretation and judgment on top of it.
+
+status: phase_1
+phase_1_scope: >
+  Agents that reason only over data the quant engine already produced
+  for a persisted run (specs/database.yaml: analysis_run and its
+  children). No external data sources (news, macro, social, filings) are
+  wired up yet — see future_phases below.
+future_phases:
+  - name: market_research_agent
+    description: >
+      Sector/macro/earnings/analyst-upgrade context. Needs a market/news
+      data provider decision (not yet made) before it can be specified.
+  - name: news_sentiment_agent
+    description: >
+      News/social/filings sentiment. Needs a data provider decision (not
+      yet made) before it can be specified.
+  - name: orchestrator_synthesis
+    description: >
+      Once market/news agents exist, the orchestrator should synthesize
+      (not average) potentially conflicting agent conclusions rather than
+      the current linear hand-off.
+
+entrypoint: agentic_options_reporter.thesis.orchestrator:run_thesis_pipeline
+input:
+  analysis_result: AnalysisResult   # see specs/api.yaml
+  llm_client: LlmClient
+no_candidate_short_circuit: >
+  If analysis_result.recommendation.contract_symbol is null (AVOID / no
+  liquid candidates), the orchestrator skips the risk_challenger and
+  options_strategy agents (nothing to assess or size) and produces only
+  a quant_interpretation and a short investment_thesis explaining why no
+  position is recommended.
+
+agents:
+  - name: quant_interpreter
+    module: agentic_options_reporter.thesis.quant_interpreter
+    function: run
+    calls_llm: true
+    input:
+      - IndicatorSnapshot
+      - TrendAssessment
+      - VolumeAssessment
+      - ScoredCandidate (top-ranked)
+    output: QuantInterpretation
+    contract: >
+      MUST NOT invent or alter any numeric score. score_breakdown and
+      score in the output are passed through verbatim from the
+      already-computed ScoredCandidate (specs/scoring.yaml); the agent
+      only contributes `narrative` and `key_factors` prose.
+
+  - name: risk_challenger
+    module: agentic_options_reporter.thesis.risk_challenger
+    function: run
+    calls_llm: true
+    input:
+      - ScoredCandidate (top-ranked; carries Greeks + risk fields)
+      - TrendAssessment
+      - list[SupportResistanceLevel]
+    output: RiskAssessment
+    contract: >
+      Argues against the trade: identifies concrete concerns (e.g. high
+      implied-vol proxy from wide theta/vega, proximity to resistance
+      for a call / support for a put, low probability_of_profit, thin
+      time to expiration). risk_level is the agent's qualitative
+      judgment (low/medium/high) — this is a judgment call, not a
+      formula, so it is allowed to be LLM-authored (unlike scores).
+    skipped_when: no_candidate_short_circuit
+
+  - name: options_strategy
+    module: agentic_options_reporter.thesis.options_strategy
+    function: run
+    calls_llm: true
+    input:
+      - TrendAssessment
+      - ScoredCandidate (top-ranked)
+      - RiskAssessment (from risk_challenger)
+    output: StrategySuggestion
+    contract: >
+      Suggests a strategy *shape* (e.g. "Bull Call Spread", "Cash-Secured
+      Put", "Long Call", "Avoid new position") given directional bias,
+      the top candidate's risk profile, and the risk_challenger's
+      concerns. Does not price a spread or pick specific strikes —
+      that would require new deterministic multi-leg pricing, which is
+      out of scope for phase 1.
+    skipped_when: no_candidate_short_circuit
+
+  - name: investment_thesis
+    module: agentic_options_reporter.thesis.investment_thesis
+    function: run
+    calls_llm: true
+    input:
+      - QuantInterpretation
+      - RiskAssessment (nullable)
+      - StrategySuggestion (nullable)
+      - Recommendation
+      - TrendAssessment
+      - VolumeAssessment
+    output: InvestmentThesis
+    contract: >
+      Synthesizes all prior agent output into one narrative paragraph
+      plus a consensus label (bullish/bearish/neutral/mixed). This is
+      the text the user actually reads.
+
+models:
+  QuantInterpretation:
+    narrative: str
+    key_factors: list[str]
+    score_breakdown: dict[str, float]   # pass-through, not LLM-authored
+    overall_score: float                # pass-through, not LLM-authored
+
+  RiskAssessment:
+    risk_level: "low | medium | high"
+    concerns: list[str]
+    position_sizing_note: str
+
+  StrategySuggestion:
+    strategy: str
+    rationale: str
+
+  InvestmentThesis:
+    thesis: str
+    consensus: "bullish | bearish | neutral | mixed"
+
+  AgentThesisResult:
+    run_id: int
+    generated_at: datetime
+    quant_interpretation: QuantInterpretation
+    risk_assessment: "RiskAssessment | null"
+    strategy_suggestion: "StrategySuggestion | null"
+    investment_thesis: InvestmentThesis
+
+llm_client:
+  description: >
+    Provider-agnostic interface (agentic_options_reporter.thesis.llm_client
+    .LlmClient), the same dependency-injection pattern as
+    data.market_data.MarketDataProvider. Agents depend on this interface,
+    never on a concrete provider SDK, so a different provider can be
+    substituted without touching agent code.
+  interface:
+    complete(system_prompt: str, user_prompt: str) -> str
+  default_implementation: AnthropicLlmClient (agentic_options_reporter.thesis.llm_client)
+  response_format: >
+    Agents instruct the model to respond with a single JSON object
+    matching its output model and parse it via
+    thesis.parsing.extract_json + Pydantic validation. A parse/validation
+    failure raises ThesisGenerationError; agents do not silently fall
+    back to fabricated values.

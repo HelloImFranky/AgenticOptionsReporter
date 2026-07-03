@@ -19,11 +19,13 @@ from agentic_options_reporter.frontend.formatting import (
     CANDIDATE_COLUMNS,
     RUN_COLUMNS,
     candidates_to_rows,
+    consensus_tone,
     format_indicator_summary,
     format_recommendation,
     format_trend_summary,
     format_volume_summary,
     recommendation_tone,
+    risk_level_tone,
     runs_to_rows,
     trend_tone,
 )
@@ -46,6 +48,39 @@ _TREND_ICONS = {
 
 def _tone_colors(tone: str) -> tuple[str, str]:
     return _TONE_COLORS.get(tone, _TONE_COLORS["neutral"])
+
+
+def _pill(text: str, tone: str) -> ft.Container:
+    color, _ = _tone_colors(tone)
+    return ft.Container(
+        content=ft.Text(text, size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+        bgcolor=color,
+        border_radius=20,
+        padding=ft.padding.symmetric(vertical=4, horizontal=12),
+    )
+
+
+def _chip(text: str) -> ft.Container:
+    return ft.Container(
+        content=ft.Text(text, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        border_radius=8,
+        padding=ft.padding.symmetric(vertical=4, horizontal=10),
+    )
+
+
+def _bullet_list(items: list[str]) -> ft.Column:
+    return ft.Column(
+        [
+            ft.Row(
+                [ft.Text("•", size=12, color=ft.Colors.ON_SURFACE_VARIANT), ft.Text(item, size=12, expand=True)],
+                spacing=6,
+            )
+            for item in items
+        ],
+        spacing=4,
+        tight=True,
+    )
 
 
 def _card(*controls: ft.Control, padding: int = 20, spacing: int = 12) -> ft.Card:
@@ -115,6 +150,8 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         label="Expiration (optional)", hint_text="YYYY-MM-DD", width=200,
         border_radius=10, text_size=14,
     )
+
+    current_run_id: dict[str, int | None] = {"value": None}
 
     progress = ft.ProgressRing(visible=False, width=18, height=18, stroke_width=2)
     analyze_button = ft.ElevatedButton(
@@ -230,8 +267,133 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
     )
     candidates_table.visible = False
 
+    # ---- results: investment thesis (agent pipeline) -----------------
+    thesis_progress = ft.ProgressRing(visible=False, width=18, height=18, stroke_width=2)
+    thesis_button = ft.ElevatedButton(
+        "Generate investment thesis",
+        icon=ft.Icons.AUTO_AWESOME_OUTLINED,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+    )
+    thesis_error_banner = ft.Container(
+        visible=False,
+        bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.RED),
+        border_radius=10,
+        padding=12,
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED_700, size=18),
+                ft.Text("", color=ft.Colors.RED_700, size=13, expand=True),
+            ],
+            spacing=8,
+        ),
+    )
+
+    consensus_badge = ft.Container(visible=False)
+    thesis_text = ft.Text("", size=13, selectable=True)
+    quant_narrative_text = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True)
+    quant_factors_row = ft.Row([], wrap=True, spacing=6)
+    risk_badge = ft.Container(visible=False)
+    risk_concerns_column = ft.Column([])
+    risk_sizing_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, italic=True)
+    strategy_name_text = ft.Text("", size=13, weight=ft.FontWeight.W_600)
+    strategy_rationale_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+
+    thesis_card = ft.Column(
+        [
+            _card(
+                ft.Row(
+                    [_section_title("Investment thesis", ft.Icons.AUTO_AWESOME_OUTLINED), consensus_badge],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                thesis_text,
+                ft.Divider(),
+                _section_title("Quant interpretation"),
+                quant_narrative_text,
+                quant_factors_row,
+                ft.Divider(),
+                ft.Row([_section_title("Risk assessment"), risk_badge], spacing=8),
+                risk_concerns_column,
+                risk_sizing_text,
+                ft.Divider(),
+                _section_title("Suggested strategy"),
+                strategy_name_text,
+                strategy_rationale_text,
+            ),
+        ],
+        visible=False,
+    )
+
+    def generate_thesis(_: ft.ControlEvent) -> None:
+        if current_run_id["value"] is None:
+            return
+        thesis_error_banner.visible = False
+        thesis_progress.visible = True
+        thesis_button.disabled = True
+        page.update()
+
+        try:
+            result = client.generate_thesis(current_run_id["value"], regenerate=True)
+        except ApiError as exc:
+            thesis_progress.visible = False
+            thesis_button.disabled = False
+            thesis_error_banner.content.controls[1].value = str(exc)
+            thesis_error_banner.visible = True
+            page.update()
+            return
+
+        quant = result["quant_interpretation"]
+        risk = result.get("risk_assessment")
+        strategy = result.get("strategy_suggestion")
+        investment_thesis = result["investment_thesis"]
+
+        tone = consensus_tone(investment_thesis.get("consensus", ""))
+        consensus_badge.content = ft.Text(
+            investment_thesis.get("consensus", "—").upper(), size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+        )
+        consensus_badge.bgcolor = _tone_colors(tone)[0]
+        consensus_badge.border_radius = 20
+        consensus_badge.padding = ft.padding.symmetric(vertical=4, horizontal=12)
+        consensus_badge.visible = True
+        thesis_text.value = investment_thesis.get("thesis", "")
+
+        quant_narrative_text.value = quant.get("narrative", "")
+        quant_factors_row.controls = [_chip(factor) for factor in quant.get("key_factors", [])]
+
+        if risk is not None:
+            risk_tone = risk_level_tone(risk.get("risk_level", ""))
+            risk_badge.content = ft.Text(
+                risk.get("risk_level", "—").upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+            )
+            risk_badge.bgcolor = _tone_colors(risk_tone)[0]
+            risk_badge.border_radius = 20
+            risk_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+            risk_badge.visible = True
+            risk_concerns_column.controls = [_bullet_list(risk.get("concerns", []))]
+            risk_sizing_text.value = risk.get("position_sizing_note", "")
+        else:
+            risk_badge.visible = False
+            risk_concerns_column.controls = []
+            risk_sizing_text.value = "Not applicable — no candidate contract to assess."
+
+        if strategy is not None:
+            strategy_name_text.value = strategy.get("strategy", "")
+            strategy_rationale_text.value = strategy.get("rationale", "")
+        else:
+            strategy_name_text.value = "Not applicable"
+            strategy_rationale_text.value = "No candidate contract was available to build a strategy around."
+
+        thesis_progress.visible = False
+        thesis_button.disabled = False
+        thesis_button.text = "Regenerate investment thesis"
+        thesis_card.visible = True
+        page.update()
+
+    thesis_button.on_click = generate_thesis
+
+    thesis_trigger_row = ft.Row([thesis_button, thesis_progress], spacing=10)
+
     results_column = ft.Column(
-        [recommendation_card, stat_row, candidates_card],
+        [recommendation_card, stat_row, candidates_card, thesis_trigger_row, thesis_error_banner, thesis_card],
         spacing=16,
         visible=False,
     )
@@ -256,6 +418,9 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         set_error("")
         progress.visible = True
         analyze_button.disabled = True
+        thesis_card.visible = False
+        thesis_error_banner.visible = False
+        thesis_button.text = "Generate investment thesis"
         page.update()
 
         try:
@@ -296,6 +461,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         page.update()
 
     def _render_result(result: dict) -> None:
+        current_run_id["value"] = result["run_id"]
         recommendation = result["recommendation"]
         tone = recommendation_tone(recommendation.get("action", ""))
         color, _ = _tone_colors(tone)

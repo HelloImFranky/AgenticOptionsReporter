@@ -100,6 +100,64 @@ def test_get_run_builds_expected_path(monkeypatch):
     assert captured["url"] == "http://localhost:8000/runs/42"
 
 
+def test_generate_thesis_builds_expected_request(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, params=None, timeout=None):
+        captured["method"] = method
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse(payload={"run_id": 42})
+
+    monkeypatch.setattr(requests_module, "request", fake_request)
+    client = ApiClient()
+
+    client.generate_thesis(42)
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://localhost:8000/runs/42/thesis"
+    assert captured["params"] is None
+
+
+def test_generate_thesis_passes_regenerate_flag(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, params=None, timeout=None):
+        captured["params"] = params
+        return _FakeResponse(payload={"run_id": 42})
+
+    monkeypatch.setattr(requests_module, "request", fake_request)
+    client = ApiClient()
+
+    client.generate_thesis(42, regenerate=True)
+    assert captured["params"] == {"regenerate": True}
+
+
+def test_get_thesis_builds_expected_path(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, params=None, timeout=None):
+        captured["method"] = method
+        captured["url"] = url
+        return _FakeResponse(payload={"run_id": 42})
+
+    monkeypatch.setattr(requests_module, "request", fake_request)
+    client = ApiClient()
+
+    client.get_thesis(42)
+    assert captured["method"] == "GET"
+    assert captured["url"] == "http://localhost:8000/runs/42/thesis"
+
+
+def test_generate_thesis_raises_api_error_on_conflict(monkeypatch):
+    def fake_request(method, url, params=None, timeout=None):
+        return _FakeResponse(status_code=409, text="already exists")
+
+    monkeypatch.setattr(requests_module, "request", fake_request)
+
+    with pytest.raises(ApiError):
+        ApiClient().generate_thesis(42)
+
+
 def test_request_raises_api_error_on_http_failure(monkeypatch):
     def fake_request(method, url, params=None, timeout=None):
         return _FakeResponse(status_code=404, text="not found")
