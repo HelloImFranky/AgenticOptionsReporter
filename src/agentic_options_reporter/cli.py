@@ -1,8 +1,8 @@
 """Command-line client for the AgenticOptionsReporter API.
 
 Talks to a running instance of `agentic_options_reporter.main:app` over
-HTTP using `requests` (not shell `curl`), with `argparse` handling
-command-line parsing. Contract mirrors specs/api.yaml.
+HTTP via `api_client.ApiClient`, with `argparse` handling command-line
+parsing. Contract mirrors specs/api.yaml.
 """
 
 from __future__ import annotations
@@ -12,54 +12,23 @@ import json
 import sys
 from typing import Any
 
-import requests
-
-DEFAULT_BASE_URL = "http://localhost:8000"
-DEFAULT_TIMEOUT_SECONDS = 30
+from agentic_options_reporter.api_client import DEFAULT_BASE_URL, ApiClient, ApiError
 
 
-class ApiError(RuntimeError):
-    """Raised when the API cannot be reached or returns an error status."""
+def cmd_health(client: ApiClient, args: argparse.Namespace) -> Any:
+    return client.health()
 
 
-def _request(
-    method: str,
-    base_url: str,
-    path: str,
-    params: dict[str, Any] | None = None,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-) -> Any:
-    url = f"{base_url.rstrip('/')}{path}"
-    try:
-        response = requests.request(method, url, params=params, timeout=timeout)
-    except requests.exceptions.RequestException as exc:
-        raise ApiError(f"Request to {url} failed: {exc}") from exc
-
-    if not response.ok:
-        raise ApiError(f"{method} {url} returned {response.status_code}: {response.text}")
-    return response.json()
+def cmd_analyze(client: ApiClient, args: argparse.Namespace) -> Any:
+    return client.analyze(args.symbol, lookback_days=args.lookback_days, expiration=args.expiration)
 
 
-def cmd_health(args: argparse.Namespace) -> Any:
-    return _request("GET", args.base_url, "/health")
+def cmd_runs(client: ApiClient, args: argparse.Namespace) -> Any:
+    return client.list_runs(symbol=args.symbol, limit=args.limit)
 
 
-def cmd_analyze(args: argparse.Namespace) -> Any:
-    params: dict[str, Any] = {"lookback_days": args.lookback_days}
-    if args.expiration:
-        params["expiration"] = args.expiration
-    return _request("GET", args.base_url, f"/analyze/{args.symbol}", params=params)
-
-
-def cmd_runs(args: argparse.Namespace) -> Any:
-    params: dict[str, Any] = {"limit": args.limit}
-    if args.symbol:
-        params["symbol"] = args.symbol
-    return _request("GET", args.base_url, "/runs", params=params)
-
-
-def cmd_run(args: argparse.Namespace) -> Any:
-    return _request("GET", args.base_url, f"/runs/{args.run_id}")
+def cmd_run(client: ApiClient, args: argparse.Namespace) -> Any:
+    return client.get_run(args.run_id)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,9 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    client = ApiClient(base_url=args.base_url)
 
     try:
-        result = args.func(args)
+        result = args.func(client, args)
     except ApiError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

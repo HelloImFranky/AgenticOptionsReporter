@@ -42,6 +42,16 @@ poetry run agentic-options-reporter run 1
 poetry run agentic-options-reporter --base-url http://localhost:8000 health
 ```
 
+Or launch the Flet front end (a desktop window by default; see
+`src/agentic_options_reporter/frontend/app.py`), which drives the same API
+through the same `ApiClient` the CLI uses:
+
+```bash
+poetry run agentic-options-reporter-ui
+poetry run agentic-options-reporter-ui --web --port 8550   # serve in a browser instead
+poetry run agentic-options-reporter-ui --base-url http://localhost:8000
+```
+
 ## Testing
 
 ```bash
@@ -51,4 +61,5 @@ poetry run pytest
 ## Tooling
 
 Python 3.13 · FastAPI · Pydantic · SQLAlchemy · pandas/numpy/scipy/ta ·
-yfinance · Plotly/Matplotlib · pytest · Poetry · Docker · GitHub Actions
+yfinance · Plotly/Matplotlib · requests · Flet · pytest · Poetry · Docker ·
+GitHub Actions

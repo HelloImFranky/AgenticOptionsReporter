@@ -63,15 +63,18 @@ narrated in `docs/workflow.md`. At a high level:
 | Workflow | `src/agentic_options_reporter/workflow.py` | Orchestrates the pipeline end-to-end |
 | Persistence | `src/agentic_options_reporter/persistence.py` | Writes results via SQLAlchemy models |
 | API | `src/agentic_options_reporter/main.py` | FastAPI surface over the workflow |
-| CLI client | `src/agentic_options_reporter/cli.py` | `requests`-based HTTP client with an `argparse` command interface for the API |
+| API client | `src/agentic_options_reporter/api_client.py` | Shared `requests`-based HTTP client used by both the CLI and the Flet front end |
+| CLI client | `src/agentic_options_reporter/cli.py` | `argparse` command interface over `api_client.ApiClient` |
+| Front end | `src/agentic_options_reporter/frontend/` | Flet UI (`app.py`) over `api_client.ApiClient`, with display formatting isolated in `formatting.py` for testability |
 
 ## Tooling
 
 - Language: Python 3.13
 - Frameworks: FastAPI, Pydantic, SQLAlchemy, asyncio
 - Data: pandas, numpy, scipy, ta, yfinance
-- HTTP client: requests (CLI only; server-side data access goes through `MarketDataProvider`)
+- HTTP client: requests, shared by the CLI and front end (server-side data access goes through `MarketDataProvider`, not `api_client`)
 - CLI: argparse, exposed as the `agentic-options-reporter` console script
+- Front end: Flet, exposed as the `agentic-options-reporter-ui` console script
 - Visualization: Plotly, Matplotlib
 - Testing: pytest
 - Packaging: Poetry
