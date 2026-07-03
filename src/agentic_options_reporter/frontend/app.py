@@ -83,6 +83,34 @@ def _bullet_list(items: list[str]) -> ft.Column:
     )
 
 
+def _agent_message(name: str, icon: str, color: str, *body: ft.Control) -> ft.Row:
+    avatar = ft.Container(
+        content=ft.Icon(icon, size=16, color=ft.Colors.WHITE),
+        bgcolor=color,
+        border_radius=100,
+        width=30,
+        height=30,
+        alignment=ft.alignment.center,
+    )
+    return ft.Row(
+        [
+            avatar,
+            ft.Column(
+                [ft.Text(name, size=13, weight=ft.FontWeight.BOLD), *body],
+                spacing=4,
+                tight=True,
+                expand=True,
+            ),
+        ],
+        spacing=12,
+        vertical_alignment=ft.CrossAxisAlignment.START,
+    )
+
+
+def _skipped_message(reason: str) -> ft.Text:
+    return ft.Text(reason, size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT)
+
+
 def _card(*controls: ft.Control, padding: int = 20, spacing: int = 12) -> ft.Card:
     return ft.Card(
         elevation=1,
@@ -152,6 +180,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
     )
 
     current_run_id: dict[str, int | None] = {"value": None}
+    last_recommendation: dict[str, object] = {"action": "—", "confidence": 0.0}
 
     progress = ft.ProgressRing(visible=False, width=18, height=18, stroke_width=2)
     analyze_button = ft.ElevatedButton(
@@ -267,133 +296,8 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
     )
     candidates_table.visible = False
 
-    # ---- results: investment thesis (agent pipeline) -----------------
-    thesis_progress = ft.ProgressRing(visible=False, width=18, height=18, stroke_width=2)
-    thesis_button = ft.ElevatedButton(
-        "Generate investment thesis",
-        icon=ft.Icons.AUTO_AWESOME_OUTLINED,
-        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
-    )
-    thesis_error_banner = ft.Container(
-        visible=False,
-        bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.RED),
-        border_radius=10,
-        padding=12,
-        content=ft.Row(
-            [
-                ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED_700, size=18),
-                ft.Text("", color=ft.Colors.RED_700, size=13, expand=True),
-            ],
-            spacing=8,
-        ),
-    )
-
-    consensus_badge = ft.Container(visible=False)
-    thesis_text = ft.Text("", size=13, selectable=True)
-    quant_narrative_text = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True)
-    quant_factors_row = ft.Row([], wrap=True, spacing=6)
-    risk_badge = ft.Container(visible=False)
-    risk_concerns_column = ft.Column([])
-    risk_sizing_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, italic=True)
-    strategy_name_text = ft.Text("", size=13, weight=ft.FontWeight.W_600)
-    strategy_rationale_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
-
-    thesis_card = ft.Column(
-        [
-            _card(
-                ft.Row(
-                    [_section_title("Investment thesis", ft.Icons.AUTO_AWESOME_OUTLINED), consensus_badge],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                thesis_text,
-                ft.Divider(),
-                _section_title("Quant interpretation"),
-                quant_narrative_text,
-                quant_factors_row,
-                ft.Divider(),
-                ft.Row([_section_title("Risk assessment"), risk_badge], spacing=8),
-                risk_concerns_column,
-                risk_sizing_text,
-                ft.Divider(),
-                _section_title("Suggested strategy"),
-                strategy_name_text,
-                strategy_rationale_text,
-            ),
-        ],
-        visible=False,
-    )
-
-    def generate_thesis(_: ft.ControlEvent) -> None:
-        if current_run_id["value"] is None:
-            return
-        thesis_error_banner.visible = False
-        thesis_progress.visible = True
-        thesis_button.disabled = True
-        page.update()
-
-        try:
-            result = client.generate_thesis(current_run_id["value"], regenerate=True)
-        except ApiError as exc:
-            thesis_progress.visible = False
-            thesis_button.disabled = False
-            thesis_error_banner.content.controls[1].value = str(exc)
-            thesis_error_banner.visible = True
-            page.update()
-            return
-
-        quant = result["quant_interpretation"]
-        risk = result.get("risk_assessment")
-        strategy = result.get("strategy_suggestion")
-        investment_thesis = result["investment_thesis"]
-
-        tone = consensus_tone(investment_thesis.get("consensus", ""))
-        consensus_badge.content = ft.Text(
-            investment_thesis.get("consensus", "—").upper(), size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
-        )
-        consensus_badge.bgcolor = _tone_colors(tone)[0]
-        consensus_badge.border_radius = 20
-        consensus_badge.padding = ft.padding.symmetric(vertical=4, horizontal=12)
-        consensus_badge.visible = True
-        thesis_text.value = investment_thesis.get("thesis", "")
-
-        quant_narrative_text.value = quant.get("narrative", "")
-        quant_factors_row.controls = [_chip(factor) for factor in quant.get("key_factors", [])]
-
-        if risk is not None:
-            risk_tone = risk_level_tone(risk.get("risk_level", ""))
-            risk_badge.content = ft.Text(
-                risk.get("risk_level", "—").upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
-            )
-            risk_badge.bgcolor = _tone_colors(risk_tone)[0]
-            risk_badge.border_radius = 20
-            risk_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
-            risk_badge.visible = True
-            risk_concerns_column.controls = [_bullet_list(risk.get("concerns", []))]
-            risk_sizing_text.value = risk.get("position_sizing_note", "")
-        else:
-            risk_badge.visible = False
-            risk_concerns_column.controls = []
-            risk_sizing_text.value = "Not applicable — no candidate contract to assess."
-
-        if strategy is not None:
-            strategy_name_text.value = strategy.get("strategy", "")
-            strategy_rationale_text.value = strategy.get("rationale", "")
-        else:
-            strategy_name_text.value = "Not applicable"
-            strategy_rationale_text.value = "No candidate contract was available to build a strategy around."
-
-        thesis_progress.visible = False
-        thesis_button.disabled = False
-        thesis_button.text = "Regenerate investment thesis"
-        thesis_card.visible = True
-        page.update()
-
-    thesis_button.on_click = generate_thesis
-
-    thesis_trigger_row = ft.Row([thesis_button, thesis_progress], spacing=10)
-
     results_column = ft.Column(
-        [recommendation_card, stat_row, candidates_card, thesis_trigger_row, thesis_error_banner, thesis_card],
+        [recommendation_card, stat_row, candidates_card],
         spacing=16,
         visible=False,
     )
@@ -418,9 +322,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         set_error("")
         progress.visible = True
         analyze_button.disabled = True
-        thesis_card.visible = False
-        thesis_error_banner.visible = False
-        thesis_button.text = "Generate investment thesis"
+        reset_agents_tab()
         page.update()
 
         try:
@@ -463,6 +365,11 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
     def _render_result(result: dict) -> None:
         current_run_id["value"] = result["run_id"]
         recommendation = result["recommendation"]
+        last_recommendation["action"] = recommendation.get("action", "—")
+        last_recommendation["confidence"] = recommendation.get("confidence") or 0.0
+        agents_no_run_placeholder.visible = False
+        agents_ready_container.visible = True
+
         tone = recommendation_tone(recommendation.get("action", ""))
         color, _ = _tone_colors(tone)
         action_badge.content.value = recommendation.get("action", "—")
@@ -518,6 +425,236 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
                 results_placeholder,
                 results_column,
             ],
+            spacing=16,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        ),
+        expand=True,
+    )
+
+    # ---- agents tab: final output + agent conversation ------------------
+    agents_no_run_placeholder = ft.Container(
+        padding=40,
+        alignment=ft.alignment.center,
+        content=ft.Column(
+            [
+                ft.Icon(ft.Icons.FORUM_OUTLINED, size=40, color=ft.Colors.OUTLINE),
+                ft.Text(
+                    "Run an analysis in the Analyze tab first, then generate the "
+                    "agent pipeline's interpretation of it here.",
+                    size=13,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=10,
+        ),
+    )
+
+    thesis_progress = ft.ProgressRing(visible=False, width=18, height=18, stroke_width=2)
+    thesis_button = ft.ElevatedButton(
+        "Generate investment thesis",
+        icon=ft.Icons.AUTO_AWESOME_OUTLINED,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+    )
+    thesis_error_banner = ft.Container(
+        visible=False,
+        bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.RED),
+        border_radius=10,
+        padding=12,
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED_700, size=18),
+                ft.Text("", color=ft.Colors.RED_700, size=13, expand=True),
+            ],
+            spacing=8,
+        ),
+    )
+
+    # -- final output: a compact, scannable verdict --
+    final_action_badge = ft.Container(visible=False)
+    final_consensus_badge = ft.Container(visible=False)
+    final_confidence_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+    final_output_card = ft.Column(
+        [
+            _card(
+                _section_title("Final output", ft.Icons.FLAG_OUTLINED),
+                ft.Row(
+                    [final_action_badge, final_consensus_badge, final_confidence_text],
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ),
+        ],
+        visible=False,
+    )
+
+    # -- agent conversation: sequential message transcript --
+    quant_narrative_text = ft.Text("", size=13, selectable=True)
+    quant_factors_row = ft.Row([], wrap=True, spacing=6)
+    quant_message_body = ft.Column([quant_narrative_text, quant_factors_row], spacing=8, tight=True)
+
+    risk_badge = ft.Container(visible=False)
+    risk_concerns_column = ft.Column([], spacing=4, tight=True)
+    risk_sizing_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, italic=True)
+    risk_message_body = ft.Column(
+        [risk_badge, risk_concerns_column, risk_sizing_text], spacing=8, tight=True
+    )
+
+    strategy_name_text = ft.Text("", size=13, weight=ft.FontWeight.W_600, selectable=True)
+    strategy_rationale_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+    strategy_message_body = ft.Column(
+        [strategy_name_text, strategy_rationale_text], spacing=4, tight=True
+    )
+
+    thesis_consensus_badge = ft.Container(visible=False)
+    thesis_text = ft.Text("", size=13, selectable=True)
+    thesis_message_body = ft.Column([thesis_consensus_badge, thesis_text], spacing=8, tight=True)
+
+    conversation_card = ft.Column(
+        [
+            _card(
+                _section_title("Agent conversation", ft.Icons.FORUM_OUTLINED),
+                _agent_message("Quant Interpreter", ft.Icons.QUERY_STATS_ROUNDED, ft.Colors.INDIGO, quant_message_body),
+                ft.Divider(),
+                _agent_message("Risk Challenger", ft.Icons.SHIELD_OUTLINED, ft.Colors.DEEP_ORANGE, risk_message_body),
+                ft.Divider(),
+                _agent_message(
+                    "Options Strategist", ft.Icons.LIGHTBULB_OUTLINE, ft.Colors.TEAL, strategy_message_body
+                ),
+                ft.Divider(),
+                _agent_message(
+                    "Investment Thesis", ft.Icons.AUTO_AWESOME_OUTLINED, ft.Colors.PURPLE, thesis_message_body
+                ),
+                spacing=16,
+            ),
+        ],
+        visible=False,
+    )
+
+    def reset_agents_tab() -> None:
+        thesis_error_banner.visible = False
+        thesis_button.text = "Generate investment thesis"
+        final_output_card.visible = False
+        conversation_card.visible = False
+
+    def generate_thesis(_: ft.ControlEvent) -> None:
+        if current_run_id["value"] is None:
+            return
+        thesis_error_banner.visible = False
+        thesis_progress.visible = True
+        thesis_button.disabled = True
+        page.update()
+
+        try:
+            result = client.generate_thesis(current_run_id["value"], regenerate=True)
+        except ApiError as exc:
+            thesis_progress.visible = False
+            thesis_button.disabled = False
+            thesis_error_banner.content.controls[1].value = str(exc)
+            thesis_error_banner.visible = True
+            page.update()
+            return
+
+        quant = result["quant_interpretation"]
+        risk = result.get("risk_assessment")
+        strategy = result.get("strategy_suggestion")
+        investment_thesis = result["investment_thesis"]
+
+        # -- final output verdict --
+        final_action_badge.content = ft.Text(
+            last_recommendation["action"], size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+        )
+        final_action_badge.bgcolor = _tone_colors(recommendation_tone(last_recommendation["action"]))[0]
+        final_action_badge.border_radius = 20
+        final_action_badge.padding = ft.padding.symmetric(vertical=6, horizontal=14)
+        final_action_badge.visible = True
+
+        consensus = investment_thesis.get("consensus", "—")
+        consensus_color = _tone_colors(consensus_tone(consensus))[0]
+        final_consensus_badge.content = ft.Text(
+            f"AGENTS: {consensus.upper()}", size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+        )
+        final_consensus_badge.bgcolor = consensus_color
+        final_consensus_badge.border_radius = 20
+        final_consensus_badge.padding = ft.padding.symmetric(vertical=6, horizontal=14)
+        final_consensus_badge.visible = True
+
+        final_confidence_text.value = f"{last_recommendation['confidence']:.0%} confidence"
+        final_output_card.visible = True
+
+        # -- conversation transcript --
+        quant_narrative_text.value = quant.get("narrative", "")
+        quant_factors_row.controls = [_chip(factor) for factor in quant.get("key_factors", [])]
+
+        if risk is not None:
+            risk_tone = risk_level_tone(risk.get("risk_level", ""))
+            risk_badge.content = ft.Text(
+                risk.get("risk_level", "—").upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+            )
+            risk_badge.bgcolor = _tone_colors(risk_tone)[0]
+            risk_badge.border_radius = 20
+            risk_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+            risk_badge.visible = True
+            risk_concerns_column.controls = [_bullet_list(risk.get("concerns", []))]
+            risk_sizing_text.value = risk.get("position_sizing_note", "")
+        else:
+            risk_badge.visible = False
+            risk_concerns_column.controls = [_skipped_message("Skipped — no candidate contract to assess.")]
+            risk_sizing_text.value = ""
+
+        if strategy is not None:
+            strategy_name_text.value = strategy.get("strategy", "")
+            strategy_rationale_text.value = strategy.get("rationale", "")
+            strategy_message_body.controls = [strategy_name_text, strategy_rationale_text]
+        else:
+            strategy_message_body.controls = [
+                _skipped_message("Skipped — no candidate contract to build a strategy around.")
+            ]
+
+        thesis_consensus_badge.content = ft.Text(
+            consensus.upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+        )
+        thesis_consensus_badge.bgcolor = consensus_color
+        thesis_consensus_badge.border_radius = 20
+        thesis_consensus_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+        thesis_consensus_badge.visible = True
+        thesis_text.value = investment_thesis.get("thesis", "")
+
+        conversation_card.visible = True
+
+        thesis_progress.visible = False
+        thesis_button.disabled = False
+        thesis_button.text = "Regenerate investment thesis"
+        page.update()
+
+    thesis_button.on_click = generate_thesis
+
+    agents_ready_container = ft.Column(
+        [
+            _card(
+                _section_title("Investment thesis pipeline", ft.Icons.AUTO_AWESOME_OUTLINED),
+                ft.Text(
+                    "Runs Quant Interpreter, Risk Challenger, Options Strategist, and "
+                    "Investment Thesis over the analysis above.",
+                    size=12,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+                ft.Row([thesis_button, thesis_progress], spacing=10),
+                thesis_error_banner,
+            ),
+            final_output_card,
+            conversation_card,
+        ],
+        spacing=16,
+        visible=False,
+    )
+
+    agents_tab = ft.Container(
+        padding=20,
+        content=ft.Column(
+            [agents_no_run_placeholder, agents_ready_container],
             spacing=16,
             scroll=ft.ScrollMode.AUTO,
             expand=True,
@@ -668,6 +805,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             expand=True,
             tabs=[
                 ft.Tab(text="Analyze", icon=ft.Icons.SEARCH, content=analyze_tab),
+                ft.Tab(text="Agents", icon=ft.Icons.FORUM_OUTLINED, content=agents_tab),
                 ft.Tab(text="History", icon=ft.Icons.HISTORY, content=history_tab),
             ],
         )

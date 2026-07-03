@@ -63,8 +63,23 @@ GET  /runs/{run_id}/thesis             # fetch a previously generated one
 ```
 
 This keeps `/analyze` fast, cheap, and deterministic-only; a client (the
-CLI's `thesis` subcommand, or the Flet UI's "Generate investment thesis"
-button) calls the thesis endpoint afterward, once it has a `run_id`.
+CLI's `thesis` subcommand, or the Flet UI's Agents tab) calls the thesis
+endpoint afterward, once it has a `run_id`.
+
+## Agents tab (Flet UI)
+
+`frontend/app.py`'s Agents tab presents `AgentThesisResult` as two
+sections rather than one undifferentiated blob:
+
+- **Final output** — a compact verdict row: the deterministic
+  recommendation's action badge, the agents' consensus badge, and the
+  recommendation's confidence. This is the "read this and decide" part.
+- **Agent conversation** — each agent shown as a labeled message in
+  pipeline order (Quant Interpreter, Risk Challenger, Options Strategist,
+  Investment Thesis), so the reasoning that produced the final output is
+  inspectable rather than opaque. An agent skipped by the
+  no-candidate short-circuit renders as a muted "Skipped — ..." message
+  in its slot instead of being silently omitted.
 
 ## LLM access
 
