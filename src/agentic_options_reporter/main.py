@@ -233,6 +233,13 @@ def generate_thesis(
                 detail=f"Run {run_id} already has a thesis; pass regenerate=true to replace it",
             )
 
+        if request.provider.strip().lower() == "auto" and request.api_key:
+            raise HTTPException(
+                status_code=422,
+                detail="api_key cannot be combined with provider='auto'; choose a specific "
+                "provider to use a custom key.",
+            )
+
         analysis_result = _to_analysis_result(run)
 
         # settings.llm_model is only meaningful for the default (anthropic)

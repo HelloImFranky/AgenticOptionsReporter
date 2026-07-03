@@ -70,7 +70,7 @@ class ApiClient:
         self,
         run_id: int,
         regenerate: bool = False,
-        provider: str = "anthropic",
+        provider: str = "auto",
         api_key: str | None = None,
     ) -> dict[str, Any]:
         body = {"provider": provider, "api_key": api_key, "regenerate": regenerate}

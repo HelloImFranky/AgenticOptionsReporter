@@ -99,8 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     thesis_parser.add_argument(
         "--provider",
-        default="anthropic",
-        help="LLM provider to use: anthropic or openai (default: anthropic)",
+        default="auto",
+        help=(
+            "LLM provider to use: auto (fails over across every configured "
+            "provider), anthropic, openai, groq, gemini, deepseek, or "
+            "openrouter (default: auto)"
+        ),
     )
     thesis_parser.add_argument(
         "--api-key",

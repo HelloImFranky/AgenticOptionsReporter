@@ -1,0 +1,143 @@
+schema: agentic_options_reporter_llm_providers
+version: 1
+description: >
+  Multi-provider LLM architecture for the investment-thesis agent
+  pipeline (specs/agents.yaml). Relying on a single LLM provider means
+  one quota exhaustion, outage, or rate limit blocks every thesis
+  generation. `LlmRouter` (agentic_options_reporter.thesis.llm_client)
+  composes multiple provider clients into one `LlmClient`, trying them
+  in priority order and failing over to the next on a transient error.
+  Agents never see which provider actually answered — they only depend
+  on the `LlmClient.complete(system_prompt, user_prompt) -> str`
+  interface, same as before this was added.
+
+core_principles:
+  provider_agnostic: >
+    Agents call llm_client.complete(...) only. No agent module imports
+    an SDK (anthropic, openai, google-genai) directly.
+  automatic_failover: >
+    provider="auto" (the default) builds an LlmRouter from every
+    provider with a configured API key. A retryable failure (rate
+    limit, quota exhaustion, timeout, or a 5xx/network failure) advances
+    to the next configured provider; no agent code changes when a
+    provider is added, removed, or reordered.
+  explicit_override: >
+    A named provider (e.g. "openai") bypasses the router entirely and
+    talks to that one provider only — used by the Agents tab's
+    provider dropdown + custom API key fields for one-off testing.
+    Combining an explicit api_key with provider="auto" is rejected
+    (422): there's no single provider for a custom key to apply to.
+  configuration_driven_priority: >
+    Fallback order is read from AOR_LLM_FALLBACK_ORDER (comma-separated
+    provider names), defaulting to
+    anthropic,openai,groq,gemini,deepseek,openrouter. Reordering or
+    dropping a provider is a config change, not a code change.
+
+module: agentic_options_reporter.thesis.llm_client
+
+providers:
+  - name: anthropic
+    implementation: AnthropicLlmClient
+    api_key_env_var: ANTHROPIC_API_KEY
+    default_model: claude-sonnet-5
+    sdk: anthropic
+  - name: openai
+    implementation: OpenAiLlmClient
+    api_key_env_var: OPENAI_API_KEY
+    default_model: gpt-4o-mini
+    sdk: openai
+  - name: groq
+    implementation: GroqLlmClient
+    api_key_env_var: GROQ_API_KEY
+    default_model: llama-3.3-70b-versatile
+    sdk: openai (OpenAI-compatible; base_url=https://api.groq.com/openai/v1)
+  - name: deepseek
+    implementation: DeepSeekLlmClient
+    api_key_env_var: DEEPSEEK_API_KEY
+    default_model: deepseek-reasoner
+    sdk: openai (OpenAI-compatible; base_url=https://api.deepseek.com)
+  - name: openrouter
+    implementation: OpenRouterLlmClient
+    api_key_env_var: OPENROUTER_API_KEY
+    default_model: deepseek/deepseek-r1
+    sdk: openai (OpenAI-compatible; base_url=https://openrouter.ai/api/v1)
+  - name: gemini
+    implementation: GeminiLlmClient
+    api_key_env_var: GEMINI_API_KEY
+    default_model: gemini-2.5-pro
+    sdk: google-genai
+
+deferred:
+  - name: ollama
+    reason: >
+      Local/keyless provider for offline development, listed in the
+      original design doc as optional. Out of scope: this redesign
+      targets production reliability (provider outages/quota), not
+      local development, which is a separate concern.
+  - name: provider_health_metrics_export
+    reason: >
+      The design doc calls for latency/failure/success-rate metrics
+      exported to Prometheus/Grafana. No metrics backend exists in this
+      project yet (see specs/providers.yaml production_infrastructure,
+      deferred for the same reason). LlmRouter's failover is currently
+      observable only via the LlmError message it raises when every
+      provider fails, which lists each attempted provider's error.
+  - name: agent_profiles
+    reason: >
+      Per-agent-type provider preference (e.g. research agents prefer
+      Gemini, coding agents prefer Groq). Not applicable yet: every
+      agent in this pipeline (quant/financial/news/macro/risk/strategy/
+      thesis) shares one LlmClient instance per request today. Would
+      require passing a task-type hint through run_thesis_pipeline.
+  - name: semantic_caching
+    reason: Optional per the design doc; no caching backend (Redis) exists in this project yet.
+
+error_normalization:
+  description: >
+    Every provider's SDK-specific exceptions are caught and re-raised as
+    one of the LlmError subclasses below, so LlmRouter (and any caller)
+    never has to know which SDK actually failed.
+  hierarchy:
+    LlmError: Base class; also raised directly for non-SDK failures (e.g. empty response text).
+    LlmRateLimited: HTTP 429, not attributed to quota exhaustion specifically.
+    LlmQuotaExceeded: HTTP 429 whose message indicates account quota/budget exhaustion (subclass of LlmRateLimited).
+    LlmTimeout: Request timed out.
+    LlmUnavailable: 5xx response or a network/connection failure.
+    LlmBadRequest: Provider rejected the request itself (malformed prompt, unsupported model, ...).
+    LlmAuthenticationError: Provider rejected the configured API key.
+  retryable_errors: [LlmRateLimited, LlmQuotaExceeded, LlmTimeout, LlmUnavailable]
+  non_retryable_errors:
+    LlmBadRequest: >
+      Every other provider would reject the same malformed request for
+      the same reason; failing over would hide a real bug behind a
+      slower, more confusing error instead of surfacing it.
+    LlmAuthenticationError: >
+      A bad key is a configuration problem specific to that provider,
+      not the kind of transient blip failover exists for. (A provider
+      with no key configured at all is handled earlier and separately —
+      LlmRouter simply excludes it when building the priority list,
+      the same as the optional data providers in specs/providers.yaml.)
+
+retry_strategy: >
+  LlmRouter.complete() iterates its configured clients in priority
+  order. On a retryable error it records the failure and tries the next
+  client; on success it returns immediately; on a non-retryable error it
+  raises immediately without trying further providers. If every
+  provider fails (or none were configured), it raises LlmError listing
+  every attempted provider's failure message.
+
+api_contract:
+  ThesisGenerationRequest.provider: 'str = "auto"'
+  behavior:
+    auto: >
+      Builds LlmRouter from AOR_LLM_FALLBACK_ORDER, skipping any
+      provider without a configured API key. api_key must be null.
+    "<provider name>": >
+      Bypasses the router; constructs that one provider's client,
+      optionally with a caller-supplied api_key (never logged or
+      persisted — see specs/agents.yaml llm_client.api_key_precedence).
+  errors:
+    "provider=auto + api_key set": 422 (ambiguous — no single provider for the key to apply to)
+    "unsupported provider name": 502 (LlmError, same as any other LLM failure)
+    "no provider configured for auto (empty router)": 502 (LlmError)
+    "all configured providers fail at call time": 502 (LlmError, message lists each provider's failure)

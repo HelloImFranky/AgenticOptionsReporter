@@ -129,31 +129,60 @@ sections rather than one undifferentiated blob:
   or a research agent whose provider isn't configured, renders as a muted
   "Skipped — ..." message in its slot instead of being silently omitted.
 
-Above both sections, a **Provider** dropdown (Anthropic/OpenAI) and a
-password-masked **API key** field let a user supply their own key for one
-generation without touching server configuration — the key never leaves
-that single request (see LLM access below).
+Above both sections, a **Provider** dropdown (Auto, plus every named
+provider) and a password-masked **API key** field let a user override
+the default behavior for one generation. Auto is the default and
+recommended choice — it fails over across every configured provider; the
+API key field is disabled while Auto is selected since there's no single
+provider for a custom key to apply to. Picking a named provider enables
+the field and forces that one provider, without touching server
+configuration — the key never leaves that single request (see LLM access
+below).
 
 ## LLM access
 
 `thesis.llm_client.LlmClient` is a small interface
 (`complete(system_prompt, user_prompt) -> str`) — the same
 dependency-injection pattern as `data.market_data.MarketDataProvider`.
-`build_llm_client(provider, api_key=None, model=None, max_tokens=1024)`
-selects a concrete implementation by name:
+`build_llm_client(provider="auto", api_key=None, model=None, max_tokens=1024)`
+either returns one named provider's client, or — when `provider="auto"`,
+the default — an `LlmRouter` across every provider that has an API key
+configured. Full detail (provider registry, error normalization, retry
+strategy) is in `specs/llm_providers.yaml`; summary:
 
 | provider | implementation | default model | env var |
 |---|---|---|---|
-| `anthropic` (default) | `AnthropicLlmClient` | `claude-sonnet-5` | `ANTHROPIC_API_KEY` |
+| `anthropic` | `AnthropicLlmClient` | `claude-sonnet-5` | `ANTHROPIC_API_KEY` |
 | `openai` | `OpenAiLlmClient` | `gpt-4o-mini` | `OPENAI_API_KEY` |
+| `groq` | `GroqLlmClient` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| `gemini` | `GeminiLlmClient` | `gemini-2.5-pro` | `GEMINI_API_KEY` |
+| `deepseek` | `DeepSeekLlmClient` | `deepseek-reasoner` | `DEEPSEEK_API_KEY` |
+| `openrouter` | `OpenRouterLlmClient` | `deepseek/deepseek-r1` | `OPENROUTER_API_KEY` |
 
-An `api_key` passed to `build_llm_client` overrides the provider's
-environment variable for that call only. A different provider can be
-added later by implementing `LlmClient` and registering it in
-`llm_client._PROVIDERS`, without touching any agent module. The server's
-`AOR_LLM_MODEL` / `AOR_LLM_MAX_TOKENS` settings only apply to the default
-`anthropic` provider; other providers use their own built-in default
-model.
+### Automatic failover (`provider="auto"`)
+
+Relying on a single provider means one quota exhaustion, rate limit, or
+outage blocks every thesis generation. `provider="auto"` builds an
+`LlmRouter` from `AOR_LLM_FALLBACK_ORDER` (comma-separated provider
+names; defaults to `anthropic,openai,groq,gemini,deepseek,openrouter`),
+skipping any provider without a configured key. `LlmRouter.complete()`
+tries each configured client in order; a *retryable* failure (rate
+limit, quota exhaustion, timeout, or a 5xx/network failure) advances to
+the next provider, while a bad-request or authentication failure is
+raised immediately — another provider would reject the same malformed
+request identically, and a bad key is a config problem specific to that
+one provider, not the transient blip failover exists for. If every
+configured provider fails, `LlmRouter` raises `LlmError` listing each
+provider's failure. Agents never see any of this — they call the same
+`LlmClient.complete()` either way.
+
+A named provider (e.g. `openai`) still bypasses the router entirely —
+used by the Agents tab's provider dropdown + custom API key fields for
+one-off testing. `api_key` cannot be combined with `provider="auto"`
+(422): there's no single provider for a custom key to apply to. The
+server's `AOR_LLM_MODEL` / `AOR_LLM_MAX_TOKENS` settings only apply when
+the explicit `anthropic` provider is chosen; every other provider (and
+the router) uses its own built-in default model.
 
 Each agent instructs the model to respond with a single JSON object and
 validates it against a Pydantic model (`thesis/parsing.py`). A malformed
