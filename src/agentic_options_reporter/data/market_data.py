@@ -10,6 +10,7 @@ touching analysis code.
 
 from __future__ import annotations
 
+import math
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -135,8 +136,8 @@ class YFinanceProvider(MarketDataProvider):
                         bid=float(row.get("bid") or 0.0),
                         ask=float(row.get("ask") or 0.0),
                         last_price=float(row.get("lastPrice") or 0.0),
-                        volume=int(row.get("volume") or 0),
-                        open_interest=int(row.get("openInterest") or 0),
+                        volume=_safe_int(row.get("volume")),
+                        open_interest=_safe_int(row.get("openInterest")),
                         implied_volatility=(
                             float(row["impliedVolatility"])
                             if row.get("impliedVolatility") is not None
@@ -154,6 +155,18 @@ class YFinanceProvider(MarketDataProvider):
         )
         self._cache.set(cache_key, result)
         return result
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Coerce yfinance's option-chain fields to int, treating NaN as missing.
+
+    yfinance reports NaN (not None) for volume/open interest on contracts
+    with no trades, and NaN is truthy in Python so `value or default` does
+    not catch it — it falls through to `int(nan)`, which raises ValueError.
+    """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return default
+    return int(value)
 
 
 def _last_close(ticker: Any) -> float:
