@@ -44,7 +44,10 @@ poetry run agentic-options-reporter --base-url http://localhost:8000 health
 
 Or launch the Flet front end (a desktop window by default; see
 `src/agentic_options_reporter/frontend/app.py`), which drives the same API
-through the same `ApiClient` the CLI uses:
+through the same `ApiClient` the CLI uses. It's a Material 3 UI with an
+Analyze tab (recommendation badge, trend/volume/indicator stat cards, a
+scored-candidates table) and a History tab, plus a light/dark mode toggle
+in the app bar:
 
 ```bash
 poetry run agentic-options-reporter-ui
