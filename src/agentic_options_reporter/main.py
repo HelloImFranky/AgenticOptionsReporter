@@ -5,14 +5,32 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from agentic_options_reporter.config import get_settings
+from agentic_options_reporter.data.financial_provider import (
+    FinancialProvider,
+    FinancialProviderError,
+    FmpFinancialProvider,
+)
+from agentic_options_reporter.data.macro_provider import (
+    FredMacroProvider,
+    MacroProvider,
+    MacroProviderError,
+)
 from agentic_options_reporter.data.market_data import MarketDataError
+from agentic_options_reporter.data.news_provider import (
+    FinnhubNewsProvider,
+    NewsProvider,
+    NewsProviderError,
+)
 from agentic_options_reporter.models.db import AgentThesisRow, AnalysisRun
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
     AnalysisResult,
     AnalysisRunSummary,
+    FinancialResearchFinding,
     IndicatorSnapshot,
     InvestmentThesis,
+    MacroResearchFinding,
+    NewsResearchFinding,
     QuantInterpretation,
     Recommendation,
     RiskAssessment,
@@ -70,6 +88,35 @@ def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
 
 
 def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
+    financial = (
+        FinancialResearchFinding(
+            company_health=row.financial_company_health,
+            growth=row.financial_growth,
+            profitability=row.financial_profitability,
+            cash_flow=row.financial_cash_flow,
+            analyst_consensus=row.financial_analyst_consensus or "",
+            narrative=row.financial_narrative or "",
+        )
+        if row.financial_company_health is not None
+        else None
+    )
+    news = (
+        NewsResearchFinding(
+            sentiment=row.news_sentiment,
+            summary=row.news_summary or "",
+            catalysts=row.news_catalysts or [],
+            risks=row.news_risks or [],
+        )
+        if row.news_sentiment is not None
+        else None
+    )
+    macro = (
+        MacroResearchFinding(
+            regime=row.macro_regime, outlook=row.macro_outlook or "", summary=row.macro_summary or ""
+        )
+        if row.macro_regime is not None
+        else None
+    )
     risk = (
         RiskAssessment(
             risk_level=row.risk_level,
@@ -93,10 +140,34 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
             score_breakdown=row.quant_score_breakdown,
             overall_score=row.quant_overall_score,
         ),
+        financial_research=financial,
+        news_research=news,
+        macro_research=macro,
         risk_assessment=risk,
         strategy_suggestion=strategy,
         investment_thesis=InvestmentThesis(thesis=row.thesis, consensus=row.consensus),
     )
+
+
+def _optional_financial_provider() -> FinancialProvider | None:
+    try:
+        return FmpFinancialProvider()
+    except FinancialProviderError:
+        return None
+
+
+def _optional_news_provider() -> NewsProvider | None:
+    try:
+        return FinnhubNewsProvider()
+    except NewsProviderError:
+        return None
+
+
+def _optional_macro_provider() -> MacroProvider | None:
+    try:
+        return FredMacroProvider()
+    except MacroProviderError:
+        return None
 
 
 @app.get("/health")
@@ -174,8 +245,20 @@ def generate_thesis(
                 model=model,
                 max_tokens=_settings.llm_max_tokens,
             )
-            thesis_result = run_thesis_pipeline(analysis_result, llm_client)
-        except (LlmError, ThesisGenerationError) as exc:
+            thesis_result = run_thesis_pipeline(
+                analysis_result,
+                llm_client,
+                financial_provider=_optional_financial_provider(),
+                news_provider=_optional_news_provider(),
+                macro_provider=_optional_macro_provider(),
+            )
+        except (
+            LlmError,
+            ThesisGenerationError,
+            FinancialProviderError,
+            NewsProviderError,
+            MacroProviderError,
+        ) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         if run.agent_thesis is not None:

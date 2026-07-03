@@ -1,11 +1,23 @@
 import json
 from datetime import date, datetime, timezone
 
+from agentic_options_reporter.data.financial_provider import FinancialProvider
+from agentic_options_reporter.data.macro_provider import MacroProvider
+from agentic_options_reporter.data.news_provider import NewsProvider
 from agentic_options_reporter.models.schemas import (
     AnalysisResult,
+    AnalystEstimates,
+    CompanyProfile,
+    CpiSnapshot,
+    FinancialRatios,
+    FinancialStatementSummary,
+    GdpSnapshot,
     IndicatorSnapshot,
+    InterestRates,
+    NewsArticle,
     Recommendation,
     ScoredCandidate,
+    SentimentSnapshot,
     SupportResistanceLevel,
     TrendAssessment,
     VolumeAssessment,
@@ -24,6 +36,81 @@ _ALL_RESPONSES = {
         {"thesis": "Bullish setup with defined-risk structure recommended.", "consensus": "bullish"}
     ),
 }
+
+_ALL_RESPONSES_WITH_RESEARCH = {
+    **_ALL_RESPONSES,
+    "financial research analyst": json.dumps(
+        {
+            "company_health": "strong",
+            "growth": "accelerating",
+            "profitability": "high",
+            "cash_flow": "positive",
+            "narrative": "Fundamentals solid.",
+        }
+    ),
+    "news research analyst": json.dumps(
+        {"sentiment": "bullish", "summary": "Positive coverage.", "catalysts": ["earnings beat"], "risks": []}
+    ),
+    "macroeconomic analyst": json.dumps(
+        {"regime": "risk_on", "outlook": "Favorable.", "summary": "Rates steady."}
+    ),
+}
+
+
+class FakeFinancialProvider(FinancialProvider):
+    def get_company_profile(self, ticker: str) -> CompanyProfile:
+        return CompanyProfile(
+            ticker=ticker, name="Test Corp", sector="Technology", industry="Software",
+            market_cap=1_000_000_000, description="Makes software.",
+        )
+
+    def get_financial_statements(self, ticker: str) -> FinancialStatementSummary:
+        return FinancialStatementSummary(
+            ticker=ticker, period="2025", revenue=500_000_000, net_income=80_000_000,
+            operating_cash_flow=100_000_000, free_cash_flow=70_000_000,
+        )
+
+    def get_ratios(self, ticker: str) -> FinancialRatios:
+        return FinancialRatios(
+            ticker=ticker, pe_ratio=25.0, pb_ratio=8.0, debt_to_equity=0.5, current_ratio=1.8,
+            return_on_equity=0.3, gross_margin=0.6, net_margin=0.16,
+        )
+
+    def get_analyst_estimates(self, ticker: str) -> AnalystEstimates:
+        return AnalystEstimates(
+            ticker=ticker, consensus_rating="Buy", price_target_mean=120.0,
+            price_target_high=140.0, price_target_low=100.0, num_analysts=15,
+        )
+
+
+class FakeNewsProvider(NewsProvider):
+    def get_company_news(self, ticker: str, limit: int = 20) -> list[NewsArticle]:
+        return [
+            NewsArticle(
+                headline="Company beats earnings", source="Reuters", url="https://example.com/a",
+                published_at=datetime(2026, 6, 1, tzinfo=timezone.utc), summary="Solid quarter.",
+            )
+        ]
+
+    def get_market_news(self, limit: int = 20) -> list[NewsArticle]:
+        return []
+
+    def get_sentiment(self, ticker: str) -> SentimentSnapshot:
+        return SentimentSnapshot(ticker=ticker, score=0.4, label="bullish", article_count=12)
+
+
+class FakeMacroProvider(MacroProvider):
+    def get_interest_rates(self) -> InterestRates:
+        return InterestRates(fed_funds_rate=5.25, ten_year_yield=4.3, two_year_yield=4.1, as_of=date(2026, 6, 1))
+
+    def get_cpi(self) -> CpiSnapshot:
+        return CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date(2026, 6, 1))
+
+    def get_gdp(self) -> GdpSnapshot:
+        return GdpSnapshot(value=23000.0, yoy_growth_pct=2.1, as_of=date(2026, 4, 1))
+
+    def get_macro_calendar(self) -> list:
+        return []
 
 
 def _candidate() -> ScoredCandidate:
@@ -73,6 +160,80 @@ def test_full_pipeline_runs_all_four_agents():
     assert thesis.risk_assessment.risk_level == "medium"
     assert thesis.strategy_suggestion.strategy == "Bull Call Spread"
     assert thesis.investment_thesis.consensus == "bullish"
+    # No providers were passed in, so research findings must be absent.
+    assert thesis.financial_research is None
+    assert thesis.news_research is None
+    assert thesis.macro_research is None
+
+
+def test_pipeline_runs_research_agents_when_providers_configured():
+    llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(
+        result,
+        llm,
+        financial_provider=FakeFinancialProvider(),
+        news_provider=FakeNewsProvider(),
+        macro_provider=FakeMacroProvider(),
+    )
+
+    assert len(llm.calls) == 7
+    assert thesis.financial_research.company_health == "strong"
+    assert thesis.financial_research.analyst_consensus == "Buy"
+    assert thesis.news_research.sentiment == "bullish"
+    assert thesis.macro_research.regime == "risk_on"
+
+
+def test_pipeline_runs_only_configured_research_agents():
+    llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(result, llm, news_provider=FakeNewsProvider())
+
+    assert thesis.financial_research is None
+    assert thesis.news_research is not None
+    assert thesis.macro_research is None
+
+
+def test_research_agents_run_even_without_candidate():
+    """Research findings are ticker/market-wide, not contract-specific, so
+    they should still run when there's no candidate to size (unlike
+    risk/strategy, which are legitimately skipped in that case)."""
+    llm = FakeLlmClient(
+        {
+            "portfolio manager": json.dumps({"thesis": "No position recommended.", "consensus": "neutral"}),
+            **{
+                k: v
+                for k, v in _ALL_RESPONSES_WITH_RESEARCH.items()
+                if k in ("financial research analyst", "news research analyst", "macroeconomic analyst")
+            },
+        }
+    )
+    recommendation = Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="no candidates")
+    result = _analysis_result([], recommendation)
+
+    thesis = run_thesis_pipeline(
+        result,
+        llm,
+        financial_provider=FakeFinancialProvider(),
+        news_provider=FakeNewsProvider(),
+        macro_provider=FakeMacroProvider(),
+    )
+
+    assert thesis.risk_assessment is None
+    assert thesis.strategy_suggestion is None
+    assert thesis.financial_research is not None
+    assert thesis.news_research is not None
+    assert thesis.macro_research is not None
 
 
 def test_no_candidate_short_circuit_skips_risk_and_strategy():

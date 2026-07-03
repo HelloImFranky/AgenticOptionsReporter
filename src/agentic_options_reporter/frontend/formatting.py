@@ -56,6 +56,12 @@ _RISK_LEVEL_TONES = {
     "high": TONE_DANGER,
 }
 
+_MACRO_REGIME_TONES = {
+    "risk_on": TONE_SUCCESS,
+    "risk_off": TONE_DANGER,
+    "neutral": TONE_NEUTRAL,
+}
+
 
 def recommendation_tone(action: str) -> str:
     return _RECOMMENDATION_TONES.get(action, TONE_NEUTRAL)
@@ -71,6 +77,10 @@ def consensus_tone(consensus: str) -> str:
 
 def risk_level_tone(risk_level: str) -> str:
     return _RISK_LEVEL_TONES.get(risk_level, TONE_NEUTRAL)
+
+
+def macro_regime_tone(regime: str) -> str:
+    return _MACRO_REGIME_TONES.get(regime, TONE_NEUTRAL)
 
 
 def format_recommendation(recommendation: dict[str, Any]) -> str:

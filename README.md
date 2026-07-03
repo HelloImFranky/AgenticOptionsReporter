@@ -58,11 +58,21 @@ poetry run agentic-options-reporter-ui --base-url http://localhost:8000
 ### Investment thesis (LLM agent pipeline)
 
 On top of the deterministic recommendation, an optional pipeline of LLM
-agents (Quant Interpreter → Risk Challenger → Options Strategy →
-Investment Thesis) can narrate, challenge, and synthesize an
-already-persisted run into a written thesis — see
-`docs/investment_thesis.md` and `specs/agents.yaml`. These agents never
-compute a number the quant engine hasn't already computed.
+agents (Quant Interpreter → Financial/News/Macro Research → Risk
+Challenger → Options Strategy → Investment Thesis) can narrate,
+challenge, and synthesize an already-persisted run into a written
+thesis — see `docs/investment_thesis.md` and `specs/agents.yaml`. These
+agents never compute a number the quant engine hasn't already computed.
+
+The three research agents each depend on an external data provider and
+are skipped (rendered as "not configured" rather than an error) if its
+key isn't set:
+
+```bash
+export FMP_API_KEY=...       # Financial Research (financialmodelingprep.com, free tier)
+export FINNHUB_API_KEY=...   # News Research (finnhub.io, free tier)
+export FRED_API_KEY=...      # Macro Research (fred.stlouisfed.org, free)
+```
 
 Two providers are supported out of the box, `anthropic` (default) and
 `openai`; each needs its own API key, either set server-side
@@ -83,9 +93,11 @@ Or use the Flet UI's **Agents** tab after running an analysis: pick a
 sent only for that one request), then click "Generate investment thesis"
 to see a **Final output** verdict (the recommendation action + the
 agents' consensus) and, below it, an **Agent conversation** — Quant
-Interpreter, Risk Challenger, Options Strategist, and Investment Thesis
-shown in sequence as each agent's contribution, with a "skipped" message
-where an agent had no candidate contract to work with.
+Interpreter, Financial Research, News Research, Macro Research, Risk
+Challenger, Options Strategist, and Investment Thesis shown in sequence
+as each agent's contribution, with a "skipped" message where an agent had
+no candidate contract to work with (Risk/Strategy) or its provider wasn't
+configured (the three research agents).
 
 ## Testing
 

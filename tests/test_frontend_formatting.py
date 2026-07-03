@@ -12,6 +12,7 @@ from agentic_options_reporter.frontend.formatting import (
     format_timestamp,
     format_trend_summary,
     format_volume_summary,
+    macro_regime_tone,
     recommendation_tone,
     risk_level_tone,
     runs_to_rows,
@@ -77,6 +78,13 @@ def test_risk_level_tone_mapping():
     assert risk_level_tone("medium") == TONE_WARNING
     assert risk_level_tone("high") == TONE_DANGER
     assert risk_level_tone("unexpected") == TONE_NEUTRAL
+
+
+def test_macro_regime_tone_mapping():
+    assert macro_regime_tone("risk_on") == TONE_SUCCESS
+    assert macro_regime_tone("risk_off") == TONE_DANGER
+    assert macro_regime_tone("neutral") == TONE_NEUTRAL
+    assert macro_regime_tone("unexpected") == TONE_NEUTRAL
 
 
 def test_format_trend_summary():

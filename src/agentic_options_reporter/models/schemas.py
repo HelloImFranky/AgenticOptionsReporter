@@ -192,14 +192,117 @@ class AnalysisRunSummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Provider-normalized domain models (specs/providers.yaml). Agents consume
+# these, never a provider's raw API response shape, so a provider can be
+# swapped without touching agent code.
+# ---------------------------------------------------------------------------
+
+
+class NewsArticle(BaseModel):
+    headline: str
+    source: str
+    url: str
+    published_at: datetime
+    summary: str = ""
+
+
+class SentimentSnapshot(BaseModel):
+    ticker: str
+    score: float          # provider-supplied, roughly -1 (bearish) to 1 (bullish)
+    label: Literal["bullish", "bearish", "neutral"]
+    article_count: int
+
+
+class CompanyProfile(BaseModel):
+    ticker: str
+    name: str
+    sector: str = ""
+    industry: str = ""
+    market_cap: float | None = None
+    description: str = ""
+
+
+class FinancialStatementSummary(BaseModel):
+    ticker: str
+    period: str   # e.g. "FY2025" or "Q3 2025"
+    revenue: float | None = None
+    net_income: float | None = None
+    operating_cash_flow: float | None = None
+    free_cash_flow: float | None = None
+
+
+class FinancialRatios(BaseModel):
+    ticker: str
+    pe_ratio: float | None = None
+    pb_ratio: float | None = None
+    debt_to_equity: float | None = None
+    current_ratio: float | None = None
+    return_on_equity: float | None = None
+    gross_margin: float | None = None
+    net_margin: float | None = None
+
+
+class AnalystEstimates(BaseModel):
+    ticker: str
+    consensus_rating: str = "N/A"   # e.g. "buy" | "hold" | "sell", provider vocabulary varies
+    price_target_mean: float | None = None
+    price_target_high: float | None = None
+    price_target_low: float | None = None
+    num_analysts: int = 0
+
+
+class InterestRates(BaseModel):
+    fed_funds_rate: float | None = None
+    ten_year_yield: float | None = None
+    two_year_yield: float | None = None
+    as_of: date
+
+
+class CpiSnapshot(BaseModel):
+    value: float
+    yoy_change_pct: float | None = None
+    as_of: date
+
+
+class GdpSnapshot(BaseModel):
+    value: float
+    yoy_growth_pct: float | None = None
+    as_of: date
+
+
+class MacroEvent(BaseModel):
+    name: str
+    event_date: date
+    importance: Literal["low", "medium", "high"] = "medium"
+    actual: str | None = None
+    forecast: str | None = None
+    previous: str | None = None
+
+
+class SecFiling(BaseModel):
+    ticker: str
+    form_type: str   # "10-K" | "10-Q" | "8-K" | ...
+    filed_at: date
+    url: str
+    accession_number: str
+
+
+# ---------------------------------------------------------------------------
 # Investment-thesis agent pipeline (specs/agents.yaml). These are the only
 # models an LLM ever authors fields of; score_breakdown/overall_score on
 # QuantInterpretation are pass-throughs from the already-computed
-# ScoredCandidate, never LLM-derived.
+# ScoredCandidate, never LLM-derived. analyst_consensus on
+# FinancialResearchFinding is likewise a pass-through from AnalystEstimates.
 # ---------------------------------------------------------------------------
 
 RiskLevel = Literal["low", "medium", "high"]
 Consensus = Literal["bullish", "bearish", "neutral", "mixed"]
+CompanyHealth = Literal["strong", "stable", "weak"]
+GrowthTrend = Literal["accelerating", "steady", "decelerating"]
+ProfitabilityLevel = Literal["high", "moderate", "low"]
+CashFlowState = Literal["positive", "neutral", "negative"]
+NewsSentiment = Literal["bullish", "bearish", "neutral"]
+MacroRegime = Literal["risk_on", "risk_off", "neutral"]
 
 
 class QuantInterpretation(BaseModel):
@@ -207,6 +310,28 @@ class QuantInterpretation(BaseModel):
     key_factors: list[str]
     score_breakdown: dict[str, float]
     overall_score: float
+
+
+class FinancialResearchFinding(BaseModel):
+    company_health: CompanyHealth
+    growth: GrowthTrend
+    profitability: ProfitabilityLevel
+    cash_flow: CashFlowState
+    analyst_consensus: str
+    narrative: str
+
+
+class NewsResearchFinding(BaseModel):
+    sentiment: NewsSentiment
+    summary: str
+    catalysts: list[str]
+    risks: list[str]
+
+
+class MacroResearchFinding(BaseModel):
+    regime: MacroRegime
+    outlook: str
+    summary: str
 
 
 class RiskAssessment(BaseModel):
@@ -229,6 +354,9 @@ class AgentThesisResult(BaseModel):
     run_id: int
     generated_at: datetime
     quant_interpretation: QuantInterpretation
+    financial_research: FinancialResearchFinding | None = None
+    news_research: NewsResearchFinding | None = None
+    macro_research: MacroResearchFinding | None = None
     risk_assessment: RiskAssessment | None
     strategy_suggestion: StrategySuggestion | None
     investment_thesis: InvestmentThesis

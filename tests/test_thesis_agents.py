@@ -1,18 +1,35 @@
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
 from agentic_options_reporter.models.schemas import (
+    AnalystEstimates,
+    CompanyProfile,
+    CpiSnapshot,
+    FinancialRatios,
+    FinancialStatementSummary,
+    GdpSnapshot,
     IndicatorSnapshot,
+    InterestRates,
+    NewsArticle,
     Recommendation,
     RiskAssessment,
     ScoredCandidate,
+    SentimentSnapshot,
     SupportResistanceLevel,
     TrendAssessment,
     VolumeAssessment,
 )
-from agentic_options_reporter.thesis import investment_thesis, options_strategy, quant_interpreter, risk_challenger
+from agentic_options_reporter.thesis import (
+    financial_research,
+    investment_thesis,
+    macro_research,
+    news_research,
+    options_strategy,
+    quant_interpreter,
+    risk_challenger,
+)
 from agentic_options_reporter.thesis.parsing import ThesisGenerationError
 
 from conftest import FakeLlmClient
@@ -141,9 +158,49 @@ def test_investment_thesis_with_risk_and_strategy():
     risk = RiskAssessment(risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.")
     strategy = StrategySuggestion(strategy="Bull Call Spread", rationale="Defined risk.")
 
-    result = investment_thesis.run(llm, quant, risk, strategy, _recommendation(), _trend(), _volume())
+    result = investment_thesis.run(
+        llm, quant, None, None, None, risk, strategy, _recommendation(), _trend(), _volume()
+    )
     assert result.consensus == "bullish"
     assert "defined risk" in result.thesis.lower()
+
+
+def test_investment_thesis_synthesizes_all_research_findings():
+    from agentic_options_reporter.models.schemas import (
+        FinancialResearchFinding,
+        MacroResearchFinding,
+        NewsResearchFinding,
+        QuantInterpretation,
+        StrategySuggestion,
+    )
+
+    llm = FakeLlmClient(
+        {"portfolio manager": json.dumps({"thesis": "Bullish across the board.", "consensus": "bullish"})}
+    )
+    quant = QuantInterpretation(
+        narrative="Strong.", key_factors=["trend"], score_breakdown={"x": 1.0}, overall_score=78.5
+    )
+    financial = FinancialResearchFinding(
+        company_health="strong", growth="accelerating", profitability="high",
+        cash_flow="positive", analyst_consensus="Buy", narrative="Fundamentals solid.",
+    )
+    news = NewsResearchFinding(
+        sentiment="bullish", summary="Positive coverage.", catalysts=["earnings beat"], risks=[]
+    )
+    macro = MacroResearchFinding(regime="risk_on", outlook="Favorable.", summary="Rates steady.")
+    risk = RiskAssessment(risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.")
+    strategy = StrategySuggestion(strategy="Bull Call Spread", rationale="Defined risk.")
+
+    result = investment_thesis.run(
+        llm, quant, financial, news, macro, risk, strategy, _recommendation(), _trend(), _volume()
+    )
+    assert result.consensus == "bullish"
+
+    # The prompt sent to the LLM must actually carry every finding through.
+    _, user_prompt = llm.calls[-1]
+    assert "health=strong" in user_prompt
+    assert "sentiment=bullish" in user_prompt
+    assert "regime=risk_on" in user_prompt
 
 
 def test_investment_thesis_handles_missing_risk_and_strategy():
@@ -155,5 +212,191 @@ def test_investment_thesis_handles_missing_risk_and_strategy():
     quant = QuantInterpretation(narrative="no candidates", key_factors=[], score_breakdown={}, overall_score=0.0)
     recommendation = Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="no candidates")
 
-    result = investment_thesis.run(llm, quant, None, None, recommendation, _trend(), _volume())
+    result = investment_thesis.run(
+        llm, quant, None, None, None, None, None, recommendation, _trend(), _volume()
+    )
     assert result.consensus == "neutral"
+
+
+def _profile() -> CompanyProfile:
+    return CompanyProfile(
+        ticker="TEST", name="Test Corp", sector="Technology", industry="Software",
+        market_cap=1_000_000_000, description="Makes software.",
+    )
+
+
+def _statements() -> FinancialStatementSummary:
+    return FinancialStatementSummary(
+        ticker="TEST", period="2025", revenue=500_000_000, net_income=80_000_000,
+        operating_cash_flow=100_000_000, free_cash_flow=70_000_000,
+    )
+
+
+def _ratios() -> FinancialRatios:
+    return FinancialRatios(
+        ticker="TEST", pe_ratio=25.0, pb_ratio=8.0, debt_to_equity=0.5, current_ratio=1.8,
+        return_on_equity=0.3, gross_margin=0.6, net_margin=0.16,
+    )
+
+
+def _estimates() -> AnalystEstimates:
+    return AnalystEstimates(
+        ticker="TEST", consensus_rating="Buy", price_target_mean=120.0,
+        price_target_high=140.0, price_target_low=100.0, num_analysts=15,
+    )
+
+
+def test_financial_research_passes_through_analyst_consensus_not_llm_authored():
+    llm = FakeLlmClient(
+        {
+            "financial research analyst": json.dumps(
+                {
+                    "company_health": "strong",
+                    "growth": "accelerating",
+                    "profitability": "high",
+                    "cash_flow": "positive",
+                    "narrative": "Fundamentals look solid.",
+                }
+            )
+        }
+    )
+    result = financial_research.run(llm, _profile(), _statements(), _ratios(), _estimates())
+    assert result.analyst_consensus == "Buy"
+    assert result.company_health == "strong"
+    assert result.narrative == "Fundamentals look solid."
+
+
+def test_financial_research_ignores_llm_attempt_to_smuggle_consensus():
+    llm = FakeLlmClient(
+        {
+            "financial research analyst": json.dumps(
+                {
+                    "company_health": "strong",
+                    "growth": "accelerating",
+                    "profitability": "high",
+                    "cash_flow": "positive",
+                    "narrative": "Fundamentals look solid.",
+                    "analyst_consensus": "Strong Sell",
+                }
+            )
+        }
+    )
+    result = financial_research.run(llm, _profile(), _statements(), _ratios(), _estimates())
+    assert result.analyst_consensus == "Buy"
+    assert result.analyst_consensus != "Strong Sell"
+
+
+def test_financial_research_raises_on_invalid_health():
+    llm = FakeLlmClient(
+        {
+            "financial research analyst": json.dumps(
+                {
+                    "company_health": "excellent",
+                    "growth": "accelerating",
+                    "profitability": "high",
+                    "cash_flow": "positive",
+                    "narrative": "x",
+                }
+            )
+        }
+    )
+    with pytest.raises(ThesisGenerationError):
+        financial_research.run(llm, _profile(), _statements(), _ratios(), _estimates())
+
+
+def _articles() -> list[NewsArticle]:
+    return [
+        NewsArticle(
+            headline="Company beats earnings", source="Reuters", url="https://example.com/a",
+            published_at=datetime(2026, 6, 1, tzinfo=timezone.utc), summary="Solid quarter.",
+        )
+    ]
+
+
+def _sentiment() -> SentimentSnapshot:
+    return SentimentSnapshot(ticker="TEST", score=0.4, label="bullish", article_count=12)
+
+
+def test_news_research_parses_response():
+    llm = FakeLlmClient(
+        {
+            "news research analyst": json.dumps(
+                {
+                    "sentiment": "bullish",
+                    "summary": "Positive earnings momentum.",
+                    "catalysts": ["earnings beat"],
+                    "risks": ["supply chain"],
+                }
+            )
+        }
+    )
+    result = news_research.run(llm, _articles(), _sentiment())
+    assert result.sentiment == "bullish"
+    assert result.catalysts == ["earnings beat"]
+    assert result.risks == ["supply chain"]
+
+
+def test_news_research_handles_no_articles():
+    llm = FakeLlmClient(
+        {
+            "news research analyst": json.dumps(
+                {"sentiment": "neutral", "summary": "No notable news.", "catalysts": [], "risks": []}
+            )
+        }
+    )
+    result = news_research.run(llm, [], _sentiment())
+    assert result.sentiment == "neutral"
+    assert result.catalysts == []
+
+
+def test_news_research_raises_on_invalid_sentiment():
+    llm = FakeLlmClient(
+        {
+            "news research analyst": json.dumps(
+                {"sentiment": "euphoric", "summary": "x", "catalysts": [], "risks": []}
+            )
+        }
+    )
+    with pytest.raises(ThesisGenerationError):
+        news_research.run(llm, _articles(), _sentiment())
+
+
+def _rates() -> InterestRates:
+    return InterestRates(fed_funds_rate=5.25, ten_year_yield=4.3, two_year_yield=4.1, as_of=date(2026, 6, 1))
+
+
+def _cpi() -> CpiSnapshot:
+    return CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date(2026, 6, 1))
+
+
+def _gdp() -> GdpSnapshot:
+    return GdpSnapshot(value=23000.0, yoy_growth_pct=2.1, as_of=date(2026, 4, 1))
+
+
+def test_macro_research_parses_response():
+    llm = FakeLlmClient(
+        {
+            "macroeconomic analyst": json.dumps(
+                {
+                    "regime": "risk_on",
+                    "outlook": "Conditions favor risk assets near-term.",
+                    "summary": "Rates steady, inflation cooling, growth resilient.",
+                }
+            )
+        }
+    )
+    result = macro_research.run(llm, _rates(), _cpi(), _gdp(), [])
+    assert result.regime == "risk_on"
+    assert "risk assets" in result.outlook.lower()
+
+
+def test_macro_research_raises_on_invalid_regime():
+    llm = FakeLlmClient(
+        {
+            "macroeconomic analyst": json.dumps(
+                {"regime": "goldilocks", "outlook": "x", "summary": "x"}
+            )
+        }
+    )
+    with pytest.raises(ThesisGenerationError):
+        macro_research.run(llm, _rates(), _cpi(), _gdp(), [])

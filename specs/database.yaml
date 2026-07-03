@@ -112,6 +112,22 @@ tables:
       quant_key_factors: json
       quant_score_breakdown: json
       quant_overall_score: float
+      # null when the corresponding provider wasn't configured (see
+      # specs/providers.yaml provider_availability), same convention as
+      # risk_level being null on the no-candidate short circuit.
+      financial_company_health: str | null
+      financial_growth: str | null
+      financial_profitability: str | null
+      financial_cash_flow: str | null
+      financial_analyst_consensus: str | null
+      financial_narrative: str | null
+      news_sentiment: str | null
+      news_summary: str | null
+      news_catalysts: json | null
+      news_risks: json | null
+      macro_regime: str | null
+      macro_outlook: str | null
+      macro_summary: str | null
       risk_level: str | null       # low | medium | high; null when short-circuited
       risk_concerns: json | null
       risk_position_sizing_note: str | null

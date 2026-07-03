@@ -165,6 +165,24 @@ class AgentThesisRow(Base):
     quant_score_breakdown: Mapped[dict] = mapped_column(JSON)
     quant_overall_score: Mapped[float] = mapped_column(Float)
 
+    # Null when the corresponding provider wasn't configured (see
+    # specs/providers.yaml provider_availability).
+    financial_company_health: Mapped[str | None] = mapped_column(String, nullable=True)
+    financial_growth: Mapped[str | None] = mapped_column(String, nullable=True)
+    financial_profitability: Mapped[str | None] = mapped_column(String, nullable=True)
+    financial_cash_flow: Mapped[str | None] = mapped_column(String, nullable=True)
+    financial_analyst_consensus: Mapped[str | None] = mapped_column(String, nullable=True)
+    financial_narrative: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    news_sentiment: Mapped[str | None] = mapped_column(String, nullable=True)
+    news_summary: Mapped[str | None] = mapped_column(String, nullable=True)
+    news_catalysts: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    news_risks: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    macro_regime: Mapped[str | None] = mapped_column(String, nullable=True)
+    macro_outlook: Mapped[str | None] = mapped_column(String, nullable=True)
+    macro_summary: Mapped[str | None] = mapped_column(String, nullable=True)
+
     risk_level: Mapped[str | None] = mapped_column(String, nullable=True)
     risk_concerns: Mapped[list | None] = mapped_column(JSON, nullable=True)
     risk_position_sizing_note: Mapped[str | None] = mapped_column(String, nullable=True)

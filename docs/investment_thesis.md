@@ -19,14 +19,15 @@ synthesis a human actually wants before acting on a recommendation. So
 the pipeline is scoped to exactly that — see the "contract" note on each
 agent in `specs/agents.yaml` for what it is and isn't allowed to author.
 
-## Phase 1 scope
+## Phase 1 scope (quant/risk/strategy only)
 
-Phase 1 only reasons over data the quant engine already produced for a
-persisted run — no external data sources (news, macro, social, filings)
-are wired up yet. See `specs/agents.yaml: future_phases` for what a
-Market Research agent and a News/Sentiment agent would need before they
-could be added (primarily: picking and provisioning real data providers,
-which is a product/cost decision, not an architecture one).
+Phase 1 only reasoned over data the quant engine already produced for a
+persisted run — no external data sources (news, macro, filings) were
+wired up. Phase 2a (below) adds three optional research agents backed by
+real external providers; see `specs/providers.yaml` for the provider
+interfaces and `specs/agents.yaml: deferred` for what's still out of
+scope (a Catalyst agent, and having Risk/Strategy incorporate the new
+research findings).
 
 ## The pipeline
 
@@ -34,22 +35,63 @@ which is a product/cost decision, not an architecture one).
 AnalysisResult (persisted run)
         |
         v
-Quant Interpreter  -- narrates the score breakdown; authors no numbers
+Quant Interpreter    -- narrates the score breakdown; authors no numbers
         |
         v
-Risk Challenger    -- argues against the trade; risk_level is its judgment call
+Financial Research   -- optional; skipped (null) if no FinancialProvider configured
+News Research        -- optional; skipped (null) if no NewsProvider configured
+Macro Research        -- optional; skipped (null) if no MacroProvider configured
         |
         v
-Options Strategy   -- suggests a strategy shape, not a priced instrument
+Risk Challenger      -- argues against the trade; risk_level is its judgment call
         |
         v
-Investment Thesis  -- synthesizes everything into one paragraph + a consensus label
+Options Strategy     -- suggests a strategy shape, not a priced instrument
+        |
+        v
+Investment Thesis    -- synthesizes everything into one paragraph + a consensus label
 ```
 
 If the run's recommendation has no candidate contract (`AVOID`, or an
 empty candidate list), Risk Challenger and Options Strategy are skipped
 entirely — there's nothing for them to assess or size — and Investment
 Thesis produces a short explanation of why no position is recommended.
+The three research agents are ticker/market-wide rather than
+contract-specific, so they still run in that case (as long as their
+provider is configured).
+
+## Research agents (Phase 2a)
+
+Financial Research, News Research, and Macro Research each depend on a
+provider interface (`FinancialProvider`, `NewsProvider`, `MacroProvider`
+in `specs/providers.yaml`) via the same dependency-injection pattern as
+`MarketDataProvider`. Each is **optional at runtime**: if the
+corresponding provider's API key isn't configured, the FastAPI layer
+constructs `None` instead of raising, `run_thesis_pipeline` skips that
+agent, and the resulting `AgentThesisResult` field is `null` — mirrored
+in the Agents tab as a muted "Skipped — no ... provider configured"
+message rather than an error. A *configured* provider that fails at call
+time (rate limited, bad ticker, network down) is a different case and
+propagates as a real 502, since that's a genuine runtime problem rather
+than expected absence.
+
+| agent | provider interface | phase-2a implementation | env var |
+|---|---|---|---|
+| Financial Research | `FinancialProvider` | `FmpFinancialProvider` (Financial Modeling Prep) | `FMP_API_KEY` |
+| News Research | `NewsProvider` | `FinnhubNewsProvider` (Finnhub) | `FINNHUB_API_KEY` |
+| Macro Research | `MacroProvider` | `FredMacroProvider` (FRED) | `FRED_API_KEY` |
+
+Financial Research's `analyst_consensus` field is passed through verbatim
+from the provider's `AnalystEstimates.consensus_rating` — never
+LLM-authored — the same "facts pass through, judgment is LLM-authored"
+split used for `QuantInterpretation.overall_score`. `company_health`,
+`growth`, `profitability`, and `cash_flow` are legitimate LLM judgment
+calls over the given facts, analogous to `risk_level`.
+
+A `SECProvider` interface (`SecEdgarProvider`, backed by the free,
+keyless SEC EDGAR API) also exists in `data/sec_provider.py` for a future
+Catalyst agent, but isn't wired into the pipeline yet (see
+`specs/providers.yaml: deferred`).
 
 ## Execution model
 
@@ -80,11 +122,12 @@ sections rather than one undifferentiated blob:
   recommendation's action badge, the agents' consensus badge, and the
   recommendation's confidence. This is the "read this and decide" part.
 - **Agent conversation** — each agent shown as a labeled message in
-  pipeline order (Quant Interpreter, Risk Challenger, Options Strategist,
-  Investment Thesis), so the reasoning that produced the final output is
-  inspectable rather than opaque. An agent skipped by the
-  no-candidate short-circuit renders as a muted "Skipped — ..." message
-  in its slot instead of being silently omitted.
+  pipeline order (Quant Interpreter, Financial Research, News Research,
+  Macro Research, Risk Challenger, Options Strategist, Investment
+  Thesis), so the reasoning that produced the final output is inspectable
+  rather than opaque. An agent skipped by the no-candidate short-circuit,
+  or a research agent whose provider isn't configured, renders as a muted
+  "Skipped — ..." message in its slot instead of being silently omitted.
 
 Above both sections, a **Provider** dropdown (Anthropic/OpenAI) and a
 password-masked **API key** field let a user supply their own key for one

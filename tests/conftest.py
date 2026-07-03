@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import sys
+import types
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -118,3 +120,48 @@ class FakeLlmClient(LlmClient):
             if key in system_prompt:
                 return response
         raise AssertionError(f"No fake response configured for prompt: {system_prompt[:60]!r}")
+
+
+class FakeHttpResponse:
+    """Stand-in for a `requests.Response`, used to test the provider
+    modules (news/financial/macro/sec) without live network calls."""
+
+    def __init__(self, json_data, status_code: int = 200, raise_exc: Exception | None = None):
+        self._json_data = json_data
+        self.status_code = status_code
+        self._raise_exc = raise_exc
+
+    def raise_for_status(self) -> None:
+        if self._raise_exc is not None:
+            raise self._raise_exc
+
+    def json(self):
+        return self._json_data
+
+
+class FakeRequestsGet:
+    """Callable stand-in for `requests.get` that returns queued responses
+    in order and records every call for assertions."""
+
+    def __init__(self, *responses: FakeHttpResponse):
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+
+    def __call__(self, url, params=None, headers=None, timeout=None):
+        self.calls.append({"url": url, "params": params, "headers": headers, "timeout": timeout})
+        if not self._responses:
+            raise AssertionError("No more fake HTTP responses configured")
+        return self._responses.pop(0)
+
+
+@pytest.fixture
+def fake_requests_module(monkeypatch):
+    """Injects a fake `requests` module so provider modules (which do a
+    lazy `import requests` inside their HTTP methods) never touch the
+    network. Configure `.get` per test with a `FakeRequestsGet`."""
+    fake_module = types.SimpleNamespace(
+        get=None,
+        exceptions=types.SimpleNamespace(RequestException=Exception),
+    )
+    monkeypatch.setitem(sys.modules, "requests", fake_module)
+    return fake_module
