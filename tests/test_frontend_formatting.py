@@ -1,12 +1,19 @@
 from agentic_options_reporter.frontend.formatting import (
     CANDIDATE_COLUMNS,
     RUN_COLUMNS,
+    TONE_DANGER,
+    TONE_NEUTRAL,
+    TONE_SUCCESS,
+    TONE_WARNING,
     candidates_to_rows,
     format_indicator_summary,
     format_recommendation,
+    format_timestamp,
     format_trend_summary,
     format_volume_summary,
+    recommendation_tone,
     runs_to_rows,
+    trend_tone,
 )
 
 
@@ -19,8 +26,6 @@ def test_format_recommendation_with_contract():
             "rationale": "strong trend alignment",
         }
     )
-    assert "BUY" in text
-    assert "73%" in text
     assert "AAPL260116C00150000" in text
     assert "strong trend alignment" in text
 
@@ -29,8 +34,32 @@ def test_format_recommendation_without_contract():
     text = format_recommendation(
         {"action": "AVOID", "contract_symbol": None, "confidence": 0.0, "rationale": "no candidates"}
     )
-    assert "AVOID" in text
     assert "—" in text
+    assert "no candidates" in text
+
+
+def test_format_recommendation_without_rationale():
+    text = format_recommendation({"action": "AVOID", "contract_symbol": None, "rationale": ""})
+    assert text == "—"
+
+
+def test_recommendation_tone_mapping():
+    assert recommendation_tone("STRONG_BUY") == TONE_SUCCESS
+    assert recommendation_tone("BUY") == TONE_SUCCESS
+    assert recommendation_tone("HOLD") == TONE_WARNING
+    assert recommendation_tone("AVOID") == TONE_DANGER
+    assert recommendation_tone("SOMETHING_ELSE") == TONE_NEUTRAL
+
+
+def test_trend_tone_mapping():
+    assert trend_tone("bullish") == TONE_SUCCESS
+    assert trend_tone("bearish") == TONE_DANGER
+    assert trend_tone("neutral") == TONE_NEUTRAL
+    assert trend_tone("unexpected") == TONE_NEUTRAL
+
+
+def test_format_timestamp_trims_seconds_and_replaces_t():
+    assert format_timestamp("2026-07-03T12:34:56.789") == "2026-07-03 12:34"
 
 
 def test_format_trend_summary():
@@ -120,7 +149,7 @@ def test_runs_to_rows_shapes_match_columns():
     )
     assert len(rows) == 1
     assert len(rows[0]) == len(RUN_COLUMNS)
-    assert rows[0] == ["1", "AAPL", "2026-07-03T12:00:00", "BUY", "65%"]
+    assert rows[0] == ["1", "AAPL", "2026-07-03 12:00", "BUY", "65%"]
 
 
 def test_empty_lists_produce_no_rows():
