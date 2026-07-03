@@ -48,6 +48,14 @@ narrated in `docs/workflow.md`. At a high level:
 9. Generate a structured recommendation.
 10. Persist all inputs/outputs for auditability.
 
+On top of that deterministic pipeline, a separate, optional
+**investment-thesis agent pipeline** (`specs/agents.yaml`,
+`src/agentic_options_reporter/thesis/`) interprets an already-persisted
+run's output using an LLM. It is triggered explicitly
+(`POST /runs/{run_id}/thesis`), never as part of `/analyze`, and it never
+computes a number the quant engine hasn't already computed — see
+`docs/investment_thesis.md`.
+
 ## Module boundaries
 
 | Module | Path | Responsibility |
@@ -66,6 +74,7 @@ narrated in `docs/workflow.md`. At a high level:
 | API client | `src/agentic_options_reporter/api_client.py` | Shared `requests`-based HTTP client used by both the CLI and the Flet front end |
 | CLI client | `src/agentic_options_reporter/cli.py` | `argparse` command interface over `api_client.ApiClient` |
 | Front end | `src/agentic_options_reporter/frontend/` | Flet UI (`app.py`) over `api_client.ApiClient`, with display formatting isolated in `formatting.py` for testability |
+| Investment-thesis pipeline | `src/agentic_options_reporter/thesis/` | LLM agents that interpret a persisted run's already-computed output (see docs/investment_thesis.md) |
 
 ## Tooling
 
@@ -75,6 +84,7 @@ narrated in `docs/workflow.md`. At a high level:
 - HTTP client: requests, shared by the CLI and front end (server-side data access goes through `MarketDataProvider`, not `api_client`)
 - CLI: argparse, exposed as the `agentic-options-reporter` console script
 - Front end: Flet, exposed as the `agentic-options-reporter-ui` console script
+- LLM: provider-agnostic `thesis.llm_client.LlmClient` interface; default implementation is Anthropic's Claude API (`anthropic` package)
 - Visualization: Plotly, Matplotlib
 - Testing: pytest
 - Packaging: Poetry
@@ -98,3 +108,7 @@ analysis code. Responses are cached to reduce rate-limit pressure.
 - Write unit tests for every module.
 - Keep modules small and typed (type hints throughout).
 - Prefer dependency injection and Pydantic models over ad-hoc dicts.
+- Keep all numerical calculations in `analysis/*.py`, deterministic and
+  LLM-free. Agents in `thesis/*.py` interpret, challenge, and narrate
+  already-computed results; they never compute or alter a score,
+  indicator, Greek, or risk metric (see `specs/agents.yaml`).

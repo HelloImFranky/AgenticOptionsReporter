@@ -55,6 +55,26 @@ poetry run agentic-options-reporter-ui --web --port 8550   # serve in a browser 
 poetry run agentic-options-reporter-ui --base-url http://localhost:8000
 ```
 
+### Investment thesis (LLM agent pipeline)
+
+On top of the deterministic recommendation, an optional pipeline of LLM
+agents (Quant Interpreter → Risk Challenger → Options Strategy →
+Investment Thesis) can narrate, challenge, and synthesize an
+already-persisted run into a written thesis — see
+`docs/investment_thesis.md` and `specs/agents.yaml`. These agents never
+compute a number the quant engine hasn't already computed. Requires
+`ANTHROPIC_API_KEY` to be set:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+poetry run agentic-options-reporter thesis <run_id>              # generate
+poetry run agentic-options-reporter thesis <run_id> --regenerate # discard and regenerate
+poetry run agentic-options-reporter thesis <run_id> --fetch-only # fetch without generating
+```
+
+Or click "Generate investment thesis" in the Flet UI's Analyze tab after
+running an analysis.
+
 ## Testing
 
 ```bash
@@ -64,5 +84,5 @@ poetry run pytest
 ## Tooling
 
 Python 3.13 · FastAPI · Pydantic · SQLAlchemy · pandas/numpy/scipy/ta ·
-yfinance · Plotly/Matplotlib · requests · Flet · pytest · Poetry · Docker ·
-GitHub Actions
+yfinance · Plotly/Matplotlib · requests · Flet · Anthropic Claude API ·
+pytest · Poetry · Docker · GitHub Actions

@@ -14,8 +14,12 @@ tables:
       expiration: str | null
     relationships:
       - indicator_snapshot: one-to-one
+      - trend_assessment: one-to-one
+      - volume_assessment: one-to-one
+      - support_resistance_levels: one-to-many
       - scored_candidates: one-to-many
       - recommendation: one-to-one
+      - agent_thesis: one-to-one
 
   indicator_snapshot:
     columns:
@@ -39,6 +43,34 @@ tables:
       atr_14: float
       obv: float
       volume_sma_20: float
+
+  # Persisted so a replayed run (GET /runs/{id}, and the thesis pipeline
+  # in specs/agents.yaml) has real data instead of placeholders. Previously
+  # these were transient analysis output only; that was a gap, not a
+  # deliberate design choice.
+  trend_assessment:
+    columns:
+      id: int primary_key autoincrement
+      run_id: int foreign_key(analysis_run.id) unique
+      direction: str    # bullish | bearish | neutral
+      strength: str     # weak | moderate | strong
+      adx: float
+
+  volume_assessment:
+    columns:
+      id: int primary_key autoincrement
+      run_id: int foreign_key(analysis_run.id) unique
+      relative_volume: float
+      flags: json   # list[str]
+
+  support_resistance_level:
+    columns:
+      id: int primary_key autoincrement
+      run_id: int foreign_key(analysis_run.id)
+      price: float
+      level_type: str   # support | resistance
+      touches: int
+      last_touch_index: int
 
   scored_candidate:
     columns:
@@ -69,6 +101,24 @@ tables:
       contract_symbol: str | null
       confidence: float
       rationale: str
+
+  # See specs/agents.yaml for the pipeline that produces this row.
+  agent_thesis:
+    columns:
+      id: int primary_key autoincrement
+      run_id: int foreign_key(analysis_run.id) unique
+      generated_at: datetime
+      quant_narrative: str
+      quant_key_factors: json
+      quant_score_breakdown: json
+      quant_overall_score: float
+      risk_level: str | null       # low | medium | high; null when short-circuited
+      risk_concerns: json | null
+      risk_position_sizing_note: str | null
+      strategy: str | null
+      strategy_rationale: str | null
+      thesis: str
+      consensus: str               # bullish | bearish | neutral | mixed
 
 indexes:
   - table: analysis_run

@@ -1,12 +1,20 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from agentic_options_reporter import main as main_module
 from agentic_options_reporter.models.schemas import (
+    AgentThesisResult,
     IndicatorSnapshot,
+    InvestmentThesis,
+    QuantInterpretation,
     Recommendation,
+    RiskAssessment,
+    ScoredCandidate,
+    StrategySuggestion,
+    SupportResistanceLevel,
     TrendAssessment,
     VolumeAssessment,
 )
@@ -42,15 +50,52 @@ def test_get_run_not_found(client):
     assert response.status_code == 404
 
 
-def test_get_run_and_list_runs(client):
-    test_client, session_factory = client
-    recommendation = Recommendation(
+def _scored_candidate() -> ScoredCandidate:
+    return ScoredCandidate(
+        contract_symbol="TESTC00100000",
+        option_type="call",
+        strike=100.0,
+        expiration=date(2026, 1, 16),
+        delta=0.55,
+        gamma=0.02,
+        theta=-0.05,
+        vega=0.1,
+        rho=0.02,
+        max_loss=250.0,
+        max_gain=None,
+        breakeven=102.5,
+        reward_risk_ratio=None,
+        probability_of_profit=0.6,
+        score=78.5,
+        score_breakdown={"trend_alignment": 1.0, "liquidity": 0.8},
+    )
+
+
+def _persist_full_run(session_factory, recommendation=None) -> int:
+    recommendation = recommendation or Recommendation(
         action="BUY", contract_symbol="TESTC00100000", confidence=0.7, rationale="test"
     )
+    trend = TrendAssessment(direction="bullish", strength="moderate", adx=25)
+    volume = VolumeAssessment(relative_volume=1.2, flags=["normal_volume"])
+    levels = [SupportResistanceLevel(price=95.0, level_type="support", touches=3, last_touch_index=10)]
     with session_factory() as session:
-        run_id = persist_analysis_run(
-            session, "TEST", 260, None, _indicator_snapshot(), [], recommendation
+        return persist_analysis_run(
+            session,
+            "TEST",
+            260,
+            None,
+            _indicator_snapshot(),
+            trend,
+            volume,
+            levels,
+            [_scored_candidate()],
+            recommendation,
         )
+
+
+def test_get_run_and_list_runs(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
 
     response = test_client.get(f"/runs/{run_id}")
     assert response.status_code == 200
@@ -63,6 +108,21 @@ def test_get_run_and_list_runs(client):
     runs = response.json()
     assert len(runs) == 1
     assert runs[0]["run_id"] == run_id
+
+
+def test_get_run_returns_real_trend_volume_and_levels(client):
+    """Regression test: a replayed run must not fall back to placeholders."""
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    body = test_client.get(f"/runs/{run_id}").json()
+    assert body["trend"]["direction"] == "bullish"
+    assert body["trend"]["strength"] == "moderate"
+    assert body["trend"]["adx"] == 25
+    assert body["volume"]["relative_volume"] == 1.2
+    assert body["volume"]["flags"] == ["normal_volume"]
+    assert len(body["support_resistance"]) == 1
+    assert body["support_resistance"][0]["price"] == 95.0
 
 
 def test_analyze_uses_workflow(client, monkeypatch):
@@ -94,3 +154,130 @@ def test_analyze_uses_workflow(client, monkeypatch):
     response = test_client.get("/analyze/TEST")
     assert response.status_code == 200
     assert response.json()["symbol"] == "TEST"
+
+
+def _fake_thesis_result(run_id: int) -> AgentThesisResult:
+    return AgentThesisResult(
+        run_id=run_id,
+        generated_at=datetime.now(timezone.utc),
+        quant_interpretation=QuantInterpretation(
+            narrative="Strong trend.", key_factors=["trend"], score_breakdown={"x": 1.0}, overall_score=78.5
+        ),
+        risk_assessment=RiskAssessment(risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%."),
+        strategy_suggestion=StrategySuggestion(strategy="Bull Call Spread", rationale="Defined risk."),
+        investment_thesis=InvestmentThesis(thesis="Bullish setup.", consensus="bullish"),
+    )
+
+
+def test_generate_thesis_not_found(client):
+    test_client, _ = client
+    response = test_client.post("/runs/999/thesis")
+    assert response.status_code == 404
+
+
+def test_generate_thesis_success(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        response = test_client.post(f"/runs/{run_id}/thesis")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["investment_thesis"]["consensus"] == "bullish"
+    assert body["risk_assessment"]["risk_level"] == "medium"
+    assert body["strategy_suggestion"]["strategy"] == "Bull Call Spread"
+
+
+def test_generate_thesis_conflicts_without_regenerate(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        first = test_client.post(f"/runs/{run_id}/thesis")
+        second = test_client.post(f"/runs/{run_id}/thesis")
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+
+
+def test_generate_thesis_regenerate_replaces_existing(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        test_client.post(f"/runs/{run_id}/thesis")
+        response = test_client.post(f"/runs/{run_id}/thesis", params={"regenerate": True})
+
+    assert response.status_code == 200
+
+
+def test_generate_thesis_llm_error_returns_502(client):
+    from agentic_options_reporter.thesis.llm_client import LlmError
+
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    with patch("agentic_options_reporter.main.AnthropicLlmClient", side_effect=LlmError("no key")):
+        response = test_client.post(f"/runs/{run_id}/thesis")
+
+    assert response.status_code == 502
+
+
+def test_get_thesis_not_found_before_generation(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    response = test_client.get(f"/runs/{run_id}/thesis")
+    assert response.status_code == 404
+
+
+def test_get_thesis_after_generation(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        test_client.post(f"/runs/{run_id}/thesis")
+
+    response = test_client.get(f"/runs/{run_id}/thesis")
+    assert response.status_code == 200
+    assert response.json()["quant_interpretation"]["narrative"] == "Strong trend."
+
+
+def test_generate_thesis_no_candidate_short_circuit(client):
+    test_client, session_factory = client
+    recommendation = Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="no candidates")
+    run_id = _persist_full_run(session_factory, recommendation=recommendation)
+
+    fake_result = AgentThesisResult(
+        run_id=run_id,
+        generated_at=datetime.now(timezone.utc),
+        quant_interpretation=QuantInterpretation(
+            narrative="no candidates", key_factors=[], score_breakdown={}, overall_score=0.0
+        ),
+        risk_assessment=None,
+        strategy_suggestion=None,
+        investment_thesis=InvestmentThesis(thesis="No position recommended.", consensus="neutral"),
+    )
+
+    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        response = test_client.post(f"/runs/{run_id}/thesis")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["risk_assessment"] is None
+    assert body["strategy_suggestion"] is None

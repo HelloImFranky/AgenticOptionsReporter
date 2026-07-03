@@ -57,3 +57,10 @@ class ApiClient:
 
     def get_run(self, run_id: int) -> dict[str, Any]:
         return self._request("GET", f"/runs/{run_id}")
+
+    def generate_thesis(self, run_id: int, regenerate: bool = False) -> dict[str, Any]:
+        params: dict[str, Any] = {"regenerate": regenerate} if regenerate else None
+        return self._request("POST", f"/runs/{run_id}/thesis", params=params)
+
+    def get_thesis(self, run_id: int) -> dict[str, Any]:
+        return self._request("GET", f"/runs/{run_id}/thesis")

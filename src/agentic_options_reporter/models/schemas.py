@@ -189,3 +189,46 @@ class AnalysisRunSummary(BaseModel):
     generated_at: datetime
     recommendation_action: str
     recommendation_confidence: float
+
+
+# ---------------------------------------------------------------------------
+# Investment-thesis agent pipeline (specs/agents.yaml). These are the only
+# models an LLM ever authors fields of; score_breakdown/overall_score on
+# QuantInterpretation are pass-throughs from the already-computed
+# ScoredCandidate, never LLM-derived.
+# ---------------------------------------------------------------------------
+
+RiskLevel = Literal["low", "medium", "high"]
+Consensus = Literal["bullish", "bearish", "neutral", "mixed"]
+
+
+class QuantInterpretation(BaseModel):
+    narrative: str
+    key_factors: list[str]
+    score_breakdown: dict[str, float]
+    overall_score: float
+
+
+class RiskAssessment(BaseModel):
+    risk_level: RiskLevel
+    concerns: list[str]
+    position_sizing_note: str
+
+
+class StrategySuggestion(BaseModel):
+    strategy: str
+    rationale: str
+
+
+class InvestmentThesis(BaseModel):
+    thesis: str
+    consensus: Consensus
+
+
+class AgentThesisResult(BaseModel):
+    run_id: int
+    generated_at: datetime
+    quant_interpretation: QuantInterpretation
+    risk_assessment: RiskAssessment | None
+    strategy_suggestion: StrategySuggestion | None
+    investment_thesis: InvestmentThesis

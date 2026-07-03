@@ -50,6 +50,9 @@ def run_analysis(
             lookback_days,
             expiration,
             indicators,
+            trend,
+            volume,
+            levels,
             candidates,
             recommendation,
         )

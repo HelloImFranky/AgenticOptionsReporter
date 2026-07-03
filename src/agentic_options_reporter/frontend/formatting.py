@@ -43,6 +43,19 @@ _TREND_TONES = {
     "neutral": TONE_NEUTRAL,
 }
 
+_CONSENSUS_TONES = {
+    "bullish": TONE_SUCCESS,
+    "bearish": TONE_DANGER,
+    "neutral": TONE_NEUTRAL,
+    "mixed": TONE_WARNING,
+}
+
+_RISK_LEVEL_TONES = {
+    "low": TONE_SUCCESS,
+    "medium": TONE_WARNING,
+    "high": TONE_DANGER,
+}
+
 
 def recommendation_tone(action: str) -> str:
     return _RECOMMENDATION_TONES.get(action, TONE_NEUTRAL)
@@ -50,6 +63,14 @@ def recommendation_tone(action: str) -> str:
 
 def trend_tone(direction: str) -> str:
     return _TREND_TONES.get(direction, TONE_NEUTRAL)
+
+
+def consensus_tone(consensus: str) -> str:
+    return _CONSENSUS_TONES.get(consensus, TONE_NEUTRAL)
+
+
+def risk_level_tone(risk_level: str) -> str:
+    return _RISK_LEVEL_TONES.get(risk_level, TONE_NEUTRAL)
 
 
 def format_recommendation(recommendation: dict[str, Any]) -> str:

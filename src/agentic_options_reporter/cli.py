@@ -31,6 +31,12 @@ def cmd_run(client: ApiClient, args: argparse.Namespace) -> Any:
     return client.get_run(args.run_id)
 
 
+def cmd_thesis(client: ApiClient, args: argparse.Namespace) -> Any:
+    if args.fetch_only:
+        return client.get_thesis(args.run_id)
+    return client.generate_thesis(args.run_id, regenerate=args.regenerate)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentic-options-reporter",
@@ -73,6 +79,23 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Fetch a specific analysis run")
     run_parser.add_argument("run_id", type=int, help="Run ID")
     run_parser.set_defaults(func=cmd_run)
+
+    thesis_parser = subparsers.add_parser(
+        "thesis",
+        help="Generate (or fetch) the investment-thesis agent pipeline output for a run",
+    )
+    thesis_parser.add_argument("run_id", type=int, help="Run ID")
+    thesis_parser.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="Discard and regenerate an existing thesis instead of erroring",
+    )
+    thesis_parser.add_argument(
+        "--fetch-only",
+        action="store_true",
+        help="Only fetch a previously generated thesis; never generate a new one",
+    )
+    thesis_parser.set_defaults(func=cmd_thesis)
 
     return parser
 

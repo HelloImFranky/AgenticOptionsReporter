@@ -41,6 +41,31 @@ endpoints:
       limit: int = 20
     response: list[AnalysisRunSummary]
 
+  - path: /runs/{run_id}/thesis
+    method: POST
+    summary: >
+      Run the investment-thesis agent pipeline (specs/agents.yaml) over a
+      persisted run and store the result. Generation is not free (it
+      calls an LLM), so it is a separate, explicit step from /analyze.
+    path_params:
+      run_id: int
+    query_params:
+      regenerate: bool = false   # if true, discard and regenerate an existing thesis
+    response: AgentThesisResult
+    errors:
+      404: run not found
+      409: a thesis already exists for this run and regenerate=false
+      502: the configured LlmClient failed or returned an unparseable response
+
+  - path: /runs/{run_id}/thesis
+    method: GET
+    summary: Fetch a previously generated thesis for a run.
+    path_params:
+      run_id: int
+    response: AgentThesisResult
+    errors:
+      404: run not found, or run has no thesis generated yet
+
 models:
   AnalysisResult:
     symbol: str
@@ -59,3 +84,31 @@ models:
     generated_at: datetime
     recommendation_action: str
     recommendation_confidence: float
+
+  # See specs/agents.yaml for the full agent pipeline contract.
+  AgentThesisResult:
+    run_id: int
+    generated_at: datetime
+    quant_interpretation: QuantInterpretation
+    risk_assessment: RiskAssessment | null
+    strategy_suggestion: StrategySuggestion | null
+    investment_thesis: InvestmentThesis
+
+  QuantInterpretation:
+    narrative: str
+    key_factors: list[str]
+    score_breakdown: dict[str, float]
+    overall_score: float
+
+  RiskAssessment:
+    risk_level: str   # low | medium | high
+    concerns: list[str]
+    position_sizing_note: str
+
+  StrategySuggestion:
+    strategy: str
+    rationale: str
+
+  InvestmentThesis:
+    thesis: str
+    consensus: str   # bullish | bearish | neutral | mixed

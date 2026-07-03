@@ -24,10 +24,22 @@ class AnalysisRun(Base):
     indicator_snapshot: Mapped["IndicatorSnapshotRow"] = relationship(
         back_populates="run", uselist=False, cascade="all, delete-orphan"
     )
+    trend_assessment: Mapped["TrendAssessmentRow"] = relationship(
+        back_populates="run", uselist=False, cascade="all, delete-orphan"
+    )
+    volume_assessment: Mapped["VolumeAssessmentRow"] = relationship(
+        back_populates="run", uselist=False, cascade="all, delete-orphan"
+    )
+    support_resistance_levels: Mapped[list["SupportResistanceLevelRow"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
     scored_candidates: Mapped[list["ScoredCandidateRow"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
     recommendation: Mapped["RecommendationRow"] = relationship(
+        back_populates="run", uselist=False, cascade="all, delete-orphan"
+    )
+    agent_thesis: Mapped["AgentThesisRow | None"] = relationship(
         back_populates="run", uselist=False, cascade="all, delete-orphan"
     )
 
@@ -58,6 +70,45 @@ class IndicatorSnapshotRow(Base):
     volume_sma_20: Mapped[float] = mapped_column(Float)
 
     run: Mapped[AnalysisRun] = relationship(back_populates="indicator_snapshot")
+
+
+class TrendAssessmentRow(Base):
+    __tablename__ = "trend_assessment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("analysis_run.id"), unique=True)
+
+    direction: Mapped[str] = mapped_column(String)
+    strength: Mapped[str] = mapped_column(String)
+    adx: Mapped[float] = mapped_column(Float)
+
+    run: Mapped[AnalysisRun] = relationship(back_populates="trend_assessment")
+
+
+class VolumeAssessmentRow(Base):
+    __tablename__ = "volume_assessment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("analysis_run.id"), unique=True)
+
+    relative_volume: Mapped[float] = mapped_column(Float)
+    flags: Mapped[list] = mapped_column(JSON)
+
+    run: Mapped[AnalysisRun] = relationship(back_populates="volume_assessment")
+
+
+class SupportResistanceLevelRow(Base):
+    __tablename__ = "support_resistance_level"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("analysis_run.id"))
+
+    price: Mapped[float] = mapped_column(Float)
+    level_type: Mapped[str] = mapped_column(String)
+    touches: Mapped[int] = mapped_column(Integer)
+    last_touch_index: Mapped[int] = mapped_column(Integer)
+
+    run: Mapped[AnalysisRun] = relationship(back_populates="support_resistance_levels")
 
 
 class ScoredCandidateRow(Base):
@@ -98,3 +149,30 @@ class RecommendationRow(Base):
     rationale: Mapped[str] = mapped_column(String)
 
     run: Mapped[AnalysisRun] = relationship(back_populates="recommendation")
+
+
+class AgentThesisRow(Base):
+    """See specs/agents.yaml for the pipeline that produces this row."""
+
+    __tablename__ = "agent_thesis"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("analysis_run.id"), unique=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime)
+
+    quant_narrative: Mapped[str] = mapped_column(String)
+    quant_key_factors: Mapped[list] = mapped_column(JSON)
+    quant_score_breakdown: Mapped[dict] = mapped_column(JSON)
+    quant_overall_score: Mapped[float] = mapped_column(Float)
+
+    risk_level: Mapped[str | None] = mapped_column(String, nullable=True)
+    risk_concerns: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    risk_position_sizing_note: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    strategy: Mapped[str | None] = mapped_column(String, nullable=True)
+    strategy_rationale: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    thesis: Mapped[str] = mapped_column(String)
+    consensus: Mapped[str] = mapped_column(String)
+
+    run: Mapped[AnalysisRun] = relationship(back_populates="agent_thesis")

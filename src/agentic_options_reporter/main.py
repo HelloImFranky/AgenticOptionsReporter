@@ -6,15 +6,30 @@ from fastapi import FastAPI, HTTPException
 
 from agentic_options_reporter.config import get_settings
 from agentic_options_reporter.data.market_data import MarketDataError
-from agentic_options_reporter.models.db import AnalysisRun
+from agentic_options_reporter.models.db import AgentThesisRow, AnalysisRun
 from agentic_options_reporter.models.schemas import (
+    AgentThesisResult,
     AnalysisResult,
     AnalysisRunSummary,
     IndicatorSnapshot,
+    InvestmentThesis,
+    QuantInterpretation,
     Recommendation,
+    RiskAssessment,
     ScoredCandidate,
+    StrategySuggestion,
+    SupportResistanceLevel,
+    TrendAssessment,
+    VolumeAssessment,
 )
-from agentic_options_reporter.persistence import make_session_factory
+from agentic_options_reporter.persistence import (
+    delete_thesis,
+    make_session_factory,
+    persist_thesis,
+)
+from agentic_options_reporter.thesis.llm_client import AnthropicLlmClient, LlmError
+from agentic_options_reporter.thesis.orchestrator import run_thesis_pipeline
+from agentic_options_reporter.thesis.parsing import ThesisGenerationError
 from agentic_options_reporter.workflow import run_analysis
 
 app = FastAPI(title="AgenticOptionsReporter", version="0.1.0")
@@ -25,6 +40,12 @@ _session_factory = make_session_factory(_settings.database_url)
 
 def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
     indicators = IndicatorSnapshot.model_validate(run.indicator_snapshot, from_attributes=True)
+    trend = TrendAssessment.model_validate(run.trend_assessment, from_attributes=True)
+    volume = VolumeAssessment.model_validate(run.volume_assessment, from_attributes=True)
+    levels = [
+        SupportResistanceLevel.model_validate(row, from_attributes=True)
+        for row in run.support_resistance_levels
+    ]
     candidates = [
         ScoredCandidate.model_validate(row, from_attributes=True)
         for row in sorted(run.scored_candidates, key=lambda c: c.score, reverse=True)
@@ -39,26 +60,42 @@ def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
         run_id=run.id,
         generated_at=run.generated_at,
         indicators=indicators,
-        # Support/resistance levels are transient analysis output, not
-        # persisted (see specs/database.yaml); unavailable on replay.
-        trend=_placeholder_trend(),
-        volume=_placeholder_volume(),
-        support_resistance=[],
+        trend=trend,
+        volume=volume,
+        support_resistance=levels,
         candidates=candidates,
         recommendation=recommendation,
     )
 
 
-def _placeholder_trend():
-    from agentic_options_reporter.models.schemas import TrendAssessment
-
-    return TrendAssessment(direction="neutral", strength="weak", adx=0.0)
-
-
-def _placeholder_volume():
-    from agentic_options_reporter.models.schemas import VolumeAssessment
-
-    return VolumeAssessment(relative_volume=0.0, flags=[])
+def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
+    risk = (
+        RiskAssessment(
+            risk_level=row.risk_level,
+            concerns=row.risk_concerns or [],
+            position_sizing_note=row.risk_position_sizing_note or "",
+        )
+        if row.risk_level is not None
+        else None
+    )
+    strategy = (
+        StrategySuggestion(strategy=row.strategy, rationale=row.strategy_rationale or "")
+        if row.strategy is not None
+        else None
+    )
+    return AgentThesisResult(
+        run_id=row.run_id,
+        generated_at=row.generated_at,
+        quant_interpretation=QuantInterpretation(
+            narrative=row.quant_narrative,
+            key_factors=row.quant_key_factors,
+            score_breakdown=row.quant_score_breakdown,
+            overall_score=row.quant_overall_score,
+        ),
+        risk_assessment=risk,
+        strategy_suggestion=strategy,
+        investment_thesis=InvestmentThesis(thesis=row.thesis, consensus=row.consensus),
+    )
 
 
 @app.get("/health")
@@ -107,3 +144,43 @@ def list_runs(symbol: str | None = None, limit: int = 20) -> list[AnalysisRunSum
             )
             for run in runs
         ]
+
+
+@app.post("/runs/{run_id}/thesis", response_model=AgentThesisResult)
+def generate_thesis(run_id: int, regenerate: bool = False) -> AgentThesisResult:
+    with _session_factory() as session:
+        run = session.get(AnalysisRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+        if run.agent_thesis is not None and not regenerate:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Run {run_id} already has a thesis; pass regenerate=true to replace it",
+            )
+
+        analysis_result = _to_analysis_result(run)
+
+        try:
+            llm_client = AnthropicLlmClient(
+                model=_settings.llm_model, max_tokens=_settings.llm_max_tokens
+            )
+            thesis_result = run_thesis_pipeline(analysis_result, llm_client)
+        except (LlmError, ThesisGenerationError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        if run.agent_thesis is not None:
+            delete_thesis(session, run_id)
+        persist_thesis(session, thesis_result)
+        return thesis_result
+
+
+@app.get("/runs/{run_id}/thesis", response_model=AgentThesisResult)
+def get_thesis(run_id: int) -> AgentThesisResult:
+    with _session_factory() as session:
+        run = session.get(AnalysisRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        if run.agent_thesis is None:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} has no thesis generated yet")
+        return _to_thesis_result(run.agent_thesis)
