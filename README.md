@@ -46,8 +46,8 @@ Or launch the Flet front end (a desktop window by default; see
 `src/agentic_options_reporter/frontend/app.py`), which drives the same API
 through the same `ApiClient` the CLI uses. It's a Material 3 UI with an
 Analyze tab (recommendation badge, trend/volume/indicator stat cards, a
-scored-candidates table) and a History tab, plus a light/dark mode toggle
-in the app bar:
+scored-candidates table), an Agents tab (see below), and a History tab,
+plus a light/dark mode toggle in the app bar:
 
 ```bash
 poetry run agentic-options-reporter-ui
@@ -72,8 +72,13 @@ poetry run agentic-options-reporter thesis <run_id> --regenerate # discard and r
 poetry run agentic-options-reporter thesis <run_id> --fetch-only # fetch without generating
 ```
 
-Or click "Generate investment thesis" in the Flet UI's Analyze tab after
-running an analysis.
+Or use the Flet UI's **Agents** tab after running an analysis: click
+"Generate investment thesis" to see a **Final output** verdict (the
+recommendation action + the agents' consensus) and, below it, an
+**Agent conversation** — Quant Interpreter, Risk Challenger, Options
+Strategist, and Investment Thesis shown in sequence as each agent's
+contribution, with a "skipped" message where an agent had no candidate
+contract to work with.
 
 ## Testing
 
