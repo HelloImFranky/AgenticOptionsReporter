@@ -1,9 +1,15 @@
 import pytest
 
 from agentic_options_reporter.data.macro_provider import (
+    BeaMacroProvider,
+    BlsMacroProvider,
     FredMacroProvider,
     MacroProvider,
     MacroProviderError,
+    MacroProviderRateLimited,
+    MacroProviderRouter,
+    MacroProviderUnsupported,
+    build_macro_provider,
 )
 
 from conftest import FakeHttpResponse, FakeRequestsGet
@@ -108,3 +114,206 @@ def test_http_failure_raises_macro_provider_error(fake_requests_module):
     provider = FredMacroProvider(api_key="test-key")
     with pytest.raises(MacroProviderError):
         provider.get_interest_rates()
+
+
+def test_rate_limit_status_raises_macro_provider_rate_limited(fake_requests_module):
+    exc = fake_requests_module.exceptions.RequestException("too many requests")
+    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(None, status_code=429, raise_exc=exc))
+    provider = FredMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderRateLimited):
+        provider.get_interest_rates()
+
+
+# -- BlsMacroProvider --
+
+
+def _bls_series(*values_and_periods):
+    return {
+        "status": "REQUEST_SUCCEEDED",
+        "Results": {
+            "series": [
+                {
+                    "seriesID": "CUUR0000SA0",
+                    "data": [
+                        {"year": year, "period": period, "value": value}
+                        for value, year, period in values_and_periods
+                    ],
+                }
+            ]
+        },
+    }
+
+
+def test_bls_requires_api_key(monkeypatch):
+    monkeypatch.delenv("BLS_API_KEY", raising=False)
+    with pytest.raises(MacroProviderError):
+        BlsMacroProvider()
+
+
+def test_bls_get_cpi_computes_yoy_change(fake_requests_module):
+    entries = [("310.0", "2026", "M06")] + [
+        ("300.0", "2025", f"M{i:02d}") for i in range(6, 0, -1)
+    ] + [("300.0", "2025", f"M{i:02d}") for i in range(12, 6, -1)]
+    # Ensure at least 13 entries, most-recent-first after sorting.
+    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_bls_series(*entries)))
+    provider = BlsMacroProvider(api_key="test-key")
+    cpi = provider.get_cpi()
+    assert cpi.value == 310.0
+    assert cpi.yoy_change_pct == pytest.approx((310.0 - 300.0) / 300.0 * 100)
+
+
+def test_bls_get_cpi_raises_when_no_observations(fake_requests_module):
+    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_bls_series()))
+    provider = BlsMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderError):
+        provider.get_cpi()
+
+
+def test_bls_get_interest_rates_is_unsupported():
+    provider = BlsMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderUnsupported):
+        provider.get_interest_rates()
+
+
+def test_bls_get_gdp_is_unsupported():
+    provider = BlsMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderUnsupported):
+        provider.get_gdp()
+
+
+def test_bls_get_macro_calendar_returns_empty_list():
+    provider = BlsMacroProvider(api_key="test-key")
+    assert provider.get_macro_calendar() == []
+
+
+def test_bls_request_failure_raises_on_bad_status(fake_requests_module):
+    fake_requests_module.get = FakeRequestsGet(
+        FakeHttpResponse({"status": "REQUEST_NOT_PROCESSED", "message": ["invalid key"]})
+    )
+    provider = BlsMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderError):
+        provider.get_cpi()
+
+
+# -- BeaMacroProvider --
+
+
+def _bea_data(*rows):
+    return {
+        "BEAAPI": {
+            "Results": {
+                "Data": [
+                    {"TimePeriod": period, "LineNumber": "1", "DataValue": value} for value, period in rows
+                ]
+            }
+        }
+    }
+
+
+def test_bea_requires_api_key(monkeypatch):
+    monkeypatch.delenv("BEA_API_KEY", raising=False)
+    with pytest.raises(MacroProviderError):
+        BeaMacroProvider()
+
+
+def test_bea_get_gdp_computes_yoy_growth(fake_requests_module):
+    fake_requests_module.get = FakeRequestsGet(
+        FakeHttpResponse(
+            _bea_data(
+                ("23,000.0", "2026Q2"),
+                ("22,500.0", "2026Q1"),
+                ("22,300.0", "2025Q4"),
+                ("22,100.0", "2025Q3"),
+                ("22,000.0", "2025Q2"),
+            )
+        )
+    )
+    provider = BeaMacroProvider(api_key="test-key")
+    gdp = provider.get_gdp()
+    assert gdp.value == 23000.0
+    assert gdp.yoy_growth_pct == pytest.approx((23000.0 - 22000.0) / 22000.0 * 100)
+    assert gdp.as_of.year == 2026
+    assert gdp.as_of.month == 6
+
+
+def test_bea_get_gdp_raises_when_no_data(fake_requests_module):
+    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_bea_data()))
+    provider = BeaMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderError):
+        provider.get_gdp()
+
+
+def test_bea_get_cpi_is_unsupported():
+    provider = BeaMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderUnsupported):
+        provider.get_cpi()
+
+
+def test_bea_get_interest_rates_is_unsupported():
+    provider = BeaMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderUnsupported):
+        provider.get_interest_rates()
+
+
+def test_bea_get_macro_calendar_returns_empty_list():
+    provider = BeaMacroProvider(api_key="test-key")
+    assert provider.get_macro_calendar() == []
+
+
+# -- MacroProviderRouter --
+
+
+class _FakeMacroClient(MacroProvider):
+    def __init__(self, cpi=None, error=None):
+        self._cpi = cpi
+        self._error = error
+
+    def get_interest_rates(self):
+        raise NotImplementedError
+
+    def get_cpi(self):
+        if self._error is not None:
+            raise self._error
+        return self._cpi
+
+    def get_gdp(self):
+        raise NotImplementedError
+
+    def get_macro_calendar(self):
+        return []
+
+
+def test_macro_provider_router_rejects_empty_client_list():
+    with pytest.raises(MacroProviderError):
+        MacroProviderRouter([])
+
+
+def test_macro_provider_router_falls_through_when_provider_lacks_series():
+    from datetime import date as date_cls
+
+    from agentic_options_reporter.models.schemas import CpiSnapshot
+
+    unsupported = _FakeMacroClient(error=MacroProviderUnsupported("no CPI"))
+    supported = _FakeMacroClient(cpi=CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date_cls(2026, 6, 1)))
+    router = MacroProviderRouter([("first", unsupported), ("second", supported)])
+
+    result = router.get_cpi()
+
+    assert result.value == 310.0
+
+
+def test_build_macro_provider_raises_when_unconfigured(monkeypatch):
+    for var in ("FRED_API_KEY", "BLS_API_KEY", "BEA_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(MacroProviderError):
+        build_macro_provider()
+
+
+def test_build_macro_provider_respects_fallback_order_env_var(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "test-key")
+    monkeypatch.setenv("BLS_API_KEY", "test-key")
+    monkeypatch.setenv("AOR_MACRO_PROVIDER_FALLBACK_ORDER", "bls,fred")
+
+    provider = build_macro_provider()
+
+    assert provider.provider_names == ["bls", "fred"]

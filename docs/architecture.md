@@ -100,27 +100,31 @@ that Polygon.io, Alpaca, Tradier, Interactive Brokers, Finnhub, or Alpha
 Vantage can be added as alternate providers without changing downstream
 analysis code. Responses are cached to reduce rate-limit pressure.
 
-## Research providers (Phase 2a)
+## Research providers
 
 Beyond price/option data, the investment-thesis pipeline optionally draws
 on four more provider interfaces (`specs/providers.yaml`), each following
 the same ABC-interface + concrete-implementation + env-var-API-key
 pattern as `MarketDataProvider`:
 
-| interface | phase-2a implementation | data source | env var |
-|---|---|---|---|
-| `FinancialProvider` | `FmpFinancialProvider` | Financial Modeling Prep (free tier) | `FMP_API_KEY` |
-| `NewsProvider` | `FinnhubNewsProvider` | Finnhub (free tier) | `FINNHUB_API_KEY` |
-| `MacroProvider` | `FredMacroProvider` | FRED (free) | `FRED_API_KEY` |
-| `SECProvider` | `SecEdgarProvider` | SEC EDGAR (free, keyless) | `SEC_EDGAR_USER_AGENT` (optional) |
+| interface | implementations | env var(s) |
+|---|---|---|
+| `FinancialProvider` | Financial Modeling Prep, Alpha Vantage | `FMP_API_KEY`, `ALPHA_VANTAGE_API_KEY` |
+| `NewsProvider` | Finnhub, Alpha Vantage, NewsAPI, GDELT (keyless) | `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_API_KEY` |
+| `MacroProvider` | FRED, BLS, BEA | `FRED_API_KEY`, `BLS_API_KEY`, `BEA_API_KEY` |
+| `SECProvider` | SEC EDGAR (free, keyless) | `SEC_EDGAR_USER_AGENT` (optional) |
 
-Each is constructed lazily, per-request, in `main.py`'s
-`_optional_*_provider()` helpers; if its API key isn't set, construction
-raises the provider's own `*Error` which is caught and treated as "not
-configured" (`None`), not a startup or request failure. See
-`docs/investment_thesis.md` for how the Financial/News/Macro Research
-agents consume these providers. `SECProvider` is implemented but not yet
-wired into any agent (reserved for a future Catalyst agent).
+Each interface's `build_<name>_provider()` factory (`data/*_provider.py`)
+composes every currently-configured implementation into a
+`<X>ProviderRouter` — the data-provider analog of
+`thesis.llm_client.LlmRouter` (see Tooling above) — that fails over between them
+per method call, configurable via `AOR_<NAME>_PROVIDER_FALLBACK_ORDER`.
+`main.py`'s `_optional_*_provider()` helpers call these factories and
+treat a `*ProviderError` (zero providers configured) as "not configured"
+(`None`), not a startup or request failure. See `docs/investment_thesis.md`
+for how the Financial/News/Macro Research agents consume these providers.
+`SECProvider` has only one implementation and isn't wired into a router
+or any agent yet (reserved for a future Catalyst agent).
 
 ## Claude Code instructions
 

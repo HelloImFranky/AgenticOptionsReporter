@@ -64,14 +64,25 @@ challenge, and synthesize an already-persisted run into a written
 thesis — see `docs/investment_thesis.md` and `specs/agents.yaml`. These
 agents never compute a number the quant engine hasn't already computed.
 
-The three research agents each depend on an external data provider and
-are skipped (rendered as "not configured" rather than an error) if its
-key isn't set:
+Each research agent draws on multiple redundant data providers and fails
+over between them the same way the LLM providers do below — a single
+provider's outage, rate limit, or quota exhaustion no longer skips the
+whole agent. The agent is only skipped (rendered as "not configured")
+if *none* of its providers are configured:
 
 ```bash
-export FMP_API_KEY=...       # Financial Research (financialmodelingprep.com, free tier)
-export FINNHUB_API_KEY=...   # News Research (finnhub.io, free tier)
-export FRED_API_KEY=...      # Macro Research (fred.stlouisfed.org, free)
+# Financial Research (financialmodelingprep.com, alphavantage.co — both free tier)
+export FMP_API_KEY=...
+export ALPHA_VANTAGE_API_KEY=...
+
+# News Research (finnhub.io, alphavantage.co, newsapi.org — all free tier; GDELT needs no key)
+export FINNHUB_API_KEY=...
+export NEWSAPI_API_KEY=...
+
+# Macro Research (fred.stlouisfed.org, bls.gov, bea.gov — all free)
+export FRED_API_KEY=...
+export BLS_API_KEY=...
+export BEA_API_KEY=...
 ```
 
 Six LLM providers are supported — `anthropic`, `openai`, `groq`, `gemini`,

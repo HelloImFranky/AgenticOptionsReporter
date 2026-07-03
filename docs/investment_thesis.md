@@ -60,26 +60,43 @@ The three research agents are ticker/market-wide rather than
 contract-specific, so they still run in that case (as long as their
 provider is configured).
 
-## Research agents (Phase 2a)
+## Research agents
 
 Financial Research, News Research, and Macro Research each depend on a
 provider interface (`FinancialProvider`, `NewsProvider`, `MacroProvider`
 in `specs/providers.yaml`) via the same dependency-injection pattern as
-`MarketDataProvider`. Each is **optional at runtime**: if the
-corresponding provider's API key isn't configured, the FastAPI layer
+`MarketDataProvider`. Each is **optional at runtime**: if not a single
+configured implementation exists for that interface, the FastAPI layer
 constructs `None` instead of raising, `run_thesis_pipeline` skips that
 agent, and the resulting `AgentThesisResult` field is `null` — mirrored
 in the Agents tab as a muted "Skipped — no ... provider configured"
-message rather than an error. A *configured* provider that fails at call
-time (rate limited, bad ticker, network down) is a different case and
-propagates as a real 502, since that's a genuine runtime problem rather
-than expected absence.
+message rather than an error.
 
-| agent | provider interface | phase-2a implementation | env var |
+| agent | provider interface | implementations | env var(s) |
 |---|---|---|---|
-| Financial Research | `FinancialProvider` | `FmpFinancialProvider` (Financial Modeling Prep) | `FMP_API_KEY` |
-| News Research | `NewsProvider` | `FinnhubNewsProvider` (Finnhub) | `FINNHUB_API_KEY` |
-| Macro Research | `MacroProvider` | `FredMacroProvider` (FRED) | `FRED_API_KEY` |
+| Financial Research | `FinancialProvider` | Financial Modeling Prep, Alpha Vantage | `FMP_API_KEY`, `ALPHA_VANTAGE_API_KEY` |
+| News Research | `NewsProvider` | Finnhub, Alpha Vantage, NewsAPI, GDELT (keyless) | `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_API_KEY` |
+| Macro Research | `MacroProvider` | FRED, BLS, BEA | `FRED_API_KEY`, `BLS_API_KEY`, `BEA_API_KEY` |
+
+### Automatic failover across data providers
+
+Each interface's `build_<name>_provider()` factory (e.g.
+`build_news_provider()`) composes every implementation with a configured
+API key into a `<X>ProviderRouter` — the data-provider analog of
+`thesis.llm_client.LlmRouter` — configurable via a fallback-order env var
+(`AOR_NEWS_PROVIDER_FALLBACK_ORDER`, `AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER`,
+`AOR_MACRO_PROVIDER_FALLBACK_ORDER`). Unlike the LLM router, routing
+happens **per method call**, not per whole provider: BLS has no GDP data
+and Alpha Vantage's OVERVIEW has no analyst consensus rating, so a
+provider raises `<X>ProviderUnsupported` (retryable) for the methods
+outside its specialty rather than being excluded from the router
+entirely — it's still used for the methods it does support. A
+transient failure (rate limit, quota, timeout, 5xx) advances to the next
+configured provider the same way; only when *every* configured provider
+fails does the request surface as a 502 (see `specs/providers.yaml:
+provider_router` for the full error-classification detail). Since GDELT
+needs no API key, News Research now effectively always has at least one
+provider available.
 
 Financial Research's `analyst_consensus` field is passed through verbatim
 from the provider's `AnalystEstimates.consensus_rating` — never

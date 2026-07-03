@@ -133,10 +133,30 @@ class FakeHttpResponse:
 
     def raise_for_status(self) -> None:
         if self._raise_exc is not None:
+            # Mirrors real requests.HTTPError, which carries back a
+            # `.response` (with `.status_code`) so callers can classify
+            # 429/5xx without a separate response object.
+            if getattr(self._raise_exc, "response", None) is None:
+                try:
+                    self._raise_exc.response = self
+                except AttributeError:
+                    pass
             raise self._raise_exc
 
     def json(self):
         return self._json_data
+
+
+class _FakeRequestException(Exception):
+    pass
+
+
+class _FakeTimeoutError(_FakeRequestException):
+    pass
+
+
+class _FakeConnectionError(_FakeRequestException):
+    pass
 
 
 class FakeRequestsGet:
@@ -158,10 +178,18 @@ class FakeRequestsGet:
 def fake_requests_module(monkeypatch):
     """Injects a fake `requests` module so provider modules (which do a
     lazy `import requests` inside their HTTP methods) never touch the
-    network. Configure `.get` per test with a `FakeRequestsGet`."""
+    network. Configure `.get` per test with a `FakeRequestsGet`. Exception
+    classes mirror real requests.exceptions' hierarchy (Timeout and
+    ConnectionError both subclass RequestException) so
+    data.provider_router.classify_requests_error's isinstance checks work
+    the same way against these fakes as against the real SDK."""
     fake_module = types.SimpleNamespace(
         get=None,
-        exceptions=types.SimpleNamespace(RequestException=Exception),
+        exceptions=types.SimpleNamespace(
+            RequestException=_FakeRequestException,
+            Timeout=_FakeTimeoutError,
+            ConnectionError=_FakeConnectionError,
+        ),
     )
     monkeypatch.setitem(sys.modules, "requests", fake_module)
     return fake_module
