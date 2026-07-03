@@ -157,6 +157,10 @@ interfaces:
             practice), rescaled by /10 and clipped to this project's
             -1..1 SentimentSnapshot.score convention. A unit conversion
             of a real provider-supplied signal, not a fabricated value.
+            The accompanying article sample is capped at
+            SENTIMENT_ARTICLE_SAMPLE (50, down from 250) — GDELT
+            rate-limits aggressively and the larger sample only
+            sharpened article_count while inviting 429s.
 
   FinancialProvider:
     module: agentic_options_reporter.data.financial_provider

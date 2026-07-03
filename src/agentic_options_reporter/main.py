@@ -146,6 +146,7 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
         risk_assessment=risk,
         strategy_suggestion=strategy,
         investment_thesis=InvestmentThesis(thesis=row.thesis, consensus=row.consensus),
+        pipeline_warnings=row.pipeline_warnings or [],
     )
 
 

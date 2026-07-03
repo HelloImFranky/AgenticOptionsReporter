@@ -68,7 +68,11 @@ Each research agent draws on multiple redundant data providers and fails
 over between them the same way the LLM providers do below — a single
 provider's outage, rate limit, or quota exhaustion no longer skips the
 whole agent. The agent is only skipped (rendered as "not configured")
-if *none* of its providers are configured:
+if *none* of its providers are configured. And if every configured
+provider for one agent fails mid-run, the pipeline still completes:
+that agent's finding is null and the failure is reported at the end of
+the run in `pipeline_warnings` (an amber banner in the Agents tab)
+rather than crashing the request.
 
 ```bash
 # Financial Research (financialmodelingprep.com, alphavantage.co — both free tier)

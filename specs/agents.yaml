@@ -62,11 +62,24 @@ no_candidate_short_circuit: >
   configured.
 provider_availability: >
   financial_research/news_research/macro_research each run only if their
-  provider was constructed (non-null) — i.e. only if the corresponding
-  API key is configured (see specs/providers.yaml). An unconfigured
-  provider is not an error: the orchestrator produces a null finding for
-  that section, the same way no_candidate_short_circuit produces null
-  risk_assessment/strategy_suggestion.
+  provider was constructed (non-null) — i.e. only if at least one
+  implementation is configured (see specs/providers.yaml). An
+  unconfigured provider is not an error: the orchestrator produces a
+  null finding for that section, the same way no_candidate_short_circuit
+  produces null risk_assessment/strategy_suggestion.
+
+provider_failure_mid_run: >
+  A CONFIGURED provider failing at call time (rate limited even after
+  router failover, network down, bad ticker) is also not fatal: the
+  orchestrator catches that interface's <X>ProviderError around each
+  research step, leaves the affected finding null, and records the
+  failure in AgentThesisResult.pipeline_warnings (each entry prefixed
+  with the agent it affected, e.g. "news_research: ..."), reported at
+  the end of the run instead of crashing mid-pipeline and throwing away
+  the quant/risk/strategy work already done. Only failures that make the
+  final synthesis impossible remain fatal (LlmError from the thesis
+  LLM itself, ThesisGenerationError from unparseable responses) — those
+  still surface as a 502 (specs/api.yaml).
 
 agents:
   - name: quant_interpreter
@@ -246,6 +259,7 @@ models:
     risk_assessment: "RiskAssessment | null"
     strategy_suggestion: "StrategySuggestion | null"
     investment_thesis: InvestmentThesis
+    pipeline_warnings: "list[str] = []"   # see provider_failure_mid_run
 
 llm_client:
   description: >

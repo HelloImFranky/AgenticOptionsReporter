@@ -415,6 +415,42 @@ def test_generate_thesis_persists_and_returns_research_findings(client):
     assert get_body["macro_research"]["summary"] == "Rates steady."
 
 
+def test_generate_thesis_pipeline_warnings_round_trip(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+    fake_result.pipeline_warnings = [
+        "news_research: provider failed during the run — GDELT rate limited: 429"
+    ]
+
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        response = test_client.post(f"/runs/{run_id}/thesis")
+
+    # The run succeeds (200, not 502) and carries the warning.
+    assert response.status_code == 200
+    assert response.json()["pipeline_warnings"] == fake_result.pipeline_warnings
+
+    # Round-trip through persistence.
+    get_response = test_client.get(f"/runs/{run_id}/thesis")
+    assert get_response.json()["pipeline_warnings"] == fake_result.pipeline_warnings
+
+
+def test_generate_thesis_defaults_to_empty_pipeline_warnings(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        test_client.post(f"/runs/{run_id}/thesis")
+
+    response = test_client.get(f"/runs/{run_id}/thesis")
+    assert response.json()["pipeline_warnings"] == []
+
+
 def test_generate_thesis_absent_research_findings_round_trip_as_null(client):
     test_client, session_factory = client
     run_id = _persist_full_run(session_factory)

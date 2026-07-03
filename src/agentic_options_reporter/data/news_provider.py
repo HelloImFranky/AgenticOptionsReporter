@@ -378,8 +378,13 @@ class GdeltNewsProvider(NewsProvider):
         articles = data.get("articles") or []
         return [self._to_article(item) for item in articles[:limit]]
 
+    # Article sample used for get_sentiment's article_count. Kept modest:
+    # GDELT rate-limits aggressively, and a larger sample only sharpens a
+    # count while doubling the odds of a 429 killing the whole call.
+    SENTIMENT_ARTICLE_SAMPLE = 50
+
     def get_sentiment(self, ticker: str) -> SentimentSnapshot:
-        articles = self.get_company_news(ticker, limit=250)
+        articles = self.get_company_news(ticker, limit=self.SENTIMENT_ARTICLE_SAMPLE)
         data = self._get({"query": ticker, "mode": "timelinetone", "format": "json"})
         timeline = data.get("timeline") or []
         latest_value = 0.0

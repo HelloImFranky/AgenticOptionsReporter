@@ -193,4 +193,9 @@ class AgentThesisRow(Base):
     thesis: Mapped[str] = mapped_column(String)
     consensus: Mapped[str] = mapped_column(String)
 
+    # Non-fatal mid-pipeline problems (e.g. a research provider rate
+    # limited during the run). Null on rows written before this column
+    # existed; read back as an empty list.
+    pipeline_warnings: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     run: Mapped[AnalysisRun] = relationship(back_populates="agent_thesis")

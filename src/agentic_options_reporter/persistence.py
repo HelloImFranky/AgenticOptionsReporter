@@ -160,6 +160,7 @@ def persist_thesis(session: Session, thesis_result: AgentThesisResult) -> None:
             strategy_rationale=strategy.rationale if strategy else None,
             thesis=thesis_result.investment_thesis.thesis,
             consensus=thesis_result.investment_thesis.consensus,
+            pipeline_warnings=thesis_result.pipeline_warnings,
         )
     )
     session.commit()
