@@ -7,8 +7,11 @@ from fastapi.testclient import TestClient
 from agentic_options_reporter import main as main_module
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
+    FinancialResearchFinding,
     IndicatorSnapshot,
     InvestmentThesis,
+    MacroResearchFinding,
+    NewsResearchFinding,
     QuantInterpretation,
     Recommendation,
     RiskAssessment,
@@ -341,3 +344,107 @@ def test_generate_thesis_no_candidate_short_circuit(client):
     body = response.json()
     assert body["risk_assessment"] is None
     assert body["strategy_suggestion"] is None
+
+
+def test_generate_thesis_persists_and_returns_research_findings(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+    fake_result.financial_research = FinancialResearchFinding(
+        company_health="strong", growth="accelerating", profitability="high",
+        cash_flow="positive", analyst_consensus="Buy", narrative="Fundamentals solid.",
+    )
+    fake_result.news_research = NewsResearchFinding(
+        sentiment="bullish", summary="Positive coverage.", catalysts=["earnings beat"], risks=["supply chain"]
+    )
+    fake_result.macro_research = MacroResearchFinding(
+        regime="risk_on", outlook="Favorable.", summary="Rates steady."
+    )
+
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        response = test_client.post(f"/runs/{run_id}/thesis")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["financial_research"]["analyst_consensus"] == "Buy"
+    assert body["news_research"]["catalysts"] == ["earnings beat"]
+    assert body["macro_research"]["regime"] == "risk_on"
+
+    # Round-trip through the GET endpoint (reads back from persistence).
+    get_response = test_client.get(f"/runs/{run_id}/thesis")
+    assert get_response.status_code == 200
+    get_body = get_response.json()
+    assert get_body["financial_research"]["company_health"] == "strong"
+    assert get_body["news_research"]["sentiment"] == "bullish"
+    assert get_body["macro_research"]["summary"] == "Rates steady."
+
+
+def test_generate_thesis_absent_research_findings_round_trip_as_null(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        test_client.post(f"/runs/{run_id}/thesis")
+
+    response = test_client.get(f"/runs/{run_id}/thesis")
+    body = response.json()
+    assert body["financial_research"] is None
+    assert body["news_research"] is None
+    assert body["macro_research"] is None
+
+
+@pytest.mark.parametrize(
+    "error_cls_path",
+    [
+        "agentic_options_reporter.data.financial_provider.FinancialProviderError",
+        "agentic_options_reporter.data.news_provider.NewsProviderError",
+        "agentic_options_reporter.data.macro_provider.MacroProviderError",
+    ],
+)
+def test_generate_thesis_configured_provider_failure_returns_502(client, error_cls_path):
+    """A provider that IS configured but fails at call time (rate limited,
+    bad ticker, network down) is a real error — unlike an unconfigured
+    provider, which is handled silently as None (see provider_availability
+    in specs/providers.yaml)."""
+    import importlib
+
+    module_path, _, cls_name = error_cls_path.rpartition(".")
+    error_cls = getattr(importlib.import_module(module_path), cls_name)
+
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", side_effect=error_cls("provider call failed")
+    ):
+        response = test_client.post(f"/runs/{run_id}/thesis")
+
+    assert response.status_code == 502
+
+
+def test_optional_financial_provider_returns_none_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("FMP_API_KEY", raising=False)
+    assert main_module._optional_financial_provider() is None
+
+
+def test_optional_news_provider_returns_none_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    assert main_module._optional_news_provider() is None
+
+
+def test_optional_macro_provider_returns_none_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    assert main_module._optional_macro_provider() is None
+
+
+def test_optional_financial_provider_returns_instance_when_configured(monkeypatch):
+    monkeypatch.setenv("FMP_API_KEY", "test-key")
+    from agentic_options_reporter.data.financial_provider import FmpFinancialProvider
+
+    provider = main_module._optional_financial_provider()
+    assert isinstance(provider, FmpFinancialProvider)

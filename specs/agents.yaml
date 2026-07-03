@@ -1,45 +1,72 @@
 pipeline: investment_thesis
-version: 1
+version: 2
 description: >
   A pipeline of LLM-backed agents that interpret, challenge, and narrate
-  the output of the deterministic quant engine (workflow.yaml) into a
+  the output of the deterministic quant engine (workflow.yaml) plus
+  external research providers (specs/providers.yaml) into a
   human-readable investment thesis. Agents never compute technical
   indicators, Greeks, probability of profit, scoring, or risk metrics —
   those remain the sole responsibility of analysis/*.py. Agents consume
-  already-computed, already-persisted AnalysisResult data and add
-  interpretation and judgment on top of it.
+  already-computed data (persisted AnalysisResult, or provider-supplied
+  normalized models) and add interpretation and judgment on top of it —
+  never their own numbers.
 
-status: phase_1
-phase_1_scope: >
-  Agents that reason only over data the quant engine already produced
-  for a persisted run (specs/database.yaml: analysis_run and its
-  children). No external data sources (news, macro, social, filings) are
-  wired up yet — see future_phases below.
-future_phases:
-  - name: market_research_agent
+status: phase_2a
+phase_1_recap: >
+  Phase 1 shipped quant_interpreter, risk_challenger, options_strategy,
+  and investment_thesis, reasoning only over data the quant engine
+  produced for a persisted run (specs/database.yaml: analysis_run and
+  its children).
+phase_2a_scope: >
+  Adds financial_research, news_research, and macro_research, each
+  reasoning over one new provider interface (specs/providers.yaml). Every
+  new agent is optional at runtime — see provider_availability below —
+  so a deployment without the corresponding API key still gets the full
+  phase 1 pipeline, just without that section.
+deferred:
+  - name: catalyst_agent
     description: >
-      Sector/macro/earnings/analyst-upgrade context. Needs a market/news
-      data provider decision (not yet made) before it can be specified.
-  - name: news_sentiment_agent
+      Upcoming earnings/economic events/product launches and expected
+      market impact, combining NewsProvider + SECProvider + MacroProvider.
+      Deferred until those three have shipped and proven out individually.
+  - name: risk_and_strategy_incorporate_research_findings
     description: >
-      News/social/filings sentiment. Needs a data provider decision (not
-      yet made) before it can be specified.
+      The Risk Challenger and Options Strategy agents currently reason
+      only over quant-engine data (unchanged from phase 1). Feeding them
+      financial/news/macro context too (as the JSON design brief's
+      "Risk Management Agent inputs: outputs from all previous agents"
+      envisions) is deferred to keep this pass's blast radius to
+      already-shipped, tested agents unchanged; phase 2a only feeds new
+      research into investment_thesis's final synthesis.
   - name: orchestrator_synthesis
     description: >
-      Once market/news agents exist, the orchestrator should synthesize
-      (not average) potentially conflicting agent conclusions rather than
-      the current linear hand-off.
+      Once conflicting signals across quant/financial/news/macro become
+      common, the orchestrator should synthesize (not just concatenate)
+      them rather than the current linear hand-off into investment_thesis.
 
 entrypoint: agentic_options_reporter.thesis.orchestrator:run_thesis_pipeline
 input:
   analysis_result: AnalysisResult   # see specs/api.yaml
   llm_client: LlmClient
+  financial_provider: FinancialProvider | null = null   # see specs/providers.yaml
+  news_provider: NewsProvider | null = null
+  macro_provider: MacroProvider | null = null
 no_candidate_short_circuit: >
   If analysis_result.recommendation.contract_symbol is null (AVOID / no
   liquid candidates), the orchestrator skips the risk_challenger and
   options_strategy agents (nothing to assess or size) and produces only
   a quant_interpretation and a short investment_thesis explaining why no
-  position is recommended.
+  position is recommended. financial_research/news_research/macro_research
+  are unaffected by this — they reason about the company/market, not the
+  specific candidate contract — and still run if their providers are
+  configured.
+provider_availability: >
+  financial_research/news_research/macro_research each run only if their
+  provider was constructed (non-null) — i.e. only if the corresponding
+  API key is configured (see specs/providers.yaml). An unconfigured
+  provider is not an error: the orchestrator produces a null finding for
+  that section, the same way no_candidate_short_circuit produces null
+  risk_assessment/strategy_suggestion.
 
 agents:
   - name: quant_interpreter
@@ -58,6 +85,58 @@ agents:
       already-computed ScoredCandidate (specs/scoring.yaml); the agent
       only contributes `narrative` and `key_factors` prose.
 
+  - name: financial_research
+    module: agentic_options_reporter.thesis.financial_research
+    function: run
+    calls_llm: true
+    requires_provider: financial_provider
+    input:
+      - CompanyProfile
+      - FinancialStatementSummary
+      - FinancialRatios
+      - AnalystEstimates
+    output: FinancialResearchFinding
+    contract: >
+      Interprets provider-supplied fundamentals (all of which are
+      FinancialProvider facts, never computed by this codebase) into
+      qualitative company_health/growth/profitability/cash_flow labels
+      plus a narrative and the analyst consensus passed through verbatim.
+      Skipped entirely (null finding) if financial_provider is null.
+
+  - name: news_research
+    module: agentic_options_reporter.thesis.news_research
+    function: run
+    calls_llm: true
+    requires_provider: news_provider
+    input:
+      - list[NewsArticle] (company news)
+      - SentimentSnapshot
+    output: NewsResearchFinding
+    contract: >
+      Summarizes recent news into a sentiment label, a narrative summary,
+      and lists of catalysts/risks. sentiment score in the input
+      SentimentSnapshot is provider-supplied, not LLM-derived; the agent
+      may use it as context but must not report a different number as if
+      computed. Skipped entirely (null finding) if news_provider is null.
+
+  - name: macro_research
+    module: agentic_options_reporter.thesis.macro_research
+    function: run
+    calls_llm: true
+    requires_provider: macro_provider
+    input:
+      - InterestRates
+      - CpiSnapshot
+      - GdpSnapshot
+      - list[MacroEvent]
+    output: MacroResearchFinding
+    contract: >
+      Interprets provider-supplied macro data into a risk_on/risk_off/
+      neutral regime label plus an outlook narrative. Does not compute or
+      forecast any macro figure itself. Skipped entirely (null finding)
+      if macro_provider is null. Market-wide, not ticker-specific — runs
+      independent of no_candidate_short_circuit.
+
   - name: risk_challenger
     module: agentic_options_reporter.thesis.risk_challenger
     function: run
@@ -74,6 +153,8 @@ agents:
       time to expiration). risk_level is the agent's qualitative
       judgment (low/medium/high) — this is a judgment call, not a
       formula, so it is allowed to be LLM-authored (unlike scores).
+      Phase 2a note: does not yet receive financial/news/macro findings
+      as input — see deferred.risk_and_strategy_incorporate_research_findings.
     skipped_when: no_candidate_short_circuit
 
   - name: options_strategy
@@ -90,8 +171,8 @@ agents:
       Put", "Long Call", "Avoid new position") given directional bias,
       the top candidate's risk profile, and the risk_challenger's
       concerns. Does not price a spread or pick specific strikes —
-      that would require new deterministic multi-leg pricing, which is
-      out of scope for phase 1.
+      that would require new deterministic multi-leg pricing, out of
+      scope for this phase.
     skipped_when: no_candidate_short_circuit
 
   - name: investment_thesis
@@ -100,6 +181,9 @@ agents:
     calls_llm: true
     input:
       - QuantInterpretation
+      - FinancialResearchFinding (nullable)
+      - NewsResearchFinding (nullable)
+      - MacroResearchFinding (nullable)
       - RiskAssessment (nullable)
       - StrategySuggestion (nullable)
       - Recommendation
@@ -109,7 +193,9 @@ agents:
     contract: >
       Synthesizes all prior agent output into one narrative paragraph
       plus a consensus label (bullish/bearish/neutral/mixed). This is
-      the text the user actually reads.
+      the text the user actually reads. If financial/news/macro findings
+      are absent (provider not configured), synthesizes over whatever
+      is present rather than erroring.
 
 models:
   QuantInterpretation:
@@ -117,6 +203,25 @@ models:
     key_factors: list[str]
     score_breakdown: dict[str, float]   # pass-through, not LLM-authored
     overall_score: float                # pass-through, not LLM-authored
+
+  FinancialResearchFinding:
+    company_health: "strong | stable | weak"
+    growth: "accelerating | steady | decelerating"
+    profitability: "high | moderate | low"
+    cash_flow: "positive | neutral | negative"
+    analyst_consensus: str        # pass-through from AnalystEstimates, not LLM-authored
+    narrative: str
+
+  NewsResearchFinding:
+    sentiment: "bullish | bearish | neutral"
+    summary: str
+    catalysts: list[str]
+    risks: list[str]
+
+  MacroResearchFinding:
+    regime: "risk_on | risk_off | neutral"
+    outlook: str
+    summary: str
 
   RiskAssessment:
     risk_level: "low | medium | high"
@@ -135,6 +240,9 @@ models:
     run_id: int
     generated_at: datetime
     quant_interpretation: QuantInterpretation
+    financial_research: "FinancialResearchFinding | null"
+    news_research: "NewsResearchFinding | null"
+    macro_research: "MacroResearchFinding | null"
     risk_assessment: "RiskAssessment | null"
     strategy_suggestion: "StrategySuggestion | null"
     investment_thesis: InvestmentThesis

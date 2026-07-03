@@ -1,0 +1,111 @@
+schema: agentic_options_reporter_providers
+version: 1
+description: >
+  Provider interfaces external data flows through, per the "Agents never
+  call APIs directly. Providers abstract external data sources." design
+  principle. Each interface is implemented in
+  agentic_options_reporter.data.<name>_provider as an ABC plus one or
+  more concrete implementations, the same dependency-injection pattern
+  as data.market_data.MarketDataProvider and thesis.llm_client.LlmClient.
+  Agents (thesis/*.py) only ever depend on these interfaces and the
+  normalized Pydantic models they return, never on a concrete provider's
+  raw API response shape.
+
+status: phase_2a
+phase_2a_scope: >
+  One concrete implementation per new interface, chosen for being free
+  or keyless to reach for a working prototype (specs/agents.yaml
+  Financial/News/Macro Research Agents). Every provider is optional at
+  runtime: if unconfigured (no API key / disabled), the orchestrator
+  skips the agent that depends on it rather than failing the whole
+  thesis pipeline (see specs/agents.yaml no_candidate_short_circuit for
+  the precedent — this is the same pattern applied to missing
+  configuration instead of missing data).
+deferred:
+  - name: catalyst_agent
+    reason: >
+      Depends on NewsProvider + SECProvider + MacroProvider all being
+      wired up; deferred until those three have shipped and proven out.
+  - name: additional_market_data_providers
+    reason: >
+      Alpha Vantage, Twelve Data remain unimplemented alternates to the
+      existing YFinanceProvider; not needed until a concrete reason to
+      switch (rate limits, data quality) arises.
+  - name: additional_news_providers
+    reason: Alpha Vantage News, NewsAPI, GDELT, RSS feeds, Reddit — unimplemented alternates/additions to FinnhubNewsProvider.
+  - name: additional_macro_providers
+    reason: BLS, BEA — unimplemented alternates/additions to FredMacroProvider.
+  - name: production_market_data_providers
+    reason: Polygon.io, Tradier, FactSet, Benzinga — paid, deferred until a production deployment needs them.
+  - name: production_infrastructure
+    reason: Redis, PostgreSQL, Grafana, Prometheus, Loki, Celery, Temporal, pgvector — deferred until this moves beyond a single-process prototype.
+
+interfaces:
+  NewsProvider:
+    module: agentic_options_reporter.data.news_provider
+    methods:
+      get_company_news(ticker: str, limit: int = 20) -> list[NewsArticle]
+      get_market_news(limit: int = 20) -> list[NewsArticle]
+      get_sentiment(ticker: str) -> SentimentSnapshot
+    implementations:
+      - name: FinnhubNewsProvider
+        api_key_env_var: FINNHUB_API_KEY
+        base_url: https://finnhub.io/api/v1
+        endpoints:
+          get_company_news: GET /company-news?symbol={ticker}&from={date}&to={date}
+          get_market_news: GET /news?category=general
+          get_sentiment: GET /news-sentiment?symbol={ticker}
+
+  FinancialProvider:
+    module: agentic_options_reporter.data.financial_provider
+    methods:
+      get_company_profile(ticker: str) -> CompanyProfile
+      get_financial_statements(ticker: str) -> FinancialStatementSummary
+      get_ratios(ticker: str) -> FinancialRatios
+      get_analyst_estimates(ticker: str) -> AnalystEstimates
+    implementations:
+      - name: FmpFinancialProvider
+        api_key_env_var: FMP_API_KEY
+        base_url: https://financialmodelingprep.com/api/v3
+        endpoints:
+          get_company_profile: GET /profile/{ticker}
+          get_financial_statements: GET /income-statement/{ticker}, /cash-flow-statement/{ticker} (period=annual, limit=1)
+          get_ratios: GET /ratios/{ticker} (limit=1)
+          get_analyst_estimates: GET /analyst-estimates/{ticker} (limit=1)
+
+  MacroProvider:
+    module: agentic_options_reporter.data.macro_provider
+    methods:
+      get_interest_rates() -> InterestRates
+      get_cpi() -> CpiSnapshot
+      get_gdp() -> GdpSnapshot
+      get_macro_calendar() -> list[MacroEvent]
+    implementations:
+      - name: FredMacroProvider
+        api_key_env_var: FRED_API_KEY
+        base_url: https://api.stlouisfed.org/fred
+        endpoints:
+          get_interest_rates: GET /series/observations?series_id=FEDFUNDS|DGS10|DGS2
+          get_cpi: GET /series/observations?series_id=CPIAUCSL
+          get_gdp: GET /series/observations?series_id=GDP
+          get_macro_calendar: >
+            Not available from FRED (a historical-series API, not a
+            forward calendar). Returns an empty list; a real forward
+            calendar would need a different provider (e.g. Econoday) —
+            left as a documented gap, not silently faked.
+
+  SECProvider:
+    module: agentic_options_reporter.data.sec_provider
+    methods:
+      get_recent_filings(ticker: str, limit: int = 10) -> list[SecFiling]
+      get_10k(ticker: str) -> SecFiling | null
+      get_10q(ticker: str) -> SecFiling | null
+      get_8k(ticker: str) -> SecFiling | null
+    implementations:
+      - name: SecEdgarProvider
+        api_key_env_var: null   # SEC EDGAR is free and keyless
+        required_header: "User-Agent: <descriptive app name + contact email>, per SEC fair-access policy"
+        base_url: https://data.sec.gov
+        endpoints:
+          ticker_to_cik_lookup: GET https://www.sec.gov/files/company_tickers.json
+          get_recent_filings: GET /submissions/CIK{cik:0>10}.json

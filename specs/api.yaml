@@ -96,6 +96,9 @@ models:
     run_id: int
     generated_at: datetime
     quant_interpretation: QuantInterpretation
+    financial_research: FinancialResearchFinding | null
+    news_research: NewsResearchFinding | null
+    macro_research: MacroResearchFinding | null
     risk_assessment: RiskAssessment | null
     strategy_suggestion: StrategySuggestion | null
     investment_thesis: InvestmentThesis
@@ -105,6 +108,25 @@ models:
     key_factors: list[str]
     score_breakdown: dict[str, float]
     overall_score: float
+
+  FinancialResearchFinding:
+    company_health: str      # strong | stable | weak
+    growth: str               # accelerating | steady | decelerating
+    profitability: str        # high | moderate | low
+    cash_flow: str             # positive | neutral | negative
+    analyst_consensus: str
+    narrative: str
+
+  NewsResearchFinding:
+    sentiment: str    # bullish | bearish | neutral
+    summary: str
+    catalysts: list[str]
+    risks: list[str]
+
+  MacroResearchFinding:
+    regime: str   # risk_on | risk_off | neutral
+    outlook: str
+    summary: str
 
   RiskAssessment:
     risk_level: str   # low | medium | high

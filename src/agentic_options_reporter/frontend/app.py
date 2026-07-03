@@ -24,6 +24,7 @@ from agentic_options_reporter.frontend.formatting import (
     format_recommendation,
     format_trend_summary,
     format_volume_summary,
+    macro_regime_tone,
     recommendation_tone,
     risk_level_tone,
     runs_to_rows,
@@ -516,6 +517,30 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
     quant_factors_row = ft.Row([], wrap=True, spacing=6)
     quant_message_body = ft.Column([quant_narrative_text, quant_factors_row], spacing=8, tight=True)
 
+    financial_chips_row = ft.Row([], wrap=True, spacing=6)
+    financial_analyst_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, italic=True)
+    financial_narrative_text = ft.Text("", size=13, selectable=True)
+    financial_message_body = ft.Column(
+        [financial_chips_row, financial_analyst_text, financial_narrative_text], spacing=6, tight=True
+    )
+
+    news_sentiment_badge = ft.Container(visible=False)
+    news_summary_text = ft.Text("", size=13, selectable=True)
+    news_catalysts_column = ft.Column([], spacing=4, tight=True)
+    news_risks_column = ft.Column([], spacing=4, tight=True)
+    news_message_body = ft.Column(
+        [news_sentiment_badge, news_summary_text, news_catalysts_column, news_risks_column],
+        spacing=8,
+        tight=True,
+    )
+
+    macro_regime_badge = ft.Container(visible=False)
+    macro_summary_text = ft.Text("", size=13, selectable=True)
+    macro_outlook_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, italic=True)
+    macro_message_body = ft.Column(
+        [macro_regime_badge, macro_summary_text, macro_outlook_text], spacing=6, tight=True
+    )
+
     risk_badge = ft.Container(visible=False)
     risk_concerns_column = ft.Column([], spacing=4, tight=True)
     risk_sizing_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, italic=True)
@@ -538,6 +563,14 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             _card(
                 _section_title("Agent conversation", ft.Icons.FORUM_OUTLINED),
                 _agent_message("Quant Interpreter", ft.Icons.QUERY_STATS_ROUNDED, ft.Colors.INDIGO, quant_message_body),
+                ft.Divider(),
+                _agent_message(
+                    "Financial Research", ft.Icons.ACCOUNT_BALANCE_OUTLINED, ft.Colors.GREEN_700, financial_message_body
+                ),
+                ft.Divider(),
+                _agent_message("News Research", ft.Icons.NEWSPAPER, ft.Colors.BLUE_700, news_message_body),
+                ft.Divider(),
+                _agent_message("Macro Research", ft.Icons.PUBLIC, ft.Colors.AMBER_800, macro_message_body),
                 ft.Divider(),
                 _agent_message("Risk Challenger", ft.Icons.SHIELD_OUTLINED, ft.Colors.DEEP_ORANGE, risk_message_body),
                 ft.Divider(),
@@ -584,6 +617,9 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             return
 
         quant = result["quant_interpretation"]
+        financial = result.get("financial_research")
+        news = result.get("news_research")
+        macro = result.get("macro_research")
         risk = result.get("risk_assessment")
         strategy = result.get("strategy_suggestion")
         investment_thesis = result["investment_thesis"]
@@ -613,6 +649,77 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         # -- conversation transcript --
         quant_narrative_text.value = quant.get("narrative", "")
         quant_factors_row.controls = [_chip(factor) for factor in quant.get("key_factors", [])]
+
+        if financial is not None:
+            financial_chips_row.controls = [
+                _chip(f"Health: {financial.get('company_health', '—')}"),
+                _chip(f"Growth: {financial.get('growth', '—')}"),
+                _chip(f"Profitability: {financial.get('profitability', '—')}"),
+                _chip(f"Cash flow: {financial.get('cash_flow', '—')}"),
+            ]
+            financial_analyst_text.value = f"Analyst consensus: {financial.get('analyst_consensus', '—')}"
+            financial_narrative_text.value = financial.get("narrative", "")
+            financial_message_body.controls = [
+                financial_chips_row, financial_analyst_text, financial_narrative_text
+            ]
+        else:
+            financial_chips_row.controls = []
+            financial_analyst_text.value = ""
+            financial_narrative_text.value = ""
+            financial_message_body.controls = [
+                _skipped_message("Skipped — no financial data provider configured.")
+            ]
+
+        if news is not None:
+            news_tone = trend_tone(news.get("sentiment", ""))
+            news_sentiment_badge.content = ft.Text(
+                news.get("sentiment", "—").upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+            )
+            news_sentiment_badge.bgcolor = _tone_colors(news_tone)[0]
+            news_sentiment_badge.border_radius = 20
+            news_sentiment_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+            news_sentiment_badge.visible = True
+            news_summary_text.value = news.get("summary", "")
+            catalysts = news.get("catalysts", [])
+            news_catalysts_column.controls = (
+                [ft.Text("Catalysts", size=11, weight=ft.FontWeight.BOLD), _bullet_list(catalysts)]
+                if catalysts
+                else []
+            )
+            risks = news.get("risks", [])
+            news_risks_column.controls = (
+                [ft.Text("Risks", size=11, weight=ft.FontWeight.BOLD), _bullet_list(risks)] if risks else []
+            )
+            news_message_body.controls = [
+                news_sentiment_badge, news_summary_text, news_catalysts_column, news_risks_column
+            ]
+        else:
+            news_sentiment_badge.visible = False
+            news_summary_text.value = ""
+            news_catalysts_column.controls = []
+            news_risks_column.controls = []
+            news_message_body.controls = [_skipped_message("Skipped — no news data provider configured.")]
+
+        if macro is not None:
+            macro_tone = macro_regime_tone(macro.get("regime", ""))
+            macro_regime_badge.content = ft.Text(
+                macro.get("regime", "—").upper().replace("_", " "),
+                size=11,
+                weight=ft.FontWeight.BOLD,
+                color=ft.Colors.WHITE,
+            )
+            macro_regime_badge.bgcolor = _tone_colors(macro_tone)[0]
+            macro_regime_badge.border_radius = 20
+            macro_regime_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+            macro_regime_badge.visible = True
+            macro_summary_text.value = macro.get("summary", "")
+            macro_outlook_text.value = macro.get("outlook", "")
+            macro_message_body.controls = [macro_regime_badge, macro_summary_text, macro_outlook_text]
+        else:
+            macro_regime_badge.visible = False
+            macro_summary_text.value = ""
+            macro_outlook_text.value = ""
+            macro_message_body.controls = [_skipped_message("Skipped — no macro data provider configured.")]
 
         if risk is not None:
             risk_tone = risk_level_tone(risk.get("risk_level", ""))
