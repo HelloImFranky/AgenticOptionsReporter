@@ -84,7 +84,7 @@ computes a number the quant engine hasn't already computed — see
 - HTTP client: requests, shared by the CLI and front end (server-side data access goes through `MarketDataProvider`, not `api_client`)
 - CLI: argparse, exposed as the `agentic-options-reporter` console script
 - Front end: Flet, exposed as the `agentic-options-reporter-ui` console script
-- LLM: provider-agnostic `thesis.llm_client.LlmClient` interface; default implementation is Anthropic's Claude API (`anthropic` package)
+- LLM: provider-agnostic `thesis.llm_client.LlmClient` interface, selected per-request via `build_llm_client`; built-in providers are Anthropic (`anthropic` package, default) and OpenAI (`openai` package)
 - Visualization: Plotly, Matplotlib
 - Testing: pytest
 - Packaging: Poetry

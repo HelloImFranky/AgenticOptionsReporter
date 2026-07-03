@@ -20,7 +20,7 @@ class _FakeResponse:
 def test_request_uses_requests_and_returns_json(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["method"] = method
         captured["url"] = url
         captured["params"] = params
@@ -39,7 +39,7 @@ def test_request_uses_requests_and_returns_json(monkeypatch):
 def test_base_url_trailing_slash_is_stripped(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["url"] = url
         return _FakeResponse(payload={})
 
@@ -54,7 +54,7 @@ def test_base_url_trailing_slash_is_stripped(monkeypatch):
 def test_analyze_passes_expiration_only_when_set(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["url"] = url
         captured["params"] = params
         return _FakeResponse(payload={"symbol": "AAPL"})
@@ -72,7 +72,7 @@ def test_analyze_passes_expiration_only_when_set(monkeypatch):
 def test_list_runs_passes_symbol_only_when_set(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["params"] = params
         return _FakeResponse(payload=[])
 
@@ -89,7 +89,7 @@ def test_list_runs_passes_symbol_only_when_set(monkeypatch):
 def test_get_run_builds_expected_path(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["url"] = url
         return _FakeResponse(payload={"run_id": 42})
 
@@ -103,10 +103,10 @@ def test_get_run_builds_expected_path(monkeypatch):
 def test_generate_thesis_builds_expected_request(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["method"] = method
         captured["url"] = url
-        captured["params"] = params
+        captured["json"] = json
         return _FakeResponse(payload={"run_id": 42})
 
     monkeypatch.setattr(requests_module, "request", fake_request)
@@ -115,27 +115,41 @@ def test_generate_thesis_builds_expected_request(monkeypatch):
     client.generate_thesis(42)
     assert captured["method"] == "POST"
     assert captured["url"] == "http://localhost:8000/runs/42/thesis"
-    assert captured["params"] is None
+    assert captured["json"] == {"provider": "anthropic", "api_key": None, "regenerate": False}
 
 
 def test_generate_thesis_passes_regenerate_flag(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
-        captured["params"] = params
+    def fake_request(method, url, params=None, json=None, timeout=None):
+        captured["json"] = json
         return _FakeResponse(payload={"run_id": 42})
 
     monkeypatch.setattr(requests_module, "request", fake_request)
     client = ApiClient()
 
     client.generate_thesis(42, regenerate=True)
-    assert captured["params"] == {"regenerate": True}
+    assert captured["json"]["regenerate"] is True
+
+
+def test_generate_thesis_passes_provider_and_api_key(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, params=None, json=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse(payload={"run_id": 42})
+
+    monkeypatch.setattr(requests_module, "request", fake_request)
+    client = ApiClient()
+
+    client.generate_thesis(42, provider="openai", api_key="sk-custom")
+    assert captured["json"] == {"provider": "openai", "api_key": "sk-custom", "regenerate": False}
 
 
 def test_get_thesis_builds_expected_path(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["method"] = method
         captured["url"] = url
         return _FakeResponse(payload={"run_id": 42})
@@ -149,7 +163,7 @@ def test_get_thesis_builds_expected_path(monkeypatch):
 
 
 def test_generate_thesis_raises_api_error_on_conflict(monkeypatch):
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         return _FakeResponse(status_code=409, text="already exists")
 
     monkeypatch.setattr(requests_module, "request", fake_request)
@@ -159,7 +173,7 @@ def test_generate_thesis_raises_api_error_on_conflict(monkeypatch):
 
 
 def test_request_raises_api_error_on_http_failure(monkeypatch):
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         return _FakeResponse(status_code=404, text="not found")
 
     monkeypatch.setattr(requests_module, "request", fake_request)
@@ -169,7 +183,7 @@ def test_request_raises_api_error_on_http_failure(monkeypatch):
 
 
 def test_request_raises_api_error_on_connection_failure(monkeypatch):
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         raise requests_module.exceptions.ConnectionError("boom")
 
     monkeypatch.setattr(requests_module, "request", fake_request)

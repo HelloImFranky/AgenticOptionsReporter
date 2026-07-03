@@ -57,10 +57,15 @@ Generation is a separate, explicit step from the deterministic
 `/analyze` call:
 
 ```
-POST /runs/{run_id}/thesis            # generate (404 if run missing, 409 if one exists and regenerate=false)
-POST /runs/{run_id}/thesis?regenerate=true   # discard and regenerate
-GET  /runs/{run_id}/thesis             # fetch a previously generated one
+POST /runs/{run_id}/thesis    body: ThesisGenerationRequest (all fields optional)
+                               # 404 if run missing, 409 if one exists and regenerate=false
+GET  /runs/{run_id}/thesis    # fetch a previously generated one
 ```
+
+`ThesisGenerationRequest` is `{provider: str = "anthropic", api_key: str | null = null, regenerate: bool = false}`.
+`api_key`, if supplied, overrides the server's configured key for that one
+request only — it is never logged, echoed back, or persisted alongside
+the generated thesis.
 
 This keeps `/analyze` fast, cheap, and deterministic-only; a client (the
 CLI's `thesis` subcommand, or the Flet UI's Agents tab) calls the thesis
@@ -81,15 +86,31 @@ sections rather than one undifferentiated blob:
   no-candidate short-circuit renders as a muted "Skipped — ..." message
   in its slot instead of being silently omitted.
 
+Above both sections, a **Provider** dropdown (Anthropic/OpenAI) and a
+password-masked **API key** field let a user supply their own key for one
+generation without touching server configuration — the key never leaves
+that single request (see LLM access below).
+
 ## LLM access
 
 `thesis.llm_client.LlmClient` is a small interface
 (`complete(system_prompt, user_prompt) -> str`) — the same
 dependency-injection pattern as `data.market_data.MarketDataProvider`.
-`AnthropicLlmClient` is the default implementation; a different provider
-can be added later without touching any agent module. Configure it via
-the `ANTHROPIC_API_KEY` environment variable (or `AOR_LLM_MODEL` /
-`AOR_LLM_MAX_TOKENS` to change the model/token budget).
+`build_llm_client(provider, api_key=None, model=None, max_tokens=1024)`
+selects a concrete implementation by name:
+
+| provider | implementation | default model | env var |
+|---|---|---|---|
+| `anthropic` (default) | `AnthropicLlmClient` | `claude-sonnet-5` | `ANTHROPIC_API_KEY` |
+| `openai` | `OpenAiLlmClient` | `gpt-4o-mini` | `OPENAI_API_KEY` |
+
+An `api_key` passed to `build_llm_client` overrides the provider's
+environment variable for that call only. A different provider can be
+added later by implementing `LlmClient` and registering it in
+`llm_client._PROVIDERS`, without touching any agent module. The server's
+`AOR_LLM_MODEL` / `AOR_LLM_MAX_TOKENS` settings only apply to the default
+`anthropic` provider; other providers use their own built-in default
+model.
 
 Each agent instructs the model to respond with a single JSON object and
 validates it against a Pydantic model (`thesis/parsing.py`). A malformed

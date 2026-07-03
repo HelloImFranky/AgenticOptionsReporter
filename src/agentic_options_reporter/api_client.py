@@ -27,10 +27,18 @@ class ApiClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def _request(self, method: str, path: str, params: dict[str, Any] | None = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
         url = f"{self.base_url}{path}"
         try:
-            response = requests.request(method, url, params=params, timeout=self.timeout)
+            response = requests.request(
+                method, url, params=params, json=json_body, timeout=self.timeout
+            )
         except requests.exceptions.RequestException as exc:
             raise ApiError(f"Request to {url} failed: {exc}") from exc
 
@@ -58,9 +66,15 @@ class ApiClient:
     def get_run(self, run_id: int) -> dict[str, Any]:
         return self._request("GET", f"/runs/{run_id}")
 
-    def generate_thesis(self, run_id: int, regenerate: bool = False) -> dict[str, Any]:
-        params: dict[str, Any] = {"regenerate": regenerate} if regenerate else None
-        return self._request("POST", f"/runs/{run_id}/thesis", params=params)
+    def generate_thesis(
+        self,
+        run_id: int,
+        regenerate: bool = False,
+        provider: str = "anthropic",
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
+        body = {"provider": provider, "api_key": api_key, "regenerate": regenerate}
+        return self._request("POST", f"/runs/{run_id}/thesis", json_body=body)
 
     def get_thesis(self, run_id: int) -> dict[str, Any]:
         return self._request("GET", f"/runs/{run_id}/thesis")

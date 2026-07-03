@@ -232,3 +232,16 @@ class AgentThesisResult(BaseModel):
     risk_assessment: RiskAssessment | None
     strategy_suggestion: StrategySuggestion | None
     investment_thesis: InvestmentThesis
+
+
+class ThesisGenerationRequest(BaseModel):
+    """Request body for POST /runs/{run_id}/thesis.
+
+    `api_key`, if supplied, is used only to construct the LlmClient for
+    this one request; it is never logged or persisted (see
+    thesis.llm_client.build_llm_client and main.generate_thesis).
+    """
+
+    provider: str = "anthropic"
+    api_key: str | None = None
+    regenerate: bool = False

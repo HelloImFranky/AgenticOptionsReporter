@@ -148,7 +148,22 @@ llm_client:
     substituted without touching agent code.
   interface:
     complete(system_prompt: str, user_prompt: str) -> str
-  default_implementation: AnthropicLlmClient (agentic_options_reporter.thesis.llm_client)
+  factory: build_llm_client(provider, api_key=None, model=None, max_tokens=1024) -> LlmClient
+  providers:
+    anthropic:
+      implementation: AnthropicLlmClient
+      default_model: claude-sonnet-5
+      api_key_env_var: ANTHROPIC_API_KEY
+    openai:
+      implementation: OpenAiLlmClient
+      default_model: gpt-4o-mini
+      api_key_env_var: OPENAI_API_KEY
+  api_key_precedence: >
+    An api_key passed explicitly (e.g. specs/api.yaml
+    ThesisGenerationRequest.api_key, sourced from the Flet UI's Agents tab
+    API-key field or the CLI's --api-key flag) overrides the provider's
+    environment variable for that one request only. It is never logged
+    or persisted.
   response_format: >
     Agents instruct the model to respond with a single JSON object
     matching its output model and parse it via

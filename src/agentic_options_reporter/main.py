@@ -19,6 +19,7 @@ from agentic_options_reporter.models.schemas import (
     ScoredCandidate,
     StrategySuggestion,
     SupportResistanceLevel,
+    ThesisGenerationRequest,
     TrendAssessment,
     VolumeAssessment,
 )
@@ -27,7 +28,7 @@ from agentic_options_reporter.persistence import (
     make_session_factory,
     persist_thesis,
 )
-from agentic_options_reporter.thesis.llm_client import AnthropicLlmClient, LlmError
+from agentic_options_reporter.thesis.llm_client import LlmError, build_llm_client
 from agentic_options_reporter.thesis.orchestrator import run_thesis_pipeline
 from agentic_options_reporter.thesis.parsing import ThesisGenerationError
 from agentic_options_reporter.workflow import run_analysis
@@ -147,13 +148,15 @@ def list_runs(symbol: str | None = None, limit: int = 20) -> list[AnalysisRunSum
 
 
 @app.post("/runs/{run_id}/thesis", response_model=AgentThesisResult)
-def generate_thesis(run_id: int, regenerate: bool = False) -> AgentThesisResult:
+def generate_thesis(
+    run_id: int, request: ThesisGenerationRequest = ThesisGenerationRequest()
+) -> AgentThesisResult:
     with _session_factory() as session:
         run = session.get(AnalysisRun, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
-        if run.agent_thesis is not None and not regenerate:
+        if run.agent_thesis is not None and not request.regenerate:
             raise HTTPException(
                 status_code=409,
                 detail=f"Run {run_id} already has a thesis; pass regenerate=true to replace it",
@@ -161,9 +164,15 @@ def generate_thesis(run_id: int, regenerate: bool = False) -> AgentThesisResult:
 
         analysis_result = _to_analysis_result(run)
 
+        # settings.llm_model is only meaningful for the default (anthropic)
+        # provider; other providers use their own built-in default model.
+        model = _settings.llm_model if request.provider == "anthropic" else None
         try:
-            llm_client = AnthropicLlmClient(
-                model=_settings.llm_model, max_tokens=_settings.llm_max_tokens
+            llm_client = build_llm_client(
+                request.provider,
+                api_key=request.api_key,
+                model=model,
+                max_tokens=_settings.llm_max_tokens,
             )
             thesis_result = run_thesis_pipeline(analysis_result, llm_client)
         except (LlmError, ThesisGenerationError) as exc:

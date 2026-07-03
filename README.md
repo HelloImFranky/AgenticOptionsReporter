@@ -62,23 +62,30 @@ agents (Quant Interpreter → Risk Challenger → Options Strategy →
 Investment Thesis) can narrate, challenge, and synthesize an
 already-persisted run into a written thesis — see
 `docs/investment_thesis.md` and `specs/agents.yaml`. These agents never
-compute a number the quant engine hasn't already computed. Requires
-`ANTHROPIC_API_KEY` to be set:
+compute a number the quant engine hasn't already computed.
+
+Two providers are supported out of the box, `anthropic` (default) and
+`openai`; each needs its own API key, either set server-side
+(`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) or supplied per request — the
+latter is never logged or persisted, only used to construct that one
+call's LLM client:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-poetry run agentic-options-reporter thesis <run_id>              # generate
-poetry run agentic-options-reporter thesis <run_id> --regenerate # discard and regenerate
-poetry run agentic-options-reporter thesis <run_id> --fetch-only # fetch without generating
+export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY, if using --provider openai
+poetry run agentic-options-reporter thesis <run_id>                                     # generate, server's key
+poetry run agentic-options-reporter thesis <run_id> --regenerate                        # discard and regenerate
+poetry run agentic-options-reporter thesis <run_id> --fetch-only                        # fetch without generating
+poetry run agentic-options-reporter thesis <run_id> --provider openai --api-key sk-...  # your own key, this call only
 ```
 
-Or use the Flet UI's **Agents** tab after running an analysis: click
-"Generate investment thesis" to see a **Final output** verdict (the
-recommendation action + the agents' consensus) and, below it, an
-**Agent conversation** — Quant Interpreter, Risk Challenger, Options
-Strategist, and Investment Thesis shown in sequence as each agent's
-contribution, with a "skipped" message where an agent had no candidate
-contract to work with.
+Or use the Flet UI's **Agents** tab after running an analysis: pick a
+**Provider** and, optionally, paste your own **API key** (password-masked,
+sent only for that one request), then click "Generate investment thesis"
+to see a **Final output** verdict (the recommendation action + the
+agents' consensus) and, below it, an **Agent conversation** — Quant
+Interpreter, Risk Challenger, Options Strategist, and Investment Thesis
+shown in sequence as each agent's contribution, with a "skipped" message
+where an agent had no candidate contract to work with.
 
 ## Testing
 
