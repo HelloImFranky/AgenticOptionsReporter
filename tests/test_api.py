@@ -466,19 +466,29 @@ def test_optional_financial_provider_returns_none_when_unconfigured(monkeypatch)
     assert main_module._optional_financial_provider() is None
 
 
-def test_optional_news_provider_returns_none_when_unconfigured(monkeypatch):
-    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
-    assert main_module._optional_news_provider() is None
+def test_optional_news_provider_returns_router_with_only_gdelt_when_others_unconfigured(monkeypatch):
+    # GDELT needs no API key, so the news provider is never fully
+    # "unconfigured" anymore — it always falls back to GDELT alone.
+    for var in ("FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "NEWSAPI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    provider = main_module._optional_news_provider()
+
+    assert provider is not None
+    assert provider.provider_names == ["gdelt"]
 
 
 def test_optional_macro_provider_returns_none_when_unconfigured(monkeypatch):
-    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    for var in ("FRED_API_KEY", "BLS_API_KEY", "BEA_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
     assert main_module._optional_macro_provider() is None
 
 
-def test_optional_financial_provider_returns_instance_when_configured(monkeypatch):
+def test_optional_financial_provider_returns_router_when_configured(monkeypatch):
     monkeypatch.setenv("FMP_API_KEY", "test-key")
-    from agentic_options_reporter.data.financial_provider import FmpFinancialProvider
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
 
     provider = main_module._optional_financial_provider()
-    assert isinstance(provider, FmpFinancialProvider)
+
+    assert provider is not None
+    assert provider.provider_names == ["fmp"]

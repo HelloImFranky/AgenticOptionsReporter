@@ -1,5 +1,5 @@
 schema: agentic_options_reporter_providers
-version: 1
+version: 2
 description: >
   Provider interfaces external data flows through, per the "Agents never
   call APIs directly. Providers abstract external data sources." design
@@ -11,7 +11,7 @@ description: >
   normalized Pydantic models they return, never on a concrete provider's
   raw API response shape.
 
-status: phase_2a
+status: phase_2b
 phase_2a_scope: >
   One concrete implementation per new interface, chosen for being free
   or keyless to reach for a working prototype (specs/agents.yaml
@@ -21,6 +21,14 @@ phase_2a_scope: >
   thesis pipeline (see specs/agents.yaml no_candidate_short_circuit for
   the precedent — this is the same pattern applied to missing
   configuration instead of missing data).
+phase_2b_scope: >
+  Adds redundant providers for NewsProvider (Alpha Vantage News, NewsAPI,
+  GDELT), FinancialProvider (Alpha Vantage), and MacroProvider (BLS, BEA),
+  plus provider_router below — the data-provider analog of
+  thesis.llm_client.LlmRouter (specs/llm_providers.yaml). A single
+  provider's outage, rate limit, or quota exhaustion no longer skips the
+  whole research agent; the router falls over to the next configured
+  implementation instead.
 deferred:
   - name: catalyst_agent
     reason: >
@@ -29,16 +37,73 @@ deferred:
   - name: additional_market_data_providers
     reason: >
       Alpha Vantage, Twelve Data remain unimplemented alternates to the
-      existing YFinanceProvider; not needed until a concrete reason to
-      switch (rate limits, data quality) arises.
+      existing YFinanceProvider (price/option-chain data — a different
+      interface from FinancialProvider); not needed until a concrete
+      reason to switch (rate limits, data quality) arises.
   - name: additional_news_providers
-    reason: Alpha Vantage News, NewsAPI, GDELT, RSS feeds, Reddit — unimplemented alternates/additions to FinnhubNewsProvider.
-  - name: additional_macro_providers
-    reason: BLS, BEA — unimplemented alternates/additions to FredMacroProvider.
+    reason: RSS feeds, Reddit — Alpha Vantage News, NewsAPI, and GDELT shipped in phase_2b.
   - name: production_market_data_providers
     reason: Polygon.io, Tradier, FactSet, Benzinga — paid, deferred until a production deployment needs them.
   - name: production_infrastructure
     reason: Redis, PostgreSQL, Grafana, Prometheus, Loki, Celery, Temporal, pgvector — deferred until this moves beyond a single-process prototype.
+
+provider_router:
+  description: >
+    agentic_options_reporter.data.provider_router.call_with_fallback is
+    the shared implementation behind NewsProviderRouter,
+    FinancialProviderRouter, and MacroProviderRouter — one router class
+    per interface, each implementing that interface itself (so agents
+    can't tell whether they're talking to a single provider or a
+    router). Routing happens PER METHOD CALL, not per whole provider
+    instance: each router tries its configured providers in priority
+    order for one method (e.g. get_cpi), independently of which provider
+    answered the previous call. This matters because some providers only
+    cover part of an interface (BLS has no GDP data, NewsAPI has no
+    sentiment scores) — they raise <X>ProviderUnsupported for the
+    methods they don't offer, which is retryable, so the router still
+    uses them for what they do support while falling through to another
+    provider for the rest.
+  error_normalization:
+    description: >
+      Every provider's HTTP-level failures are classified via
+      data.provider_router.classify_requests_error into each interface's
+      own error hierarchy (e.g. NewsProviderRateLimited), which multiply
+      inherits both that interface's <X>ProviderError base (so existing
+      `except NewsProviderError` call sites keep working) and a marker
+      from data.provider_errors (so the router can recognize a retryable
+      failure generically across all three interfaces).
+    hierarchy:
+      <X>ProviderError: Base class; also raised directly for non-HTTP failures (e.g. "no observations returned").
+      <X>ProviderRateLimited: HTTP 429.
+      <X>ProviderTimeout: Request timed out.
+      <X>ProviderUnavailable: 5xx response or a network/connection failure.
+      <X>ProviderUnsupported: This provider doesn't offer the requested data at all (e.g. BEA has no CPI data).
+    retryable_errors: [<X>ProviderRateLimited, <X>ProviderTimeout, <X>ProviderUnavailable, <X>ProviderUnsupported]
+    non_retryable_errors: >
+      Any other exception (e.g. a malformed-response bug) propagates
+      immediately without trying further providers — same principle as
+      thesis.llm_client's LlmBadRequest: every provider would fail
+      identically on a genuine bug, so failing over would just hide it.
+  factories:
+    description: >
+      Each provider module exposes build_<name>_provider() — mirrors
+      thesis.llm_client.build_llm_client(provider="auto", ...). Reads a
+      fallback-order env var (comma-separated provider names), skips any
+      provider whose API key isn't configured, and raises the
+      interface's <X>ProviderError if the resulting router would have
+      zero clients. main.py's _optional_<name>_provider() helpers call
+      these and catch that error, same "unconfigured = skip the agent"
+      contract as phase_2a.
+    news: build_news_provider() — AOR_NEWS_PROVIDER_FALLBACK_ORDER, default "finnhub,alphavantage,newsapi,gdelt"
+    financial: build_financial_provider() — AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER, default "fmp,alphavantage"
+    macro: build_macro_provider() — AOR_MACRO_PROVIDER_FALLBACK_ORDER, default "fred,bls,bea"
+  gdelt_is_always_available: >
+    GdeltNewsProvider needs no API key, so build_news_provider() now
+    (almost) never returns null — News Research effectively always runs,
+    at minimum against GDELT alone. This is an intentional improvement
+    over phase_2a's strict "unconfigured = skipped" behavior, not a
+    contract change: an agent still only runs when its provider
+    constructed successfully.
 
 interfaces:
   NewsProvider:
@@ -55,6 +120,43 @@ interfaces:
           get_company_news: GET /company-news?symbol={ticker}&from={date}&to={date}
           get_market_news: GET /news?category=general
           get_sentiment: GET /news-sentiment?symbol={ticker}
+      - name: AlphaVantageNewsProvider
+        api_key_env_var: ALPHA_VANTAGE_API_KEY
+        base_url: https://www.alphavantage.co/query
+        endpoints:
+          get_company_news: GET ?function=NEWS_SENTIMENT&tickers={ticker}
+          get_market_news: GET ?function=NEWS_SENTIMENT&topics=financial_markets
+          get_sentiment: >
+            GET ?function=NEWS_SENTIMENT&tickers={ticker} — averages
+            each article's ticker_sentiment_score for {ticker} (falling
+            back to overall_sentiment_score when a ticker-specific score
+            is absent).
+        quirk: >
+          The free tier returns HTTP 200 with an "Information"/"Note"
+          field instead of a proper 429 when rate limited; treated as
+          NewsProviderRateLimited.
+      - name: NewsApiOrgProvider
+        api_key_env_var: NEWSAPI_API_KEY
+        base_url: https://newsapi.org/v2
+        endpoints:
+          get_company_news: GET /everything?q={ticker}&sortBy=publishedAt
+          get_market_news: GET /top-headlines?category=business
+          get_sentiment: >
+            Not available — NewsAPI has no sentiment endpoint at any
+            tier. Always raises NewsProviderUnsupported (documented gap,
+            not fabricated).
+      - name: GdeltNewsProvider
+        api_key_env_var: null   # GDELT is free and keyless
+        base_url: https://api.gdeltproject.org/api/v2/doc/doc
+        endpoints:
+          get_company_news: GET ?query={ticker}&mode=artlist
+          get_market_news: GET ?query=financial+markets&mode=artlist
+          get_sentiment: >
+            GET ?query={ticker}&mode=timelinetone — takes the latest
+            point of GDELT's own tone timeline (roughly -10..+10 in
+            practice), rescaled by /10 and clipped to this project's
+            -1..1 SentimentSnapshot.score convention. A unit conversion
+            of a real provider-supplied signal, not a fabricated value.
 
   FinancialProvider:
     module: agentic_options_reporter.data.financial_provider
@@ -72,6 +174,28 @@ interfaces:
           get_financial_statements: GET /income-statement/{ticker}, /cash-flow-statement/{ticker} (period=annual, limit=1)
           get_ratios: GET /ratios/{ticker} (limit=1)
           get_analyst_estimates: GET /analyst-estimates/{ticker} (limit=1)
+      - name: AlphaVantageFinancialProvider
+        api_key_env_var: ALPHA_VANTAGE_API_KEY
+        base_url: https://www.alphavantage.co/query
+        endpoints:
+          get_company_profile: GET ?function=OVERVIEW&symbol={ticker}
+          get_financial_statements: >
+            GET ?function=INCOME_STATEMENT / ?function=CASH_FLOW —
+            free_cash_flow is computed as operatingCashflow minus
+            capitalExpenditures (both provider-supplied), a legitimate
+            arithmetic derivation, not fabrication.
+          get_ratios: >
+            GET ?function=OVERVIEW — debt_to_equity and current_ratio
+            aren't present in this payload and stay null rather than
+            being guessed; gross_margin is computed from
+            GrossProfitTTM/RevenueTTM (both provider-supplied).
+          get_analyst_estimates: >
+            GET ?function=OVERVIEW — only AnalystTargetPrice is
+            available (-> price_target_mean); consensus_rating stays
+            "N/A" and price_target_high/low/num_analysts stay at their
+            schema defaults, the same "missing data stays missing"
+            convention FmpFinancialProvider already follows.
+        quirk: Same HTTP-200-with-"Information"/"Note" rate-limit quirk as AlphaVantageNewsProvider.
 
   MacroProvider:
     module: agentic_options_reporter.data.macro_provider
@@ -93,6 +217,28 @@ interfaces:
             forward calendar). Returns an empty list; a real forward
             calendar would need a different provider (e.g. Econoday) —
             left as a documented gap, not silently faked.
+      - name: BlsMacroProvider
+        api_key_env_var: BLS_API_KEY
+        base_url: https://api.bls.gov/publicAPI/v2/timeseries/data
+        role: >
+          The primary source for the CPI series FRED mirrors — real
+          redundancy on get_cpi, not just an alternate.
+        endpoints:
+          get_cpi: GET /{series_id} (series_id=CUUR0000SA0, registrationkey={key})
+          get_interest_rates: Not published by BLS (a labor-statistics agency) — always raises MacroProviderUnsupported.
+          get_gdp: Not published by BLS — always raises MacroProviderUnsupported.
+          get_macro_calendar: Same documented gap as FRED; returns [].
+      - name: BeaMacroProvider
+        api_key_env_var: BEA_API_KEY
+        base_url: https://apps.bea.gov/api/data
+        role: >
+          The primary source for the (nominal) GDP series FRED mirrors —
+          real redundancy on get_gdp, not just an alternate.
+        endpoints:
+          get_gdp: GET ?method=GetData&datasetname=NIPA&TableName=T10101&Frequency=Q (line 1: Gross domestic product)
+          get_cpi: Not published by BEA — always raises MacroProviderUnsupported (BEA's PCE price index is a related but distinct metric from CPI).
+          get_interest_rates: Not published by BEA — always raises MacroProviderUnsupported.
+          get_macro_calendar: Same documented gap as FRED; returns [].
 
   SECProvider:
     module: agentic_options_reporter.data.sec_provider
@@ -109,3 +255,6 @@ interfaces:
         endpoints:
           ticker_to_cik_lookup: GET https://www.sec.gov/files/company_tickers.json
           get_recent_filings: GET /submissions/CIK{cik:0>10}.json
+    note: >
+      Not yet wired into a router or agent (reserved for a future
+      Catalyst agent); only one implementation exists.

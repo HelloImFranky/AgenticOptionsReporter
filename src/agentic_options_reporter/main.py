@@ -8,18 +8,18 @@ from agentic_options_reporter.config import get_settings
 from agentic_options_reporter.data.financial_provider import (
     FinancialProvider,
     FinancialProviderError,
-    FmpFinancialProvider,
+    build_financial_provider,
 )
 from agentic_options_reporter.data.macro_provider import (
-    FredMacroProvider,
     MacroProvider,
     MacroProviderError,
+    build_macro_provider,
 )
 from agentic_options_reporter.data.market_data import MarketDataError
 from agentic_options_reporter.data.news_provider import (
-    FinnhubNewsProvider,
     NewsProvider,
     NewsProviderError,
+    build_news_provider,
 )
 from agentic_options_reporter.models.db import AgentThesisRow, AnalysisRun
 from agentic_options_reporter.models.schemas import (
@@ -151,21 +151,21 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
 
 def _optional_financial_provider() -> FinancialProvider | None:
     try:
-        return FmpFinancialProvider()
+        return build_financial_provider()
     except FinancialProviderError:
         return None
 
 
 def _optional_news_provider() -> NewsProvider | None:
     try:
-        return FinnhubNewsProvider()
+        return build_news_provider()
     except NewsProviderError:
         return None
 
 
 def _optional_macro_provider() -> MacroProvider | None:
     try:
-        return FredMacroProvider()
+        return build_macro_provider()
     except MacroProviderError:
         return None
 
