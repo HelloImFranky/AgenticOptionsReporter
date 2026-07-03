@@ -49,13 +49,19 @@ endpoints:
       calls an LLM), so it is a separate, explicit step from /analyze.
     path_params:
       run_id: int
-    query_params:
-      regenerate: bool = false   # if true, discard and regenerate an existing thesis
+    body: ThesisGenerationRequest   # all fields optional; {} uses server defaults
     response: AgentThesisResult
     errors:
       404: run not found
       409: a thesis already exists for this run and regenerate=false
-      502: the configured LlmClient failed or returned an unparseable response
+      502: >
+        the requested provider is unsupported, its LlmClient failed
+        (including a missing API key), or it returned an unparseable
+        response
+    security_note: >
+      body.api_key, if supplied, is used only to construct the LlmClient
+      for this one request. It is never logged, echoed in the response,
+      or persisted alongside the generated thesis.
 
   - path: /runs/{run_id}/thesis
     method: GET
@@ -112,3 +118,8 @@ models:
   InvestmentThesis:
     thesis: str
     consensus: str   # bullish | bearish | neutral | mixed
+
+  ThesisGenerationRequest:
+    provider: str = "anthropic"       # see specs/agents.yaml llm_client.providers
+    api_key: str | null = null        # overrides the server's configured key for this request only
+    regenerate: bool = false

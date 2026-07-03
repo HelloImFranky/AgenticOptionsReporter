@@ -452,6 +452,27 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         ),
     )
 
+    provider_dropdown = ft.Dropdown(
+        label="Provider",
+        value="anthropic",
+        width=160,
+        border_radius=10,
+        text_size=14,
+        options=[
+            ft.dropdown.Option("anthropic", "Anthropic"),
+            ft.dropdown.Option("openai", "OpenAI"),
+        ],
+    )
+    api_key_field = ft.TextField(
+        label="API key (optional)",
+        hint_text="Uses the server's configured key if left blank",
+        password=True,
+        can_reveal_password=True,
+        width=320,
+        border_radius=10,
+        text_size=14,
+    )
+
     thesis_progress = ft.ProgressRing(visible=False, width=18, height=18, stroke_width=2)
     thesis_button = ft.ElevatedButton(
         "Generate investment thesis",
@@ -548,7 +569,12 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         page.update()
 
         try:
-            result = client.generate_thesis(current_run_id["value"], regenerate=True)
+            result = client.generate_thesis(
+                current_run_id["value"],
+                regenerate=True,
+                provider=provider_dropdown.value or "anthropic",
+                api_key=(api_key_field.value or "").strip() or None,
+            )
         except ApiError as exc:
             thesis_progress.visible = False
             thesis_button.disabled = False
@@ -639,6 +665,18 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
                     "Runs Quant Interpreter, Risk Challenger, Options Strategist, and "
                     "Investment Thesis over the analysis above.",
                     size=12,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+                ft.Row(
+                    [provider_dropdown, api_key_field],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.END,
+                    wrap=True,
+                ),
+                ft.Text(
+                    "The API key is sent only for this request; it is never stored or logged.",
+                    size=11,
+                    italic=True,
                     color=ft.Colors.ON_SURFACE_VARIANT,
                 ),
                 ft.Row([thesis_button, thesis_progress], spacing=10),

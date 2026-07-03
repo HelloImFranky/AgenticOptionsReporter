@@ -23,6 +23,7 @@ uvicorn = { extras = ["standard"], version = "^0.30.6" }
 requests = "^2.32.3"
 flet = "^0.28.3"
 anthropic = "^0.116.0"
+openai = "^2.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.2"

@@ -70,6 +70,8 @@ def test_thesis_parser_defaults():
     assert args.run_id == 42
     assert args.regenerate is False
     assert args.fetch_only is False
+    assert args.provider == "anthropic"
+    assert args.api_key is None
 
 
 def test_thesis_parser_flags():
@@ -80,9 +82,13 @@ def test_thesis_parser_flags():
     args = parser.parse_args(["thesis", "42", "--fetch-only"])
     assert args.fetch_only is True
 
+    args = parser.parse_args(["thesis", "42", "--provider", "openai", "--api-key", "sk-custom"])
+    assert args.provider == "openai"
+    assert args.api_key == "sk-custom"
+
 
 def test_main_prints_json_and_returns_zero(monkeypatch, capsys):
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         return _FakeResponse(payload={"status": "ok"})
 
     monkeypatch.setattr(requests_module, "request", fake_request)
@@ -95,7 +101,7 @@ def test_main_prints_json_and_returns_zero(monkeypatch, capsys):
 
 
 def test_main_returns_one_on_api_error(monkeypatch, capsys):
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         return _FakeResponse(status_code=500, text="boom")
 
     monkeypatch.setattr(requests_module, "request", fake_request)
@@ -110,7 +116,7 @@ def test_main_returns_one_on_api_error(monkeypatch, capsys):
 def test_main_analyze_uses_base_url_and_symbol(monkeypatch, capsys):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["url"] = url
         captured["params"] = params
         return _FakeResponse(payload={"symbol": "AAPL"})
@@ -127,10 +133,10 @@ def test_main_analyze_uses_base_url_and_symbol(monkeypatch, capsys):
 def test_main_thesis_generates_by_default(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["method"] = method
         captured["url"] = url
-        captured["params"] = params
+        captured["json"] = json
         return _FakeResponse(payload={"run_id": 42})
 
     monkeypatch.setattr(requests_module, "request", fake_request)
@@ -140,12 +146,28 @@ def test_main_thesis_generates_by_default(monkeypatch):
     assert exit_code == 0
     assert captured["method"] == "POST"
     assert captured["url"] == "http://localhost:8000/runs/42/thesis"
+    assert captured["json"] == {"provider": "anthropic", "api_key": None, "regenerate": False}
+
+
+def test_main_thesis_passes_provider_and_api_key(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, params=None, json=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse(payload={"run_id": 42})
+
+    monkeypatch.setattr(requests_module, "request", fake_request)
+
+    exit_code = cli.main(["thesis", "42", "--provider", "openai", "--api-key", "sk-custom", "--regenerate"])
+
+    assert exit_code == 0
+    assert captured["json"] == {"provider": "openai", "api_key": "sk-custom", "regenerate": True}
 
 
 def test_main_thesis_fetch_only_uses_get(monkeypatch):
     captured = {}
 
-    def fake_request(method, url, params=None, timeout=None):
+    def fake_request(method, url, params=None, json=None, timeout=None):
         captured["method"] = method
         captured["url"] = url
         return _FakeResponse(payload={"run_id": 42})

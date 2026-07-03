@@ -180,7 +180,7 @@ def test_generate_thesis_success(client):
     run_id = _persist_full_run(session_factory)
     fake_result = _fake_thesis_result(run_id)
 
-    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
         "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
     ):
         response = test_client.post(f"/runs/{run_id}/thesis")
@@ -197,7 +197,7 @@ def test_generate_thesis_conflicts_without_regenerate(client):
     run_id = _persist_full_run(session_factory)
     fake_result = _fake_thesis_result(run_id)
 
-    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
         "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
     ):
         first = test_client.post(f"/runs/{run_id}/thesis")
@@ -212,11 +212,11 @@ def test_generate_thesis_regenerate_replaces_existing(client):
     run_id = _persist_full_run(session_factory)
     fake_result = _fake_thesis_result(run_id)
 
-    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
         "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
     ):
         test_client.post(f"/runs/{run_id}/thesis")
-        response = test_client.post(f"/runs/{run_id}/thesis", params={"regenerate": True})
+        response = test_client.post(f"/runs/{run_id}/thesis", json={"regenerate": True})
 
     assert response.status_code == 200
 
@@ -227,8 +227,68 @@ def test_generate_thesis_llm_error_returns_502(client):
     test_client, session_factory = client
     run_id = _persist_full_run(session_factory)
 
-    with patch("agentic_options_reporter.main.AnthropicLlmClient", side_effect=LlmError("no key")):
+    with patch("agentic_options_reporter.main.build_llm_client", side_effect=LlmError("no key")):
         response = test_client.post(f"/runs/{run_id}/thesis")
+
+    assert response.status_code == 502
+
+
+def test_generate_thesis_passes_custom_provider_and_api_key(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    captured = {}
+
+    def fake_build_llm_client(provider, api_key=None, model=None, max_tokens=1024):
+        captured["provider"] = provider
+        captured["api_key"] = api_key
+        captured["model"] = model
+        return MagicMock()
+
+    with patch(
+        "agentic_options_reporter.main.build_llm_client", side_effect=fake_build_llm_client
+    ), patch("agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result):
+        response = test_client.post(
+            f"/runs/{run_id}/thesis",
+            json={"provider": "openai", "api_key": "sk-custom-123"},
+        )
+
+    assert response.status_code == 200
+    assert captured["provider"] == "openai"
+    assert captured["api_key"] == "sk-custom-123"
+    # settings.llm_model is anthropic-specific; a non-anthropic provider
+    # must not receive it as its model.
+    assert captured["model"] is None
+
+
+def test_generate_thesis_default_provider_uses_settings_model(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    captured = {}
+
+    def fake_build_llm_client(provider, api_key=None, model=None, max_tokens=1024):
+        captured["provider"] = provider
+        captured["model"] = model
+        return MagicMock()
+
+    with patch(
+        "agentic_options_reporter.main.build_llm_client", side_effect=fake_build_llm_client
+    ), patch("agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result):
+        response = test_client.post(f"/runs/{run_id}/thesis")
+
+    assert response.status_code == 200
+    assert captured["provider"] == "anthropic"
+    assert captured["model"] == main_module.get_settings().llm_model
+
+
+def test_generate_thesis_unsupported_provider_returns_502(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    response = test_client.post(f"/runs/{run_id}/thesis", json={"provider": "made-up-provider"})
 
     assert response.status_code == 502
 
@@ -246,7 +306,7 @@ def test_get_thesis_after_generation(client):
     run_id = _persist_full_run(session_factory)
     fake_result = _fake_thesis_result(run_id)
 
-    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
         "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
     ):
         test_client.post(f"/runs/{run_id}/thesis")
@@ -272,7 +332,7 @@ def test_generate_thesis_no_candidate_short_circuit(client):
         investment_thesis=InvestmentThesis(thesis="No position recommended.", consensus="neutral"),
     )
 
-    with patch("agentic_options_reporter.main.AnthropicLlmClient", return_value=MagicMock()), patch(
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
         "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
     ):
         response = test_client.post(f"/runs/{run_id}/thesis")

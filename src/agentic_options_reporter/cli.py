@@ -34,7 +34,9 @@ def cmd_run(client: ApiClient, args: argparse.Namespace) -> Any:
 def cmd_thesis(client: ApiClient, args: argparse.Namespace) -> Any:
     if args.fetch_only:
         return client.get_thesis(args.run_id)
-    return client.generate_thesis(args.run_id, regenerate=args.regenerate)
+    return client.generate_thesis(
+        args.run_id, regenerate=args.regenerate, provider=args.provider, api_key=args.api_key
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +96,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--fetch-only",
         action="store_true",
         help="Only fetch a previously generated thesis; never generate a new one",
+    )
+    thesis_parser.add_argument(
+        "--provider",
+        default="anthropic",
+        help="LLM provider to use: anthropic or openai (default: anthropic)",
+    )
+    thesis_parser.add_argument(
+        "--api-key",
+        default=None,
+        help="API key for the chosen provider; omit to use the server's configured key",
     )
     thesis_parser.set_defaults(func=cmd_thesis)
 
