@@ -16,7 +16,6 @@ from agentic_options_reporter.models.schemas import (
     Recommendation,
     RiskAssessment,
     ScoredCandidate,
-    SentimentSnapshot,
     SupportResistanceLevel,
     TrendAssessment,
     VolumeAssessment,
@@ -313,10 +312,6 @@ def _articles() -> list[NewsArticle]:
     ]
 
 
-def _sentiment() -> SentimentSnapshot:
-    return SentimentSnapshot(ticker="TEST", score=0.4, label="bullish", article_count=12)
-
-
 def test_news_research_parses_response():
     llm = FakeLlmClient(
         {
@@ -330,7 +325,7 @@ def test_news_research_parses_response():
             )
         }
     )
-    result = news_research.run(llm, _articles(), _sentiment())
+    result = news_research.run(llm, _articles())
     assert result.sentiment == "bullish"
     assert result.catalysts == ["earnings beat"]
     assert result.risks == ["supply chain"]
@@ -344,7 +339,7 @@ def test_news_research_handles_no_articles():
             )
         }
     )
-    result = news_research.run(llm, [], _sentiment())
+    result = news_research.run(llm, [])
     assert result.sentiment == "neutral"
     assert result.catalysts == []
 
@@ -358,7 +353,7 @@ def test_news_research_raises_on_invalid_sentiment():
         }
     )
     with pytest.raises(ThesisGenerationError):
-        news_research.run(llm, _articles(), _sentiment())
+        news_research.run(llm, _articles())
 
 
 def _rates() -> InterestRates:

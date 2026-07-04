@@ -1,0 +1,130 @@
+"""News provider failover router and configuration-driven factory."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from datetime import datetime, timezone
+
+from agentic_options_reporter.data.news.alphavantage import AlphaVantageNewsProvider
+from agentic_options_reporter.data.news.base import (
+    NewsProvider,
+    NewsProviderError,
+    ProviderHealth,
+)
+from agentic_options_reporter.data.news.finnhub import FinnhubNewsProvider
+from agentic_options_reporter.data.news.gnews import GNewsProvider
+from agentic_options_reporter.data.news.guardian import GuardianNewsProvider
+from agentic_options_reporter.data.news.hackernews import HackerNewsProvider
+from agentic_options_reporter.data.news.newsapi import NewsApiOrgProvider
+from agentic_options_reporter.data.news.newsdata import NewsDataProvider
+from agentic_options_reporter.data.provider_router import acall_with_fallback
+from agentic_options_reporter.models.schemas import NewsArticle
+
+
+class NewsProviderRouter(NewsProvider):
+    """Tries a priority-ordered list of already-constructed NewsProvider
+    adapters per method call, advancing to the next on a retryable failure
+    (see data.provider_router). Implements NewsProvider itself, so
+    news_research can't tell whether it's talking to one adapter or many.
+    """
+
+    def __init__(self, clients: list[tuple[str, NewsProvider]]) -> None:
+        if not clients:
+            raise NewsProviderError(
+                "No news providers are configured for automatic failover. Set at least "
+                f"one provider's API key (supported: {', '.join(sorted(_PROVIDERS))})."
+            )
+        self._clients = clients
+
+    @property
+    def provider_names(self) -> list[str]:
+        return [name for name, _ in self._clients]
+
+    async def search(
+        self,
+        query: str,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        language: str = "en",
+        limit: int = 20,
+    ) -> list[NewsArticle]:
+        return await acall_with_fallback(
+            self._clients,
+            "search",
+            NewsProviderError,
+            query,
+            start_date=start_date,
+            end_date=end_date,
+            language=language,
+            limit=limit,
+        )
+
+    async def top_headlines(
+        self, category: str | None = None, limit: int = 20
+    ) -> list[NewsArticle]:
+        return await acall_with_fallback(
+            self._clients, "top_headlines", NewsProviderError, category=category, limit=limit
+        )
+
+    async def health(self) -> ProviderHealth:
+        """Probe every adapter concurrently; the router is healthy if any
+        adapter is. `detail` carries the per-adapter breakdown."""
+        results = await asyncio.gather(*(client.health() for _, client in self._clients))
+        healthy = any(result.healthy for result in results)
+        detail = "; ".join(
+            f"{result.provider}: {'ok' if result.healthy else result.detail or 'unhealthy'}"
+            for result in results
+        )
+        return ProviderHealth(
+            provider="router",
+            healthy=healthy,
+            latency_ms=max((r.latency_ms or 0.0) for r in results) if results else None,
+            detail=detail,
+            checked_at=datetime.now(timezone.utc),
+        )
+
+
+_PROVIDERS: dict[str, type[NewsProvider]] = {
+    "finnhub": FinnhubNewsProvider,
+    "newsdata": NewsDataProvider,
+    "guardian": GuardianNewsProvider,
+    "gnews": GNewsProvider,
+    "alphavantage": AlphaVantageNewsProvider,
+    "newsapi": NewsApiOrgProvider,
+    "hackernews": HackerNewsProvider,
+}
+
+# Financial-news specialists first, general journalism next, Alpha
+# Vantage late (25 requests/day), Hacker News last (keyless and always
+# available, but community discussion rather than journalism).
+_DEFAULT_FALLBACK_ORDER = [
+    "finnhub",
+    "newsdata",
+    "guardian",
+    "gnews",
+    "alphavantage",
+    "newsapi",
+    "hackernews",
+]
+
+
+def _fallback_order() -> list[str]:
+    raw = os.environ.get("AOR_NEWS_PROVIDER_FALLBACK_ORDER", ",".join(_DEFAULT_FALLBACK_ORDER))
+    return [name.strip().lower() for name in raw.split(",") if name.strip()]
+
+
+def build_news_provider() -> NewsProviderRouter:
+    """Build a NewsProviderRouter from AOR_NEWS_PROVIDER_FALLBACK_ORDER,
+    skipping any provider without a configured API key. Raises
+    NewsProviderError if the resulting router would have zero clients."""
+    clients: list[tuple[str, NewsProvider]] = []
+    for name in _fallback_order():
+        provider_cls = _PROVIDERS.get(name)
+        if provider_cls is None:
+            continue
+        try:
+            clients.append((name, provider_cls()))
+        except NewsProviderError:
+            continue  # not configured (missing API key) — skip, don't fail the request
+    return NewsProviderRouter(clients)

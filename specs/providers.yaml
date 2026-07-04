@@ -94,91 +94,126 @@ provider_router:
       zero clients. main.py's _optional_<name>_provider() helpers call
       these and catch that error, same "unconfigured = skip the agent"
       contract as phase_2a.
-    news: build_news_provider() — AOR_NEWS_PROVIDER_FALLBACK_ORDER, default "finnhub,alphavantage,newsapi,gdelt"
+    news: build_news_provider() — AOR_NEWS_PROVIDER_FALLBACK_ORDER, default "finnhub,newsdata,guardian,gnews,alphavantage,newsapi,hackernews"
     financial: build_financial_provider() — AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER, default "fmp,alphavantage"
     macro: build_macro_provider() — AOR_MACRO_PROVIDER_FALLBACK_ORDER, default "fred,bls,bea"
-  gdelt_is_always_available: >
-    GdeltNewsProvider needs no API key, so build_news_provider() now
-    (almost) never returns null — News Research effectively always runs,
-    at minimum against GDELT alone. This is an intentional improvement
-    over phase_2a's strict "unconfigured = skipped" behavior, not a
+  keyless_news_is_always_available: >
+    HackerNewsProvider needs no API key, so build_news_provider() never
+    returns an empty router — News Research effectively always runs, at
+    minimum against Hacker News alone. This is intentional, not a
     contract change: an agent still only runs when its provider
     constructed successfully.
 
 interfaces:
   NewsProvider:
-    module: agentic_options_reporter.data.news_provider
+    module: agentic_options_reporter.data.news   # one adapter per source (base.py, router.py, <source>.py)
+    interface_style: >
+      ASYNC — unlike the other (sync) provider interfaces. News is the
+      interface with the most adapters, so coroutines keep the door open
+      to concurrent fan-out and let health() probes run in parallel;
+      the sync thesis pipeline bridges with asyncio.run() at the
+      news_research step (thesis/orchestrator.py).
     methods:
-      get_company_news(ticker: str, limit: int = 20) -> list[NewsArticle]
-      get_market_news(limit: int = 20) -> list[NewsArticle]
-      get_sentiment(ticker: str) -> SentimentSnapshot
+      search(query: str, start_date: datetime | null = null, end_date: datetime | null = null, language: str = "en", limit: int = 20) -> list[NewsArticle]
+      top_headlines(category: str | null = null, limit: int = 20) -> list[NewsArticle]
+      health() -> ProviderHealth   # {provider, healthy, latency_ms, detail, checked_at}; probes the source, never raises
+    shared_adapter_behavior: >
+      All HTTP adapters extend _HttpNewsProvider (base.py): API-key
+      handling, httpx-error normalization into the NewsProviderError
+      hierarchy, and a CLASS-level TTL response cache
+      (CACHE_TTL_SECONDS=300) — process-wide because main.py rebuilds
+      providers per request and free tiers meter by the day (Alpha
+      Vantage: 25/day), so a "Regenerate" click seconds later must not
+      re-spend quota.
     implementations:
       - name: FinnhubNewsProvider
         api_key_env_var: FINNHUB_API_KEY
+        free_tier: ~60 requests/min
         base_url: https://finnhub.io/api/v1
         endpoints:
-          get_company_news: GET /company-news?symbol={ticker}&from={date}&to={date}
-          get_market_news: GET /news?category=general
-          get_sentiment: GET /news-sentiment?symbol={ticker}
+          search: GET /company-news?symbol={query}&from={date}&to={date}   # query treated as a ticker
+          top_headlines: GET /news?category={category|general}
+        note: English-only source; `language` is ignored.
+      - name: NewsDataProvider
+        api_key_env_var: NEWSDATA_API_KEY
+        free_tier: ~200 requests/day
+        base_url: https://newsdata.io/api/1/latest
+        endpoints:
+          search: GET ?q={query}&language={language}
+          top_headlines: GET ?category={category|business}&language=en
+        note: >
+          The free tier only exposes the latest-news window (the
+          /archive endpoint is paid), so start_date/end_date are
+          accepted but not forwarded — a documented gap, not silently
+          different results.
+      - name: GuardianNewsProvider
+        api_key_env_var: GUARDIAN_API_KEY
+        free_tier: generous
+        base_url: https://content.guardianapis.com/search
+        endpoints:
+          search: GET ?q={query}&from-date={date}&to-date={date}&show-fields=trailText
+          top_headlines: GET ?section={category|business}&order-by=newest
+        note: The Guardian publishes in English; `language` is ignored.
+      - name: GNewsProvider
+        api_key_env_var: GNEWS_API_KEY
+        free_tier: ~100 requests/day
+        base_url: https://gnews.io/api/v4
+        endpoints:
+          search: GET /search?q={query}&lang={language}&from={ts}&to={ts}
+          top_headlines: GET /top-headlines?category={category|business}&lang=en
       - name: AlphaVantageNewsProvider
         api_key_env_var: ALPHA_VANTAGE_API_KEY
+        free_tier: ~25 requests/day (why it sits late in the default fallback order)
         base_url: https://www.alphavantage.co/query
         endpoints:
-          get_company_news: GET ?function=NEWS_SENTIMENT&tickers={ticker}
-          get_market_news: GET ?function=NEWS_SENTIMENT&topics=financial_markets
-          get_sentiment: >
-            GET ?function=NEWS_SENTIMENT&tickers={ticker} — averages
-            each article's ticker_sentiment_score for {ticker} (falling
-            back to overall_sentiment_score when a ticker-specific score
-            is absent).
+          search: GET ?function=NEWS_SENTIMENT&tickers={query}&time_from={ts}&time_to={ts}   # query treated as a ticker
+          top_headlines: GET ?function=NEWS_SENTIMENT&topics={category|financial_markets}
         quirk: >
           The free tier returns HTTP 200 with an "Information"/"Note"
           field instead of a proper 429 when rate limited; treated as
           NewsProviderRateLimited.
       - name: NewsApiOrgProvider
         api_key_env_var: NEWSAPI_API_KEY
+        free_tier: ~100 requests/day, development use only per NewsAPI's terms
         base_url: https://newsapi.org/v2
         endpoints:
-          get_company_news: GET /everything?q={ticker}&sortBy=publishedAt
-          get_market_news: GET /top-headlines?category=business
-          get_sentiment: >
-            Not available — NewsAPI has no sentiment endpoint at any
-            tier. Always raises NewsProviderUnsupported (documented gap,
-            not fabricated).
-      - name: GdeltNewsProvider
-        api_key_env_var: null   # GDELT is free and keyless
-        base_url: https://api.gdeltproject.org/api/v2/doc/doc
+          search: GET /everything?q={query}&from={date}&to={date}&language={language}
+          top_headlines: GET /top-headlines?category={category|business}
+      - name: HackerNewsProvider
+        api_key_env_var: null   # keyless and unlimited
+        base_url: https://hn.algolia.com/api/v1/search
         endpoints:
-          get_company_news: GET ?query={ticker}&mode=artlist
-          get_market_news: GET ?query=financial+markets&mode=artlist
-          get_sentiment: >
-            GET ?query={ticker}&mode=timelinetone — takes the latest
-            point of GDELT's own tone timeline (roughly -10..+10 in
-            practice), rescaled by /10 and clipped to this project's
-            -1..1 SentimentSnapshot.score convention. A unit conversion
-            of a real provider-supplied signal, not a fabricated value.
-            The accompanying article sample is capped at
-            SENTIMENT_ARTICLE_SAMPLE (50) — GDELT rate-limits
-            aggressively and a larger sample only sharpened
-            article_count while inviting 429s.
-        rate_limit_defense: >
-          GDELT throttles per IP at roughly one request every 5 seconds
-          and 429s anything faster — and being keyless, it's often the
-          only provider in the news router, with nothing to fail over
-          to. GdeltNewsProvider therefore (a) caches responses for
-          CACHE_TTL_SECONDS (300) in CLASS-level state, because main.py
-          rebuilds the provider per request and instance state would be
-          reset by exactly the "Regenerate" click most likely to re-hit
-          GDELT inside its cooldown; (b) has get_company_news always
-          fetch SENTIMENT_ARTICLE_SAMPLE records and slice down to
-          `limit`, so it and get_sentiment share one cached artlist
-          response per ticker (2 GDELT requests per pipeline run, not
-          3); (c) serializes uncached requests behind a class-level lock
-          and spaces them MIN_REQUEST_INTERVAL_SECONDS (5) apart; and
-          (d) retries a 429 once after Retry-After (or
-          RATE_LIMIT_RETRY_SECONDS=5 when the header is absent). A
-          second 429 propagates as NewsProviderRateLimited, degrading
-          via the router/pipeline_warnings path as usual.
+          search: GET ?query={query}&tags=story&numericFilters=created_at_i>{ts},created_at_i<{ts}
+          top_headlines: GET ?tags=front_page
+        note: >
+          Community/technology discussion rather than journalism — the
+          always-available last resort in the default fallback order,
+          best treated as supplemental signal.
+    removed:
+      - name: GdeltNewsProvider
+        reason: >
+          Removed in favor of the adapter set above. GDELT's per-IP
+          throttle (~1 request/5s) rate-limited routine pipeline use
+          even after adding caching/spacing/retry defenses, and its
+          tone timeline was the only sentiment signal — the
+          news_research agent now authors sentiment from the articles
+          themselves, so SentimentSnapshot was retired with it.
+    deferred:
+      - name: reddit
+        reason: >
+          Community sentiment per the source list, but requires OAuth
+          app registration and a token flow, not just an API key —
+          heavier setup than the env-var-key pattern every other
+          adapter shares. Revisit when community sentiment becomes a
+          dedicated signal.
+      - name: freenewsapi
+        reason: >
+          Listed as a generous free tier, but its API contract could
+          not be verified against public documentation — implementing
+          against a guessed contract would violate the "never silently
+          fabricate" rule. Revisit with docs in hand.
+      - name: rss_feeds
+        reason: Useful supplemental source; needs a feed-list config design first.
 
   FinancialProvider:
     module: agentic_options_reporter.data.financial_provider

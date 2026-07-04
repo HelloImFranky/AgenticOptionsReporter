@@ -16,7 +16,7 @@ from agentic_options_reporter.data.macro_provider import (
     build_macro_provider,
 )
 from agentic_options_reporter.data.market_data import MarketDataError
-from agentic_options_reporter.data.news_provider import (
+from agentic_options_reporter.data.news import (
     NewsProvider,
     NewsProviderError,
     build_news_provider,

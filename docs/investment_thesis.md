@@ -75,7 +75,7 @@ message rather than an error.
 | agent | provider interface | implementations | env var(s) |
 |---|---|---|---|
 | Financial Research | `FinancialProvider` | Financial Modeling Prep, Alpha Vantage | `FMP_API_KEY`, `ALPHA_VANTAGE_API_KEY` |
-| News Research | `NewsProvider` | Finnhub, Alpha Vantage, NewsAPI, GDELT (keyless) | `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_API_KEY` |
+| News Research | `NewsProvider` | Finnhub, NewsData.io, The Guardian, GNews, Alpha Vantage, NewsAPI, Hacker News (keyless) | `FINNHUB_API_KEY`, `NEWSDATA_API_KEY`, `GUARDIAN_API_KEY`, `GNEWS_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_API_KEY` |
 | Macro Research | `MacroProvider` | FRED, BLS, BEA | `FRED_API_KEY`, `BLS_API_KEY`, `BEA_API_KEY` |
 
 ### Automatic failover across data providers
@@ -93,22 +93,26 @@ outside its specialty rather than being excluded from the router
 entirely — it's still used for the methods it does support. A
 transient failure (rate limit, quota, timeout, 5xx) advances to the next
 configured provider the same way (see `specs/providers.yaml:
-provider_router` for the full error-classification detail). Since GDELT
-needs no API key, News Research now effectively always has at least one
-provider available. Because that also makes GDELT the provider most
-likely to be alone in the router (nothing to fail over to), it defends
-itself against its strict per-IP throttle: responses are cached
-process-wide for 5 minutes, `get_company_news` and `get_sentiment` share
-one article fetch per ticker, uncached requests are spaced 5 seconds
-apart, and a 429 is retried once (see `specs/providers.yaml:
-rate_limit_defense`).
+provider_router` for the full error-classification detail). Since Hacker
+News needs no API key, News Research always has at least one provider
+available.
+
+The news interface is the one **async** provider interface
+(`search`/`top_headlines`/`health`, one adapter module per source under
+`data/news/` — see `specs/providers.yaml`); the sync pipeline bridges
+with `asyncio.run()` at the news-research step. All news adapters share
+a process-wide 5-minute response cache, since free tiers meter by the
+day and the provider objects are rebuilt per request — a "Regenerate"
+click must not re-spend quota. GDELT was removed: its per-IP throttle
+rate-limited routine pipeline use even with caching/spacing/retry
+defenses, and the diverse adapter set above replaces it.
 
 ### When every data provider fails: warnings, not a crash
 
 Even a fully-exhausted data-provider router doesn't fail the request.
 The orchestrator wraps each research step: if its provider errors at
-call time (e.g. GDELT was the only configured news provider and it
-rate-limited), that agent's finding stays `null`, the failure is
+call time (e.g. every configured news source rate-limited at once),
+that agent's finding stays `null`, the failure is
 recorded in `AgentThesisResult.pipeline_warnings` (prefixed with the
 agent name, e.g. `"news_research: provider failed during the run — …"`),
 and the rest of the pipeline — quant, risk, strategy, the final thesis —

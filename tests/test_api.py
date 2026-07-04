@@ -472,7 +472,7 @@ def test_generate_thesis_absent_research_findings_round_trip_as_null(client):
     "error_cls_path",
     [
         "agentic_options_reporter.data.financial_provider.FinancialProviderError",
-        "agentic_options_reporter.data.news_provider.NewsProviderError",
+        "agentic_options_reporter.data.news.NewsProviderError",
         "agentic_options_reporter.data.macro_provider.MacroProviderError",
     ],
 )
@@ -502,16 +502,19 @@ def test_optional_financial_provider_returns_none_when_unconfigured(monkeypatch)
     assert main_module._optional_financial_provider() is None
 
 
-def test_optional_news_provider_returns_router_with_only_gdelt_when_others_unconfigured(monkeypatch):
-    # GDELT needs no API key, so the news provider is never fully
-    # "unconfigured" anymore — it always falls back to GDELT alone.
-    for var in ("FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "NEWSAPI_API_KEY"):
+def test_optional_news_provider_returns_router_with_only_hackernews_when_others_unconfigured(monkeypatch):
+    # Hacker News needs no API key, so the news provider is never fully
+    # "unconfigured" — it always falls back to Hacker News alone.
+    for var in (
+        "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "NEWSAPI_API_KEY",
+        "NEWSDATA_API_KEY", "GUARDIAN_API_KEY", "GNEWS_API_KEY",
+    ):
         monkeypatch.delenv(var, raising=False)
 
     provider = main_module._optional_news_provider()
 
     assert provider is not None
-    assert provider.provider_names == ["gdelt"]
+    assert provider.provider_names == ["hackernews"]
 
 
 def test_optional_macro_provider_returns_none_when_unconfigured(monkeypatch):

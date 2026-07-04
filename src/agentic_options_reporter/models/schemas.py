@@ -206,13 +206,6 @@ class NewsArticle(BaseModel):
     summary: str = ""
 
 
-class SentimentSnapshot(BaseModel):
-    ticker: str
-    score: float          # provider-supplied, roughly -1 (bearish) to 1 (bullish)
-    label: Literal["bullish", "bearish", "neutral"]
-    article_count: int
-
-
 class CompanyProfile(BaseModel):
     ticker: str
     name: str
