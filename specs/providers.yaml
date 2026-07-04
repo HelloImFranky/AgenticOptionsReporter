@@ -447,19 +447,35 @@ interfaces:
 
   SECProvider:
     module: agentic_options_reporter.data.sec_provider
+    interface_style: >
+      ASYNC, like news/financial/macro — SecEdgarProvider extends the
+      shared async-HTTP infrastructure in data.async_http (httpx-error
+      normalization into the SecProviderError hierarchy, class-level TTL
+      response cache, health probe). One keyless source and no failover
+      router (EDGAR is the sole free provider of the full filings index),
+      so this stays a single adapter module rather than a package. The
+      sync thesis pipeline will bridge with asyncio.run() when the
+      Catalyst agent is wired.
     methods:
       get_recent_filings(ticker: str, limit: int = 10) -> list[SecFiling]
       get_10k(ticker: str) -> SecFiling | null
       get_10q(ticker: str) -> SecFiling | null
       get_8k(ticker: str) -> SecFiling | null
+      health() -> ProviderHealth   # probes the ticker->CIK map; never raises
     implementations:
       - name: SecEdgarProvider
         api_key_env_var: null   # SEC EDGAR is free and keyless
-        required_header: "User-Agent: <descriptive app name + contact email>, per SEC fair-access policy"
+        required_header: "User-Agent: <descriptive app name + contact email>, per SEC fair-access policy (SEC_EDGAR_USER_AGENT)"
         base_url: https://data.sec.gov
         endpoints:
-          ticker_to_cik_lookup: GET https://www.sec.gov/files/company_tickers.json
+          ticker_to_cik_lookup: GET https://www.sec.gov/files/company_tickers.json   # parsed map memoized on the instance
           get_recent_filings: GET /submissions/CIK{cik:0>10}.json
+        errors: >
+          httpx errors normalize into SecProviderError with retryable
+          subclasses SecProviderRateLimited/Timeout/Unavailable (the same
+          markers the other async adapters use), so a future
+          SECProviderRouter or catalyst fan-out can treat SEC failures
+          generically.
     note: >
-      Not yet wired into a router or agent (reserved for a future
-      Catalyst agent); only one implementation exists.
+      Not yet wired into an agent (reserved for the Catalyst agent); only
+      one implementation exists.

@@ -112,7 +112,7 @@ pattern as `MarketDataProvider`:
 | `FinancialProvider` (async) | Financial Modeling Prep, Finnhub, Alpha Vantage | `FMP_API_KEY`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY` |
 | `NewsProvider` (async) | Finnhub, NewsData.io, The Guardian, GNews, Alpha Vantage, NewsAPI, Hacker News (keyless) | `FINNHUB_API_KEY`, `NEWSDATA_API_KEY`, `GUARDIAN_API_KEY`, `GNEWS_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_API_KEY` |
 | `MacroProvider` (async) | FRED, BLS, BEA, IMF (keyless), World Bank (keyless) | `FRED_API_KEY`, `BLS_API_KEY`, `BEA_API_KEY` |
-| `SECProvider` | SEC EDGAR (free, keyless) | `SEC_EDGAR_USER_AGENT` (optional) |
+| `SECProvider` (async) | SEC EDGAR (free, keyless) | `SEC_EDGAR_USER_AGENT` (optional) |
 
 Each interface's `build_<name>_provider()` factory (`data/*_provider.py`)
 composes every currently-configured implementation into a
@@ -123,8 +123,10 @@ per method call, configurable via `AOR_<NAME>_PROVIDER_FALLBACK_ORDER`.
 treat a `*ProviderError` (zero providers configured) as "not configured"
 (`None`), not a startup or request failure. See `docs/investment_thesis.md`
 for how the Financial/News/Macro Research agents consume these providers.
-`SECProvider` has only one implementation and isn't wired into a router
-or any agent yet (reserved for a future Catalyst agent).
+`SECProvider` is async (on the shared `data/async_http.py` base, like the
+other three) but has only one implementation and no failover router — SEC
+EDGAR is the sole free provider of the full filings index — and isn't
+wired into any agent yet (reserved for a future Catalyst agent).
 
 ## Claude Code instructions
 

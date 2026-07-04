@@ -123,8 +123,9 @@ class FakeLlmClient(LlmClient):
 
 
 class FakeHttpResponse:
-    """Stand-in for a `requests.Response`, used to test the provider
-    modules (news/financial/macro/sec) without live network calls."""
+    """Stand-in for a `requests.Response`, used to test the sync
+    provider-router helpers (classify_requests_error / call_with_fallback)
+    without live network calls."""
 
     def __init__(self, json_data, status_code: int = 200, raise_exc: Exception | None = None):
         self._json_data = json_data

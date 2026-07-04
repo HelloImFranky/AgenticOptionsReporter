@@ -168,10 +168,11 @@ split used for `QuantInterpretation.overall_score`. `company_health`,
 `growth`, `profitability`, and `cash_flow` are legitimate LLM judgment
 calls over the given facts, analogous to `risk_level`.
 
-A `SECProvider` interface (`SecEdgarProvider`, backed by the free,
-keyless SEC EDGAR API) also exists in `data/sec_provider.py` for a future
-Catalyst agent, but isn't wired into the pipeline yet (see
-`specs/providers.yaml: deferred`).
+An async `SECProvider` interface (`SecEdgarProvider`, backed by the free,
+keyless SEC EDGAR API, on the same `data/async_http.py` base as the other
+three) also exists in `data/sec_provider.py` for a future Catalyst agent,
+but isn't wired into the pipeline yet (see `specs/providers.yaml:
+SECProvider`).
 
 ## Execution model
 
