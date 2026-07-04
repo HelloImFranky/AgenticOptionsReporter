@@ -8,15 +8,13 @@ persisted, structured recommendation.
 This project is built using structured specifications instead of
 conversational prompts. Documentation (`docs/`) is human-facing context;
 specs (`specs/`) are the single source of truth for interfaces. See
-`docs/architecture.md` for the full architecture guide and
-`agents/` for the roles that develop this codebase.
+`docs/architecture.md` for the full architecture guide.
 
 ## Repository layout
 
 ```
 docs/     human-readable architecture, workflow, and analysis docs
 specs/    machine-readable YAML contracts (workflow, api, scoring, database)
-agents/   specialist agent role descriptions (planner, backend, testing, docs)
 src/      application source (agentic_options_reporter package)
 tests/    pytest unit tests, one file per module
 docker/   container build
