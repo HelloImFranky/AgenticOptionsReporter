@@ -75,9 +75,11 @@ the run in `pipeline_warnings` (an amber banner in the Agents tab)
 rather than crashing the request.
 
 ```bash
-# Financial Research (financialmodelingprep.com, alphavantage.co — both free tier)
-export FMP_API_KEY=...
-export ALPHA_VANTAGE_API_KEY=...
+# Financial Research — all free tier; FINNHUB_API_KEY/ALPHA_VANTAGE_API_KEY
+# do double duty for News Research below
+export FMP_API_KEY=...           # financialmodelingprep.com, full coverage
+export FINNHUB_API_KEY=...       # finnhub.io (profile/ratios/analyst consensus)
+export ALPHA_VANTAGE_API_KEY=... # alphavantage.co (25 req/day, last resort)
 
 # News Research — all free tier; Hacker News needs no key
 export FINNHUB_API_KEY=...       # finnhub.io, financial news

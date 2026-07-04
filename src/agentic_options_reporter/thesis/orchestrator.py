@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from agentic_options_reporter.data.financial_provider import FinancialProvider, FinancialProviderError
+from agentic_options_reporter.data.financial import FinancialProvider, FinancialProviderError
 from agentic_options_reporter.data.macro_provider import MacroProvider, MacroProviderError
 from agentic_options_reporter.data.news import NewsProvider, NewsProviderError
 from agentic_options_reporter.models.schemas import (
@@ -30,6 +30,15 @@ from agentic_options_reporter.thesis import (
     risk_challenger,
 )
 from agentic_options_reporter.thesis.llm_client import LlmClient
+
+
+async def _fetch_financial_inputs(provider: FinancialProvider, ticker: str) -> tuple:
+    return await asyncio.gather(
+        provider.get_company_profile(ticker),
+        provider.get_financial_statements(ticker),
+        provider.get_ratios(ticker),
+        provider.get_analyst_estimates(ticker),
+    )
 
 
 def run_thesis_pipeline(
@@ -80,12 +89,14 @@ def run_thesis_pipeline(
     if financial_provider is not None:
         ticker = analysis_result.symbol
         try:
+            # FinancialProvider is async (specs/providers.yaml); this
+            # pipeline is sync, so bridge with a private event loop and
+            # fetch the four datasets concurrently.
+            profile, statements, ratios, estimates = asyncio.run(
+                _fetch_financial_inputs(financial_provider, ticker)
+            )
             financial_finding = financial_research.run(
-                llm_client,
-                financial_provider.get_company_profile(ticker),
-                financial_provider.get_financial_statements(ticker),
-                financial_provider.get_ratios(ticker),
-                financial_provider.get_analyst_estimates(ticker),
+                llm_client, profile, statements, ratios, estimates
             )
         except FinancialProviderError as exc:
             pipeline_warnings.append(f"financial_research: provider failed during the run — {exc}")

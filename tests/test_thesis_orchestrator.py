@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime, timezone
 
-from agentic_options_reporter.data.financial_provider import FinancialProvider
+from agentic_options_reporter.data.financial import FinancialProvider, ProviderHealth as FinancialProviderHealth
 from agentic_options_reporter.data.macro_provider import MacroProvider
 from agentic_options_reporter.data.news import NewsProvider, ProviderHealth
 from agentic_options_reporter.models.schemas import (
@@ -57,28 +57,33 @@ _ALL_RESPONSES_WITH_RESEARCH = {
 
 
 class FakeFinancialProvider(FinancialProvider):
-    def get_company_profile(self, ticker: str) -> CompanyProfile:
+    async def get_company_profile(self, ticker: str) -> CompanyProfile:
         return CompanyProfile(
             ticker=ticker, name="Test Corp", sector="Technology", industry="Software",
             market_cap=1_000_000_000, description="Makes software.",
         )
 
-    def get_financial_statements(self, ticker: str) -> FinancialStatementSummary:
+    async def get_financial_statements(self, ticker: str) -> FinancialStatementSummary:
         return FinancialStatementSummary(
             ticker=ticker, period="2025", revenue=500_000_000, net_income=80_000_000,
             operating_cash_flow=100_000_000, free_cash_flow=70_000_000,
         )
 
-    def get_ratios(self, ticker: str) -> FinancialRatios:
+    async def get_ratios(self, ticker: str) -> FinancialRatios:
         return FinancialRatios(
             ticker=ticker, pe_ratio=25.0, pb_ratio=8.0, debt_to_equity=0.5, current_ratio=1.8,
             return_on_equity=0.3, gross_margin=0.6, net_margin=0.16,
         )
 
-    def get_analyst_estimates(self, ticker: str) -> AnalystEstimates:
+    async def get_analyst_estimates(self, ticker: str) -> AnalystEstimates:
         return AnalystEstimates(
             ticker=ticker, consensus_rating="Buy", price_target_mean=120.0,
             price_target_high=140.0, price_target_low=100.0, num_analysts=15,
+        )
+
+    async def health(self) -> FinancialProviderHealth:
+        return FinancialProviderHealth(
+            provider="fake", healthy=True, checked_at=datetime.now(timezone.utc)
         )
 
 

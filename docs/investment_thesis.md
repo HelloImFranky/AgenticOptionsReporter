@@ -74,7 +74,7 @@ message rather than an error.
 
 | agent | provider interface | implementations | env var(s) |
 |---|---|---|---|
-| Financial Research | `FinancialProvider` | Financial Modeling Prep, Alpha Vantage | `FMP_API_KEY`, `ALPHA_VANTAGE_API_KEY` |
+| Financial Research | `FinancialProvider` | Financial Modeling Prep, Finnhub, Alpha Vantage | `FMP_API_KEY`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY` |
 | News Research | `NewsProvider` | Finnhub, NewsData.io, The Guardian, GNews, Alpha Vantage, NewsAPI, Hacker News (keyless) | `FINNHUB_API_KEY`, `NEWSDATA_API_KEY`, `GUARDIAN_API_KEY`, `GNEWS_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_API_KEY` |
 | Macro Research | `MacroProvider` | FRED, BLS, BEA | `FRED_API_KEY`, `BLS_API_KEY`, `BEA_API_KEY` |
 
@@ -97,15 +97,19 @@ provider_router` for the full error-classification detail). Since Hacker
 News needs no API key, News Research always has at least one provider
 available.
 
-The news interface is the one **async** provider interface
-(`search`/`top_headlines`/`health`, one adapter module per source under
-`data/news/` — see `specs/providers.yaml`); the sync pipeline bridges
-with `asyncio.run()` at the news-research step. All news adapters share
-a process-wide 5-minute response cache, since free tiers meter by the
-day and the provider objects are rebuilt per request — a "Regenerate"
-click must not re-spend quota. GDELT was removed: its per-IP throttle
-rate-limited routine pipeline use even with caching/spacing/retry
-defenses, and the diverse adapter set above replaces it.
+The news and financial interfaces are **async** (one adapter module per
+source under `data/news/` and `data/financial/`, sharing the
+infrastructure in `data/async_http.py` — see `specs/providers.yaml`);
+each also exposes a `health()` probe, and the routers check all their
+adapters' health concurrently. The sync pipeline bridges with
+`asyncio.run()` at each research step — the financial step fetches its
+four datasets concurrently via `asyncio.gather`. All async adapters
+share a process-wide 5-minute response cache, since free tiers meter by
+the day and the provider objects are rebuilt per request — a
+"Regenerate" click must not re-spend quota. GDELT was removed: its
+per-IP throttle rate-limited routine pipeline use even with
+caching/spacing/retry defenses, and the diverse news adapter set above
+replaces it.
 
 ### When every data provider fails: warnings, not a crash
 

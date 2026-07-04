@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from agentic_options_reporter.config import get_settings
-from agentic_options_reporter.data.financial_provider import (
+from agentic_options_reporter.data.financial import (
     FinancialProvider,
     FinancialProviderError,
     build_financial_provider,
