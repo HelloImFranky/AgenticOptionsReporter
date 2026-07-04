@@ -7,6 +7,11 @@ from individual adapter modules.
 
 from agentic_options_reporter.data.financial.alphavantage import AlphaVantageFinancialProvider
 from agentic_options_reporter.data.financial.base import (
+    ANALYST_ESTIMATES,
+    FINANCIAL_DATASETS,
+    PROFILE,
+    RATIOS,
+    STATEMENTS,
     FinancialProvider,
     FinancialProviderError,
     FinancialProviderRateLimited,
@@ -23,6 +28,11 @@ from agentic_options_reporter.data.financial.router import (
 )
 
 __all__ = [
+    "ANALYST_ESTIMATES",
+    "FINANCIAL_DATASETS",
+    "PROFILE",
+    "RATIOS",
+    "STATEMENTS",
     "AlphaVantageFinancialProvider",
     "FinancialProvider",
     "FinancialProviderError",

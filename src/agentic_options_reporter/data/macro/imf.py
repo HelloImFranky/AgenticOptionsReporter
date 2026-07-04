@@ -1,13 +1,12 @@
 """International Monetary Fund adapter (dataservices.imf.org — free,
 keyless SDMX-JSON service).
 
-Covers US CPI (IFS series ``M.US.PCPI_IX``, a monthly index) and nominal
-GDP (``Q.US.NGDP_SA_XDC``, quarterly, seasonally adjusted). US policy
-rates aren't cleanly exposed through IFS, so get_interest_rates raises
-MacroProviderUnsupported (retryable) and the router falls through to
-FRED. Keyless, so it's always available — but IMF data lags the primary
-US agencies, which is why it sits behind FRED/BLS/BEA in the default
-fallback order.
+Serves `cpi` (IFS series ``M.US.PCPI_IX``, monthly index) and `gdp`
+(``Q.US.NGDP_SA_XDC``, quarterly nominal, seasonally adjusted). US policy
+rates aren't cleanly exposed through IFS, so it doesn't advertise rate
+metrics. Keyless, so it's always available — but IMF data lags the
+primary US agencies, which is why it sits behind FRED/BLS/BEA in the
+default order.
 """
 
 from __future__ import annotations
@@ -17,16 +16,11 @@ from typing import Any
 
 from agentic_options_reporter.data.macro.base import (
     MacroProviderError,
-    MacroProviderUnsupported,
     _HttpMacroProvider,
     yoy_change_pct,
 )
-from agentic_options_reporter.models.schemas import (
-    CpiSnapshot,
-    GdpSnapshot,
-    InterestRates,
-    MacroEvent,
-)
+from agentic_options_reporter.data.macro.metrics import get_metric
+from agentic_options_reporter.models.schemas import MacroObservation
 
 
 class ImfMacroProvider(_HttpMacroProvider):
@@ -34,8 +28,12 @@ class ImfMacroProvider(_HttpMacroProvider):
     PROVIDER_LABEL = "IMF"
     API_KEY_ENV_VAR = None  # keyless
 
-    CPI_SERIES_KEY = "M.US.PCPI_IX"
-    GDP_SERIES_KEY = "Q.US.NGDP_SA_XDC"
+    # metric id -> (IFS series key, YoY lookback in periods)
+    _SERIES: dict[str, tuple[str, int]] = {
+        "cpi": ("M.US.PCPI_IX", 12),
+        "gdp": ("Q.US.NGDP_SA_XDC", 4),
+    }
+    METRICS = frozenset(_SERIES)
 
     async def _fetch_observations(self, series_key: str) -> list[dict[str, Any]]:
         start_year = date.today().year - 2
@@ -61,39 +59,27 @@ class ImfMacroProvider(_HttpMacroProvider):
         year_str, month_str = time_period.split("-")
         return date(int(year_str), int(month_str), 1)
 
-    async def get_interest_rates(self) -> InterestRates:
-        raise MacroProviderUnsupported(
-            "IMF IFS does not cleanly expose US policy rates; use FRED."
-        )
-
-    async def get_cpi(self) -> CpiSnapshot:
-        observations = await self._fetch_observations(self.CPI_SERIES_KEY)
+    async def _fetch(self, metric_id: str) -> MacroObservation:
+        series_key, yoy_periods = self._SERIES[metric_id]
+        observations = await self._fetch_observations(series_key)
         if not observations:
-            raise MacroProviderError("IMF returned no CPI observations")
+            raise MacroProviderError(f"IMF returned no observations for {metric_id}")
+
         latest = observations[0]
         latest_value = float(latest["@OBS_VALUE"])
-        year_ago = float(observations[12]["@OBS_VALUE"]) if len(observations) > 12 else None
-        return CpiSnapshot(
+        year_ago = (
+            float(observations[yoy_periods]["@OBS_VALUE"])
+            if len(observations) > yoy_periods
+            else None
+        )
+
+        metric = get_metric(metric_id)
+        return MacroObservation(
+            metric_id=metric_id,
+            label=metric.label,
             value=latest_value,
+            unit=metric.unit,
+            as_of=self._period_end_date(latest["@TIME_PERIOD"]),
+            source=self.PROVIDER_LABEL,
             yoy_change_pct=yoy_change_pct(latest_value, year_ago),
-            as_of=self._period_end_date(latest["@TIME_PERIOD"]),
         )
-
-    async def get_gdp(self) -> GdpSnapshot:
-        observations = await self._fetch_observations(self.GDP_SERIES_KEY)
-        if not observations:
-            raise MacroProviderError("IMF returned no GDP observations")
-        latest = observations[0]
-        latest_value = float(latest["@OBS_VALUE"])
-        year_ago = float(observations[4]["@OBS_VALUE"]) if len(observations) > 4 else None
-        return GdpSnapshot(
-            value=latest_value,
-            yoy_growth_pct=yoy_change_pct(latest_value, year_ago),
-            as_of=self._period_end_date(latest["@TIME_PERIOD"]),
-        )
-
-    async def get_macro_calendar(self) -> list[MacroEvent]:
-        return []
-
-    async def _health_probe(self) -> None:
-        await self.get_cpi()

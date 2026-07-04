@@ -244,32 +244,21 @@ class AnalystEstimates(BaseModel):
     num_analysts: int = 0
 
 
-class InterestRates(BaseModel):
-    fed_funds_rate: float | None = None
-    ten_year_yield: float | None = None
-    two_year_yield: float | None = None
-    as_of: date
+class MacroObservation(BaseModel):
+    """One normalized macro data point, whatever source served it — the
+    capability-based macro layer's single output type (see
+    data/macro/metrics.py and specs/providers.yaml). `source` records
+    which provider actually answered; `yoy_change_pct` is a derived
+    year-over-year change where meaningful (prices/output), null for
+    point-in-time rates or when the lookback observation is missing."""
 
-
-class CpiSnapshot(BaseModel):
+    metric_id: str          # e.g. "policy_rate", "cpi", "gdp"
+    label: str              # human label from the metric registry
     value: float
+    unit: str               # "percent" | "index" | "usd"
+    as_of: date
+    source: str             # provider name that served this observation
     yoy_change_pct: float | None = None
-    as_of: date
-
-
-class GdpSnapshot(BaseModel):
-    value: float
-    yoy_growth_pct: float | None = None
-    as_of: date
-
-
-class MacroEvent(BaseModel):
-    name: str
-    event_date: date
-    importance: Literal["low", "medium", "high"] = "medium"
-    actual: str | None = None
-    forecast: str | None = None
-    previous: str | None = None
 
 
 class SecFiling(BaseModel):

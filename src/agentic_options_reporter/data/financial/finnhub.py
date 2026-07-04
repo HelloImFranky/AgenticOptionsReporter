@@ -9,10 +9,10 @@ Partial coverage, per Finnhub's free tier:
   (strongBuy/buy/hold/sell/strongSell), which is a summary of
   provider-supplied tallies, not a fabricated opinion; price targets
   are a premium endpoint and stay null.
-- get_financial_statements → raises FinancialProviderUnsupported
-  (retryable), so the router falls through to FMP/Alpha Vantage for
-  statements while still using Finnhub for what it covers — the same
-  partial-coverage pattern as BLS/BEA in the macro package.
+- get_financial_statements → NOT advertised (statements not in DATASETS),
+  so the capability-filtering router never asks Finnhub for statements
+  and routes them to FMP/Alpha Vantage instead. The method remains as a
+  defensive guard that raises FinancialProviderUnsupported.
 """
 
 from __future__ import annotations
@@ -20,6 +20,9 @@ from __future__ import annotations
 from typing import Any
 
 from agentic_options_reporter.data.financial.base import (
+    ANALYST_ESTIMATES,
+    PROFILE,
+    RATIOS,
     FinancialProviderUnsupported,
     _HttpFinancialProvider,
 )
@@ -44,6 +47,8 @@ class FinnhubFinancialProvider(_HttpFinancialProvider):
     BASE_URL = "https://finnhub.io/api/v1"
     PROVIDER_LABEL = "Finnhub"
     API_KEY_ENV_VAR = "FINNHUB_API_KEY"
+
+    DATASETS = frozenset({PROFILE, RATIOS, ANALYST_ESTIMATES})  # no statements on the free tier
 
     async def _get(self, path: str, params: dict[str, Any]) -> Any:
         return await self._get_json(

@@ -1,9 +1,8 @@
 """Bureau of Labor Statistics adapter (bls.gov — free key).
 
-The primary source for the CPI series FRED mirrors — real redundancy on
-get_cpi, not just an alternate. BLS is a labor-statistics agency: it
-publishes neither interest rates nor GDP, so those methods raise
-MacroProviderUnsupported (retryable) and the router falls through.
+A specialist: it serves only `cpi` (the primary series FRED mirrors —
+real redundancy, not just an alternate). BLS publishes neither rates nor
+GDP, so it simply doesn't advertise them and the router never asks.
 """
 
 from __future__ import annotations
@@ -13,16 +12,11 @@ from typing import Any
 
 from agentic_options_reporter.data.macro.base import (
     MacroProviderError,
-    MacroProviderUnsupported,
     _HttpMacroProvider,
     yoy_change_pct,
 )
-from agentic_options_reporter.models.schemas import (
-    CpiSnapshot,
-    GdpSnapshot,
-    InterestRates,
-    MacroEvent,
-)
+from agentic_options_reporter.data.macro.metrics import get_metric
+from agentic_options_reporter.models.schemas import MacroObservation
 
 
 class BlsMacroProvider(_HttpMacroProvider):
@@ -30,6 +24,8 @@ class BlsMacroProvider(_HttpMacroProvider):
     PROVIDER_LABEL = "BLS"
     API_KEY_ENV_VAR = "BLS_API_KEY"
     CPI_SERIES_ID = "CUUR0000SA0"  # CPI-U, US city average, all items, not seasonally adjusted
+
+    METRICS = frozenset({"cpi"})
 
     def _check_payload(self, payload: Any) -> None:
         if isinstance(payload, dict) and payload.get("status") not in (None, "REQUEST_SUCCEEDED"):
@@ -53,10 +49,7 @@ class BlsMacroProvider(_HttpMacroProvider):
             data or [], key=lambda obs: (obs.get("year", ""), obs.get("period", "")), reverse=True
         )
 
-    async def get_interest_rates(self) -> InterestRates:
-        raise MacroProviderUnsupported("BLS does not publish interest rate data.")
-
-    async def get_cpi(self) -> CpiSnapshot:
+    async def _fetch(self, metric_id: str) -> MacroObservation:
         observations = await self._fetch_series(self.CPI_SERIES_ID)
         if not observations:
             raise MacroProviderError("BLS returned no CPI observations")
@@ -65,15 +58,14 @@ class BlsMacroProvider(_HttpMacroProvider):
         latest_value = float(latest["value"])
         as_of = date(int(latest["year"]), int(latest["period"].lstrip("M")), 1)
         year_ago = float(observations[12]["value"]) if len(observations) > 12 else None
-        return CpiSnapshot(
-            value=latest_value, yoy_change_pct=yoy_change_pct(latest_value, year_ago), as_of=as_of
+
+        metric = get_metric("cpi")
+        return MacroObservation(
+            metric_id="cpi",
+            label=metric.label,
+            value=latest_value,
+            unit=metric.unit,
+            as_of=as_of,
+            source=self.PROVIDER_LABEL,
+            yoy_change_pct=yoy_change_pct(latest_value, year_ago),
         )
-
-    async def get_gdp(self) -> GdpSnapshot:
-        raise MacroProviderUnsupported("BLS does not publish GDP data.")
-
-    async def get_macro_calendar(self) -> list[MacroEvent]:
-        return []
-
-    async def _health_probe(self) -> None:
-        await self.get_cpi()

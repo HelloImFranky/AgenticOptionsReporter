@@ -6,6 +6,9 @@ import httpx
 import pytest
 
 from agentic_options_reporter.data.news import (
+    COMPANY_NEWS,
+    GENERAL_NEWS,
+    TOP_HEADLINES,
     AlphaVantageNewsProvider,
     FinnhubNewsProvider,
     GNewsProvider,
@@ -479,10 +482,15 @@ def test_health_reports_unhealthy_instead_of_raising():
 
 
 class _StubNewsProvider(NewsProvider):
-    def __init__(self, articles=None, error=None, name="stub"):
+    def __init__(self, articles=None, error=None, name="stub", capabilities=frozenset({GENERAL_NEWS, TOP_HEADLINES})):
         self._articles = articles or []
         self._error = error
         self._name = name
+        self._capabilities = capabilities
+
+    @property
+    def capabilities(self):
+        return self._capabilities
 
     async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
         if self._error is not None:
@@ -543,6 +551,64 @@ def test_router_raises_with_all_failures_when_every_provider_fails():
 
     with pytest.raises(NewsProviderError, match="first:.*429.*second:.*down"):
         asyncio.run(router.search("AAPL"))
+
+
+def test_ticker_specialists_advertise_company_news():
+    assert FinnhubNewsProvider(api_key="k").supports(COMPANY_NEWS)
+    assert AlphaVantageNewsProvider(api_key="k").supports(COMPANY_NEWS)
+
+
+def test_general_providers_do_not_advertise_company_news():
+    assert not HackerNewsProvider().supports(COMPANY_NEWS)
+    assert HackerNewsProvider().supports(GENERAL_NEWS)
+
+
+def test_router_search_prefers_company_news_providers():
+    """A ticker search prioritizes COMPANY_NEWS providers even when a
+    general-news provider is configured earlier in the fallback order."""
+    called: list[str] = []
+
+    class _RecordingStub(_StubNewsProvider):
+        async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
+            called.append(self._name)
+            return await super().search(query, start_date, end_date, language, limit)
+
+    general = _RecordingStub(
+        articles=[_article()], name="general", capabilities=frozenset({GENERAL_NEWS, TOP_HEADLINES})
+    )
+    specialist = _RecordingStub(
+        articles=[_article()], name="specialist", capabilities=frozenset({COMPANY_NEWS, TOP_HEADLINES})
+    )
+    router = NewsProviderRouter([("general", general), ("specialist", specialist)])
+
+    asyncio.run(router.search("AAPL"))
+
+    assert called == ["specialist"]  # specialist tried first despite later order
+
+
+def test_router_falls_back_to_general_when_specialist_fails():
+    general = _StubNewsProvider(
+        articles=[_article()], name="general", capabilities=frozenset({GENERAL_NEWS, TOP_HEADLINES})
+    )
+    specialist = _StubNewsProvider(
+        error=NewsProviderRateLimited("429"),
+        name="specialist",
+        capabilities=frozenset({COMPANY_NEWS, TOP_HEADLINES}),
+    )
+    router = NewsProviderRouter([("general", general), ("specialist", specialist)])
+
+    articles = asyncio.run(router.search("AAPL"))
+
+    assert len(articles) == 1  # general-news provider still answered
+
+
+def test_router_capabilities_is_union_of_clients():
+    general = _StubNewsProvider(capabilities=frozenset({GENERAL_NEWS, TOP_HEADLINES}))
+    specialist = _StubNewsProvider(capabilities=frozenset({COMPANY_NEWS, TOP_HEADLINES}))
+    router = NewsProviderRouter([("general", general), ("specialist", specialist)])
+
+    assert router.capabilities == frozenset({COMPANY_NEWS, GENERAL_NEWS, TOP_HEADLINES})
+    assert router.supports(COMPANY_NEWS)
 
 
 def test_router_health_aggregates_and_is_healthy_if_any_provider_is():

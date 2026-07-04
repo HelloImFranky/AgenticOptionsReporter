@@ -1,9 +1,8 @@
 """Bureau of Economic Analysis adapter (bea.gov — free key).
 
-The primary source for the (nominal) GDP series FRED mirrors — real
-redundancy on get_gdp. BEA publishes neither CPI (its PCE price index is
-a related but distinct metric) nor interest rates, so those methods
-raise MacroProviderUnsupported (retryable) and the router falls through.
+A specialist: it serves only `gdp` (the nominal series FRED mirrors —
+real redundancy). BEA publishes neither CPI (its PCE price index is a
+related but distinct metric) nor rates, so it doesn't advertise them.
 """
 
 from __future__ import annotations
@@ -12,16 +11,11 @@ from datetime import date
 
 from agentic_options_reporter.data.macro.base import (
     MacroProviderError,
-    MacroProviderUnsupported,
     _HttpMacroProvider,
     yoy_change_pct,
 )
-from agentic_options_reporter.models.schemas import (
-    CpiSnapshot,
-    GdpSnapshot,
-    InterestRates,
-    MacroEvent,
-)
+from agentic_options_reporter.data.macro.metrics import get_metric
+from agentic_options_reporter.models.schemas import MacroObservation
 
 
 class BeaMacroProvider(_HttpMacroProvider):
@@ -29,13 +23,9 @@ class BeaMacroProvider(_HttpMacroProvider):
     PROVIDER_LABEL = "BEA"
     API_KEY_ENV_VAR = "BEA_API_KEY"
 
-    async def get_interest_rates(self) -> InterestRates:
-        raise MacroProviderUnsupported("BEA does not publish interest rate data.")
+    METRICS = frozenset({"gdp"})
 
-    async def get_cpi(self) -> CpiSnapshot:
-        raise MacroProviderUnsupported("BEA does not publish CPI data.")
-
-    async def get_gdp(self) -> GdpSnapshot:
+    async def _fetch(self, metric_id: str) -> MacroObservation:
         current_year = date.today().year
         payload = await self._get_json(
             self.BASE_URL,
@@ -58,17 +48,17 @@ class BeaMacroProvider(_HttpMacroProvider):
 
         latest_value = self._parse_value(rows[0]["DataValue"])
         year_ago = self._parse_value(rows[4]["DataValue"]) if len(rows) > 4 else None
-        return GdpSnapshot(
+
+        metric = get_metric("gdp")
+        return MacroObservation(
+            metric_id="gdp",
+            label=metric.label,
             value=latest_value,
-            yoy_growth_pct=yoy_change_pct(latest_value, year_ago),
+            unit=metric.unit,
             as_of=self._period_end_date(rows[0]["TimePeriod"]),
+            source=self.PROVIDER_LABEL,
+            yoy_change_pct=yoy_change_pct(latest_value, year_ago),
         )
-
-    async def get_macro_calendar(self) -> list[MacroEvent]:
-        return []
-
-    async def _health_probe(self) -> None:
-        await self.get_gdp()
 
     @staticmethod
     def _parse_value(value: str) -> float:

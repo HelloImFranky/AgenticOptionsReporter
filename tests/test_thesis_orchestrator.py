@@ -8,12 +8,10 @@ from agentic_options_reporter.models.schemas import (
     AnalysisResult,
     AnalystEstimates,
     CompanyProfile,
-    CpiSnapshot,
     FinancialRatios,
     FinancialStatementSummary,
-    GdpSnapshot,
     IndicatorSnapshot,
-    InterestRates,
+    MacroObservation,
     NewsArticle,
     Recommendation,
     ScoredCandidate,
@@ -57,6 +55,12 @@ _ALL_RESPONSES_WITH_RESEARCH = {
 
 
 class FakeFinancialProvider(FinancialProvider):
+    _DATASETS = frozenset({"profile", "statements", "ratios", "analyst_estimates"})
+
+    @property
+    def supported_datasets(self) -> frozenset[str]:
+        return self._DATASETS
+
     async def get_company_profile(self, ticker: str) -> CompanyProfile:
         return CompanyProfile(
             ticker=ticker, name="Test Corp", sector="Technology", industry="Software",
@@ -88,6 +92,10 @@ class FakeFinancialProvider(FinancialProvider):
 
 
 class FakeNewsProvider(NewsProvider):
+    @property
+    def capabilities(self):
+        return frozenset({"company_news", "top_headlines"})
+
     async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
         return [
             NewsArticle(
@@ -106,17 +114,22 @@ class FakeNewsProvider(NewsProvider):
 
 
 class FakeMacroProvider(MacroProvider):
-    async def get_interest_rates(self) -> InterestRates:
-        return InterestRates(fed_funds_rate=5.25, ten_year_yield=4.3, two_year_yield=4.1, as_of=date(2026, 6, 1))
+    _VALUES = {
+        "policy_rate": (5.25, "percent"),
+        "cpi": (310.0, "index"),
+        "gdp": (23000.0, "usd"),
+    }
 
-    async def get_cpi(self) -> CpiSnapshot:
-        return CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date(2026, 6, 1))
+    @property
+    def supported_metrics(self) -> frozenset[str]:
+        return frozenset(self._VALUES)
 
-    async def get_gdp(self) -> GdpSnapshot:
-        return GdpSnapshot(value=23000.0, yoy_growth_pct=2.1, as_of=date(2026, 4, 1))
-
-    async def get_macro_calendar(self) -> list:
-        return []
+    async def fetch(self, metric_id: str) -> MacroObservation:
+        value, unit = self._VALUES[metric_id]
+        return MacroObservation(
+            metric_id=metric_id, label=metric_id, value=value, unit=unit,
+            as_of=date(2026, 6, 1), source="fake",
+        )
 
     async def health(self) -> ProviderHealth:
         return ProviderHealth(
@@ -215,6 +228,39 @@ def test_pipeline_runs_only_configured_research_agents():
     assert thesis.macro_research is None
 
 
+class PartialFinancialProvider(FakeFinancialProvider):
+    """A Finnhub-style provider: no statements. get_financial_statements
+    must never be called (the router filters it out)."""
+
+    _DATASETS = frozenset({"profile", "ratios", "analyst_estimates"})
+
+    async def get_financial_statements(self, ticker):
+        raise AssertionError("router must not call an unadvertised dataset")
+
+
+def test_financial_research_runs_with_partial_dataset_coverage():
+    """Finnhub-only financial: profile/ratios/estimates present, statements
+    absent — the agent still produces a finding over what's available."""
+    llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(result, llm, financial_provider=PartialFinancialProvider())
+
+    assert thesis.financial_research is not None
+    assert thesis.financial_research.company_health == "strong"
+    assert thesis.financial_research.analyst_consensus == "Buy"
+    assert thesis.pipeline_warnings == []
+    # The prompt must reflect the missing statements section, not fabricate it.
+    _, user_prompt = next(
+        (c for c in reversed(llm.calls) if "financial research analyst" in c[0]), (None, "")
+    )
+    assert "Financial statements: not available." in user_prompt
+
+
 def test_pipeline_records_no_warnings_when_research_succeeds():
     llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
     candidate = _candidate()
@@ -230,6 +276,10 @@ def test_pipeline_records_no_warnings_when_research_succeeds():
 
 class RateLimitedNewsProvider(NewsProvider):
     """Simulates a provider that IS configured but 429s at call time."""
+
+    @property
+    def capabilities(self):
+        return frozenset({"company_news", "top_headlines"})
 
     async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
         from agentic_options_reporter.data.news import NewsProviderRateLimited

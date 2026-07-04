@@ -1,12 +1,13 @@
 """World Bank adapter (api.worldbank.org — free, keyless).
 
-Covers US CPI (indicator ``FP.CPI.TOTL``, an annual index, 2010=100) and
-nominal GDP (``NY.GDP.MKTP.CD``, annual, current US$). World Bank data
-is ANNUAL and lags the primary US agencies by a year or more — a
-last-resort fallback for when every fresher source is down, which is why
-it sits at the end of the default fallback order. Interest rates aren't
-covered (the Bank's real-interest-rate indicator is a different metric
-from US policy rates), so that method raises MacroProviderUnsupported.
+Serves `cpi` (indicator ``FP.CPI.TOTL``, annual index, 2010=100) and
+`gdp` (``NY.GDP.MKTP.CD``, annual nominal, current US$). Its data is
+ANNUAL and lags the US agencies by a year or more — the last-resort
+fallback, at the end of the default order. It does NOT advertise any
+rate metric (the Bank's real-interest-rate indicator is a different
+metric from US policy rates), so the router never asks it for one — the
+capability model's answer to the original "World Bank has no fed funds"
+error.
 """
 
 from __future__ import annotations
@@ -16,16 +17,11 @@ from typing import Any
 
 from agentic_options_reporter.data.macro.base import (
     MacroProviderError,
-    MacroProviderUnsupported,
     _HttpMacroProvider,
     yoy_change_pct,
 )
-from agentic_options_reporter.models.schemas import (
-    CpiSnapshot,
-    GdpSnapshot,
-    InterestRates,
-    MacroEvent,
-)
+from agentic_options_reporter.data.macro.metrics import get_metric
+from agentic_options_reporter.models.schemas import MacroObservation
 
 
 class WorldBankMacroProvider(_HttpMacroProvider):
@@ -33,8 +29,11 @@ class WorldBankMacroProvider(_HttpMacroProvider):
     PROVIDER_LABEL = "World Bank"
     API_KEY_ENV_VAR = None  # keyless
 
-    CPI_INDICATOR = "FP.CPI.TOTL"
-    GDP_INDICATOR = "NY.GDP.MKTP.CD"
+    _INDICATORS: dict[str, str] = {
+        "cpi": "FP.CPI.TOTL",
+        "gdp": "NY.GDP.MKTP.CD",
+    }
+    METRICS = frozenset(_INDICATORS)
 
     async def _fetch_indicator(self, indicator: str) -> list[dict[str, Any]]:
         payload = await self._get_json(
@@ -46,31 +45,21 @@ class WorldBankMacroProvider(_HttpMacroProvider):
         rows = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
         return [row for row in (rows or []) if row.get("value") is not None]
 
-    async def _latest_with_yoy(self, indicator: str) -> tuple[float, float | None, date]:
-        rows = await self._fetch_indicator(indicator)
+    async def _fetch(self, metric_id: str) -> MacroObservation:
+        rows = await self._fetch_indicator(self._INDICATORS[metric_id])
         if not rows:
-            raise MacroProviderError(f"World Bank returned no observations for {indicator}")
-        latest = rows[0]
-        latest_value = float(latest["value"])
+            raise MacroProviderError(f"World Bank returned no observations for {metric_id}")
+
+        latest_value = float(rows[0]["value"])
         year_ago = float(rows[1]["value"]) if len(rows) > 1 else None
-        as_of = date(int(latest["date"]), 12, 31)
-        return latest_value, yoy_change_pct(latest_value, year_ago), as_of
 
-    async def get_interest_rates(self) -> InterestRates:
-        raise MacroProviderUnsupported(
-            "World Bank does not publish US policy rates; use FRED."
+        metric = get_metric(metric_id)
+        return MacroObservation(
+            metric_id=metric_id,
+            label=metric.label,
+            value=latest_value,
+            unit=metric.unit,
+            as_of=date(int(rows[0]["date"]), 12, 31),
+            source=self.PROVIDER_LABEL,
+            yoy_change_pct=yoy_change_pct(latest_value, year_ago),
         )
-
-    async def get_cpi(self) -> CpiSnapshot:
-        value, change, as_of = await self._latest_with_yoy(self.CPI_INDICATOR)
-        return CpiSnapshot(value=value, yoy_change_pct=change, as_of=as_of)
-
-    async def get_gdp(self) -> GdpSnapshot:
-        value, growth, as_of = await self._latest_with_yoy(self.GDP_INDICATOR)
-        return GdpSnapshot(value=value, yoy_growth_pct=growth, as_of=as_of)
-
-    async def get_macro_calendar(self) -> list[MacroEvent]:
-        return []
-
-    async def _health_probe(self) -> None:
-        await self.get_gdp()

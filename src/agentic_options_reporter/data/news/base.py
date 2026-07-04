@@ -26,7 +26,22 @@ from agentic_options_reporter.data.provider_errors import (
 )
 from agentic_options_reporter.models.schemas import NewsArticle
 
+# News "capabilities" a provider may advertise. All providers serve
+# GENERAL_NEWS + TOP_HEADLINES; only the financial-news specialists whose
+# `search` is ticker-aware (Finnhub, Alpha Vantage) additionally serve
+# COMPANY_NEWS. The router PRIORITIZES (not filters) by capability: a
+# ticker search prefers COMPANY_NEWS providers but general ones remain a
+# valid fallback (see specs/providers.yaml).
+COMPANY_NEWS = "company_news"
+GENERAL_NEWS = "general_news"
+TOP_HEADLINES = "top_headlines"
+NEWS_CAPABILITIES = frozenset({COMPANY_NEWS, GENERAL_NEWS, TOP_HEADLINES})
+
 __all__ = [
+    "COMPANY_NEWS",
+    "GENERAL_NEWS",
+    "NEWS_CAPABILITIES",
+    "TOP_HEADLINES",
     "NewsProvider",
     "NewsProviderError",
     "NewsProviderRateLimited",
@@ -60,6 +75,15 @@ class NewsProviderUnsupported(NewsProviderError, ProviderUnsupported):
 class NewsProvider(ABC):
     """Interface implemented by all news providers."""
 
+    @property
+    @abstractmethod
+    def capabilities(self) -> frozenset[str]:
+        """The NEWS_CAPABILITIES this provider advertises."""
+        raise NotImplementedError
+
+    def supports(self, capability: str) -> bool:
+        return capability in self.capabilities
+
     @abstractmethod
     async def search(
         self,
@@ -85,14 +109,21 @@ class NewsProvider(ABC):
 
 
 class _HttpNewsProvider(AsyncHttpProviderBase, NewsProvider):
-    """Base for HTTP-backed news adapters. Subclasses set PROVIDER_LABEL
-    and API_KEY_ENV_VAR (None for keyless sources) and implement
-    search/top_headlines on top of `_get_json`."""
+    """Base for HTTP-backed news adapters. Subclasses set PROVIDER_LABEL,
+    API_KEY_ENV_VAR (None for keyless sources), and CAPABILITIES, and
+    implement search/top_headlines on top of `_get_json`."""
 
     ERROR_CLS = NewsProviderError
     RATE_LIMITED_CLS = NewsProviderRateLimited
     TIMEOUT_CLS = NewsProviderTimeout
     UNAVAILABLE_CLS = NewsProviderUnavailable
+
+    # Default: general-news aggregator. Ticker-aware specialists override.
+    CAPABILITIES: frozenset[str] = frozenset({GENERAL_NEWS, TOP_HEADLINES})
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return self.CAPABILITIES
 
     async def _health_probe(self) -> None:
         await self.top_headlines(limit=1)

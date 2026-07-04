@@ -86,17 +86,49 @@ API key into a `<X>ProviderRouter` — the data-provider analog of
 `thesis.llm_client.LlmRouter` — configurable via a fallback-order env var
 (`AOR_NEWS_PROVIDER_FALLBACK_ORDER`, `AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER`,
 `AOR_MACRO_PROVIDER_FALLBACK_ORDER`). Unlike the LLM router, routing
-happens **per method call**, not per whole provider: BLS has no GDP data
-and Alpha Vantage's OVERVIEW has no analyst consensus rating, so a
-provider raises `<X>ProviderUnsupported` (retryable) for the methods
-outside its specialty rather than being excluded from the router
-entirely — it's still used for the methods it does support. A
+happens **per method call**, not per whole provider: routing for one
+dataset/metric is independent of which provider answered the last one. A
 transient failure (rate limit, quota, timeout, 5xx) advances to the next
-configured provider the same way (see `specs/providers.yaml:
-provider_router` for the full error-classification detail). Since Hacker
-News (news) and IMF/World Bank (macro) need no API key, News Research
-and Macro Research always have at least one provider available; only
-Financial Research still requires a configured key.
+configured provider (see `specs/providers.yaml: provider_router`). Since
+Hacker News (news) and IMF/World Bank (macro) need no API key, News
+Research and Macro Research always have at least one provider available;
+only Financial Research still requires a configured key.
+
+**Capability-based routing.** Rather than discovering "unsupported" by
+catching an exception mid-call, every provider *declares what it serves*
+and the router selects supporting providers *before* calling, so a
+source is never asked for data it lacks. This applies to all three
+research interfaces, in two flavors:
+
+- **Macro & financial filter (hard).** Each macro provider declares its
+  `supported_metrics` and serves any one through a single
+  `fetch(metric_id) -> MacroObservation`; each financial provider
+  declares its `supported_datasets` (`profile`, `statements`, `ratios`,
+  `analyst_estimates`). The router narrows to the providers that
+  advertise a metric/dataset and drops the rest
+  (`data.provider_router.filter_supporting`) — the fix for the "World
+  Bank has no US fed funds rate" error: World Bank doesn't advertise
+  `policy_rate`, so it's never queried for it, and a keyless-only
+  deployment cleanly serves CPI/GDP while skipping the rate metrics no
+  configured source provides. Likewise Finnhub's free tier doesn't
+  advertise `statements`, so a statements request routes only to
+  FMP/Alpha Vantage. A metric/dataset no configured provider serves is
+  simply absent — the agent renders it "not available" and reasons over
+  the rest, rather than erroring. Macro metrics are a structured registry
+  (`data/macro/metrics.py`: `MacroMetric(id, category, country,
+  frequency, unit)`), so adding one — unemployment, PPI — is a registry
+  entry plus the adapters that happen to serve it. Per-metric/dataset
+  priority is configurable via `AOR_MACRO_PRIORITY_<METRIC>` /
+  `AOR_FINANCIAL_PRIORITY_<DATASET>` (e.g. prefer BEA's GDP over FRED's
+  mirror).
+- **News prioritizes (soft).** A ticker `search` prefers the
+  company-news specialists whose endpoints are ticker-aware (Finnhub,
+  Alpha Vantage advertise `company_news`) but *keeps* general-news
+  providers as a fallback — they can still surface a keyword match
+  (`data.provider_router.prioritize_supporting`). A general-news source
+  genuinely can answer a ticker query, just less precisely, whereas World
+  Bank genuinely has no policy rate — so news reorders where macro/
+  financial exclude.
 
 All three research provider interfaces are **async** (one adapter
 module per source under `data/news/`, `data/financial/`, and
@@ -104,14 +136,14 @@ module per source under `data/news/`, `data/financial/`, and
 `specs/providers.yaml`); each also exposes a `health()` probe, and the
 routers check all their adapters' health concurrently. The sync
 pipeline bridges with `asyncio.run()` at each research step — the
-financial and macro steps fetch their four datasets concurrently via
-`asyncio.gather`. All async adapters
-share a process-wide 5-minute response cache, since free tiers meter by
-the day and the provider objects are rebuilt per request — a
-"Regenerate" click must not re-spend quota. GDELT was removed: its
-per-IP throttle rate-limited routine pipeline use even with
-caching/spacing/retry defenses, and the diverse news adapter set above
-replaces it.
+financial and macro steps fetch their datasets concurrently via
+`asyncio.gather` (macro fetches only the metrics some provider can
+actually serve). All async adapters share a process-wide 5-minute
+response cache, since free tiers meter by the day and the provider
+objects are rebuilt per request — a "Regenerate" click must not
+re-spend quota. GDELT was removed: its per-IP throttle rate-limited
+routine pipeline use even with caching/spacing/retry defenses, and the
+diverse news adapter set above replaces it.
 
 ### When every data provider fails: warnings, not a crash
 

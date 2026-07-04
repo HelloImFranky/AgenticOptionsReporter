@@ -1,4 +1,13 @@
-"""Macro provider failover router and configuration-driven factory."""
+"""Macro provider capability-filtering router and factory.
+
+Unlike the news/financial routers (which try every provider per method
+and catch Unsupported mid-call), this router SELECTS providers by
+declared capability before calling: for a metric id, it narrows to the
+providers that advertise it, applies any per-metric priority override,
+then fails over among just those on transient errors. A provider is
+never asked for a metric it doesn't publish — the fix for "World Bank
+has no US policy rate."
+"""
 
 from __future__ import annotations
 
@@ -9,6 +18,7 @@ from datetime import datetime, timezone
 from agentic_options_reporter.data.macro.base import (
     MacroProvider,
     MacroProviderError,
+    MacroProviderUnsupported,
     ProviderHealth,
 )
 from agentic_options_reporter.data.macro.bea import BeaMacroProvider
@@ -16,20 +26,14 @@ from agentic_options_reporter.data.macro.bls import BlsMacroProvider
 from agentic_options_reporter.data.macro.fred import FredMacroProvider
 from agentic_options_reporter.data.macro.imf import ImfMacroProvider
 from agentic_options_reporter.data.macro.worldbank import WorldBankMacroProvider
-from agentic_options_reporter.data.provider_router import acall_with_fallback
-from agentic_options_reporter.models.schemas import (
-    CpiSnapshot,
-    GdpSnapshot,
-    InterestRates,
-    MacroEvent,
-)
+from agentic_options_reporter.data.provider_router import acall_with_fallback, filter_supporting
+from agentic_options_reporter.models.schemas import MacroObservation
 
 
 class MacroProviderRouter(MacroProvider):
-    """Tries a priority-ordered list of already-constructed MacroProvider
-    adapters per method call, advancing to the next on a retryable
-    failure (see data.provider_router) — essential here, since most macro
-    sources are specialists that raise Unsupported outside their domain."""
+    """Capability-filtering failover router across configured macro
+    adapters. Implements MacroProvider itself, so the macro_research
+    consumer can't tell whether it's talking to one adapter or many."""
 
     def __init__(self, clients: list[tuple[str, MacroProvider]]) -> None:
         if not clients:
@@ -43,17 +47,25 @@ class MacroProviderRouter(MacroProvider):
     def provider_names(self) -> list[str]:
         return [name for name, _ in self._clients]
 
-    async def get_interest_rates(self) -> InterestRates:
-        return await acall_with_fallback(self._clients, "get_interest_rates", MacroProviderError)
+    @property
+    def supported_metrics(self) -> frozenset[str]:
+        return frozenset().union(*(client.supported_metrics for _, client in self._clients))
 
-    async def get_cpi(self) -> CpiSnapshot:
-        return await acall_with_fallback(self._clients, "get_cpi", MacroProviderError)
+    def _candidates_for(self, metric_id: str) -> list[tuple[str, MacroProvider]]:
+        candidates = filter_supporting(self._clients, metric_id)
+        override = _metric_priority_override(metric_id)
+        if override:
+            rank = {name: i for i, name in enumerate(override)}
+            candidates.sort(key=lambda nc: rank.get(nc[0], len(override)))
+        return candidates
 
-    async def get_gdp(self) -> GdpSnapshot:
-        return await acall_with_fallback(self._clients, "get_gdp", MacroProviderError)
-
-    async def get_macro_calendar(self) -> list[MacroEvent]:
-        return await acall_with_fallback(self._clients, "get_macro_calendar", MacroProviderError)
+    async def fetch(self, metric_id: str) -> MacroObservation:
+        candidates = self._candidates_for(metric_id)
+        if not candidates:
+            raise MacroProviderUnsupported(
+                f"No configured macro provider serves metric '{metric_id}'."
+            )
+        return await acall_with_fallback(candidates, "fetch", MacroProviderError, metric_id)
 
     async def health(self) -> ProviderHealth:
         """Probe every adapter concurrently; the router is healthy if any
@@ -89,6 +101,15 @@ _DEFAULT_FALLBACK_ORDER = ["fred", "bls", "bea", "imf", "worldbank"]
 
 def _fallback_order() -> list[str]:
     raw = os.environ.get("AOR_MACRO_PROVIDER_FALLBACK_ORDER", ",".join(_DEFAULT_FALLBACK_ORDER))
+    return [name.strip().lower() for name in raw.split(",") if name.strip()]
+
+
+def _metric_priority_override(metric_id: str) -> list[str]:
+    """Optional per-metric provider priority, e.g.
+    AOR_MACRO_PRIORITY_GDP="bea,fred,worldbank" to prefer BEA's GDP over
+    FRED's mirror. Falls back to the global fallback order when unset
+    (see specs/providers.yaml: configurable_priority)."""
+    raw = os.environ.get(f"AOR_MACRO_PRIORITY_{metric_id.upper()}", "")
     return [name.strip().lower() for name in raw.split(",") if name.strip()]
 
 

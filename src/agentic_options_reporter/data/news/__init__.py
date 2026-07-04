@@ -6,6 +6,10 @@ from individual adapter modules.
 
 from agentic_options_reporter.data.news.alphavantage import AlphaVantageNewsProvider
 from agentic_options_reporter.data.news.base import (
+    COMPANY_NEWS,
+    GENERAL_NEWS,
+    NEWS_CAPABILITIES,
+    TOP_HEADLINES,
     NewsProvider,
     NewsProviderError,
     NewsProviderRateLimited,
@@ -23,6 +27,10 @@ from agentic_options_reporter.data.news.newsdata import NewsDataProvider
 from agentic_options_reporter.data.news.router import NewsProviderRouter, build_news_provider
 
 __all__ = [
+    "COMPANY_NEWS",
+    "GENERAL_NEWS",
+    "NEWS_CAPABILITIES",
+    "TOP_HEADLINES",
     "AlphaVantageNewsProvider",
     "FinnhubNewsProvider",
     "GNewsProvider",

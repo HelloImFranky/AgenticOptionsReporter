@@ -29,7 +29,23 @@ from agentic_options_reporter.models.schemas import (
     FinancialStatementSummary,
 )
 
+# Dataset "capabilities" a fundamentals provider may serve. Small and
+# fixed (unlike macro's open-ended metric registry), so plain constants
+# rather than a registry — but the same capability-declaration idea: a
+# provider advertises which of these it covers and the router filters to
+# supporters before calling (see specs/providers.yaml).
+PROFILE = "profile"
+STATEMENTS = "statements"
+RATIOS = "ratios"
+ANALYST_ESTIMATES = "analyst_estimates"
+FINANCIAL_DATASETS = frozenset({PROFILE, STATEMENTS, RATIOS, ANALYST_ESTIMATES})
+
 __all__ = [
+    "ANALYST_ESTIMATES",
+    "FINANCIAL_DATASETS",
+    "PROFILE",
+    "RATIOS",
+    "STATEMENTS",
     "FinancialProvider",
     "FinancialProviderError",
     "FinancialProviderRateLimited",
@@ -62,7 +78,23 @@ class FinancialProviderUnsupported(FinancialProviderError, ProviderUnsupported):
 
 
 class FinancialProvider(ABC):
-    """Interface implemented by all company-fundamentals providers."""
+    """Interface implemented by all company-fundamentals providers.
+
+    Capability-based: a provider declares which datasets it serves
+    (`supported_datasets`), and the router filters to supporters before
+    calling a dataset's method — so Finnhub (no statements on the free
+    tier) is never asked for statements, rather than raising Unsupported
+    mid-call.
+    """
+
+    @property
+    @abstractmethod
+    def supported_datasets(self) -> frozenset[str]:
+        """The FINANCIAL_DATASETS ids this provider serves."""
+        raise NotImplementedError
+
+    def supports(self, dataset: str) -> bool:
+        return dataset in self.supported_datasets
 
     @abstractmethod
     async def get_company_profile(self, ticker: str) -> CompanyProfile:
@@ -91,12 +123,20 @@ _HEALTH_PROBE_TICKER = "AAPL"
 
 
 class _HttpFinancialProvider(AsyncHttpProviderBase, FinancialProvider):
-    """Base for HTTP-backed fundamentals adapters."""
+    """Base for HTTP-backed fundamentals adapters. A subclass sets
+    `DATASETS` (the ids it serves) — every one serves at least PROFILE,
+    the health-probe dataset."""
 
     ERROR_CLS = FinancialProviderError
     RATE_LIMITED_CLS = FinancialProviderRateLimited
     TIMEOUT_CLS = FinancialProviderTimeout
     UNAVAILABLE_CLS = FinancialProviderUnavailable
+
+    DATASETS: frozenset[str] = frozenset()
+
+    @property
+    def supported_datasets(self) -> frozenset[str]:
+        return self.DATASETS
 
     async def _health_probe(self) -> None:
         await self.get_company_profile(_HEALTH_PROBE_TICKER)
