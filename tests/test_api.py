@@ -473,7 +473,7 @@ def test_generate_thesis_absent_research_findings_round_trip_as_null(client):
     [
         "agentic_options_reporter.data.financial.FinancialProviderError",
         "agentic_options_reporter.data.news.NewsProviderError",
-        "agentic_options_reporter.data.macro_provider.MacroProviderError",
+        "agentic_options_reporter.data.macro.MacroProviderError",
     ],
 )
 def test_generate_thesis_configured_provider_failure_returns_502(client, error_cls_path):
@@ -517,10 +517,16 @@ def test_optional_news_provider_returns_router_with_only_hackernews_when_others_
     assert provider.provider_names == ["hackernews"]
 
 
-def test_optional_macro_provider_returns_none_when_unconfigured(monkeypatch):
+def test_optional_macro_provider_returns_router_with_keyless_sources_when_unconfigured(monkeypatch):
+    # IMF and the World Bank need no API key, so the macro provider is
+    # never fully "unconfigured" — it always falls back to them.
     for var in ("FRED_API_KEY", "BLS_API_KEY", "BEA_API_KEY"):
         monkeypatch.delenv(var, raising=False)
-    assert main_module._optional_macro_provider() is None
+
+    provider = main_module._optional_macro_provider()
+
+    assert provider is not None
+    assert provider.provider_names == ["imf", "worldbank"]
 
 
 def test_optional_financial_provider_returns_router_when_configured(monkeypatch):

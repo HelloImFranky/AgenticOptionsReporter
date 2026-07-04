@@ -88,10 +88,10 @@ export GUARDIAN_API_KEY=...      # open-platform.theguardian.com
 export GNEWS_API_KEY=...         # gnews.io
 export NEWSAPI_API_KEY=...       # newsapi.org (dev use only)
 
-# Macro Research (fred.stlouisfed.org, bls.gov, bea.gov — all free)
-export FRED_API_KEY=...
-export BLS_API_KEY=...
-export BEA_API_KEY=...
+# Macro Research — all free; IMF and World Bank need no key
+export FRED_API_KEY=...          # fred.stlouisfed.org, broadest + freshest
+export BLS_API_KEY=...           # bls.gov, primary CPI source
+export BEA_API_KEY=...           # bea.gov, primary GDP source
 ```
 
 Six LLM providers are supported — `anthropic`, `openai`, `groq`, `gemini`,

@@ -2,7 +2,7 @@ import json
 from datetime import date, datetime, timezone
 
 from agentic_options_reporter.data.financial import FinancialProvider, ProviderHealth as FinancialProviderHealth
-from agentic_options_reporter.data.macro_provider import MacroProvider
+from agentic_options_reporter.data.macro import MacroProvider
 from agentic_options_reporter.data.news import NewsProvider, ProviderHealth
 from agentic_options_reporter.models.schemas import (
     AnalysisResult,
@@ -106,17 +106,22 @@ class FakeNewsProvider(NewsProvider):
 
 
 class FakeMacroProvider(MacroProvider):
-    def get_interest_rates(self) -> InterestRates:
+    async def get_interest_rates(self) -> InterestRates:
         return InterestRates(fed_funds_rate=5.25, ten_year_yield=4.3, two_year_yield=4.1, as_of=date(2026, 6, 1))
 
-    def get_cpi(self) -> CpiSnapshot:
+    async def get_cpi(self) -> CpiSnapshot:
         return CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date(2026, 6, 1))
 
-    def get_gdp(self) -> GdpSnapshot:
+    async def get_gdp(self) -> GdpSnapshot:
         return GdpSnapshot(value=23000.0, yoy_growth_pct=2.1, as_of=date(2026, 4, 1))
 
-    def get_macro_calendar(self) -> list:
+    async def get_macro_calendar(self) -> list:
         return []
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider="fake", healthy=True, checked_at=datetime.now(timezone.utc)
+        )
 
 
 def _candidate() -> ScoredCandidate:

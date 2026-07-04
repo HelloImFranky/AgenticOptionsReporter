@@ -76,7 +76,7 @@ message rather than an error.
 |---|---|---|---|
 | Financial Research | `FinancialProvider` | Financial Modeling Prep, Finnhub, Alpha Vantage | `FMP_API_KEY`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY` |
 | News Research | `NewsProvider` | Finnhub, NewsData.io, The Guardian, GNews, Alpha Vantage, NewsAPI, Hacker News (keyless) | `FINNHUB_API_KEY`, `NEWSDATA_API_KEY`, `GUARDIAN_API_KEY`, `GNEWS_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_API_KEY` |
-| Macro Research | `MacroProvider` | FRED, BLS, BEA | `FRED_API_KEY`, `BLS_API_KEY`, `BEA_API_KEY` |
+| Macro Research | `MacroProvider` | FRED, BLS, BEA, IMF (keyless), World Bank (keyless) | `FRED_API_KEY`, `BLS_API_KEY`, `BEA_API_KEY` |
 
 ### Automatic failover across data providers
 
@@ -94,16 +94,18 @@ entirely — it's still used for the methods it does support. A
 transient failure (rate limit, quota, timeout, 5xx) advances to the next
 configured provider the same way (see `specs/providers.yaml:
 provider_router` for the full error-classification detail). Since Hacker
-News needs no API key, News Research always has at least one provider
-available.
+News (news) and IMF/World Bank (macro) need no API key, News Research
+and Macro Research always have at least one provider available; only
+Financial Research still requires a configured key.
 
-The news and financial interfaces are **async** (one adapter module per
-source under `data/news/` and `data/financial/`, sharing the
-infrastructure in `data/async_http.py` — see `specs/providers.yaml`);
-each also exposes a `health()` probe, and the routers check all their
-adapters' health concurrently. The sync pipeline bridges with
-`asyncio.run()` at each research step — the financial step fetches its
-four datasets concurrently via `asyncio.gather`. All async adapters
+All three research provider interfaces are **async** (one adapter
+module per source under `data/news/`, `data/financial/`, and
+`data/macro/`, sharing the infrastructure in `data/async_http.py` — see
+`specs/providers.yaml`); each also exposes a `health()` probe, and the
+routers check all their adapters' health concurrently. The sync
+pipeline bridges with `asyncio.run()` at each research step — the
+financial and macro steps fetch their four datasets concurrently via
+`asyncio.gather`. All async adapters
 share a process-wide 5-minute response cache, since free tiers meter by
 the day and the provider objects are rebuilt per request — a
 "Regenerate" click must not re-spend quota. GDELT was removed: its
