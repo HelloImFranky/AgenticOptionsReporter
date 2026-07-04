@@ -108,6 +108,8 @@ agents:
       - FinancialStatementSummary
       - FinancialRatios
       - AnalystEstimates
+      # All four fetched concurrently from the async FinancialProvider
+      # via asyncio.gather, bridged with asyncio.run in the orchestrator.
     output: FinancialResearchFinding
     contract: >
       Interprets provider-supplied fundamentals (all of which are

@@ -95,7 +95,7 @@ provider_router:
       these and catch that error, same "unconfigured = skip the agent"
       contract as phase_2a.
     news: build_news_provider() — AOR_NEWS_PROVIDER_FALLBACK_ORDER, default "finnhub,newsdata,guardian,gnews,alphavantage,newsapi,hackernews"
-    financial: build_financial_provider() — AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER, default "fmp,alphavantage"
+    financial: build_financial_provider() — AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER, default "fmp,finnhub,alphavantage"
     macro: build_macro_provider() — AOR_MACRO_PROVIDER_FALLBACK_ORDER, default "fred,bls,bea"
   keyless_news_is_always_available: >
     HackerNewsProvider needs no API key, so build_news_provider() never
@@ -108,11 +108,13 @@ interfaces:
   NewsProvider:
     module: agentic_options_reporter.data.news   # one adapter per source (base.py, router.py, <source>.py)
     interface_style: >
-      ASYNC — unlike the other (sync) provider interfaces. News is the
-      interface with the most adapters, so coroutines keep the door open
-      to concurrent fan-out and let health() probes run in parallel;
-      the sync thesis pipeline bridges with asyncio.run() at the
-      news_research step (thesis/orchestrator.py).
+      ASYNC, like data.financial — adapters share the async-HTTP
+      infrastructure in data.async_http (key handling, error
+      normalization, class-level TTL response cache, health probes);
+      coroutines keep the door open to concurrent fan-out and let
+      health() probes run in parallel. The sync thesis pipeline bridges
+      with asyncio.run() at the news_research step
+      (thesis/orchestrator.py).
     methods:
       search(query: str, start_date: datetime | null = null, end_date: datetime | null = null, language: str = "en", limit: int = 20) -> list[NewsArticle]
       top_headlines(category: str | null = null, limit: int = 20) -> list[NewsArticle]
@@ -216,23 +218,55 @@ interfaces:
         reason: Useful supplemental source; needs a feed-list config design first.
 
   FinancialProvider:
-    module: agentic_options_reporter.data.financial_provider
+    module: agentic_options_reporter.data.financial   # one adapter per source (base.py, router.py, <source>.py)
+    interface_style: >
+      ASYNC, like data.news — adapters share the async-HTTP
+      infrastructure in data.async_http (key handling, error
+      normalization, class-level TTL response cache, health probes).
+      The sync thesis pipeline bridges with asyncio.run() at the
+      financial_research step, fetching all four datasets CONCURRENTLY
+      via asyncio.gather (thesis/orchestrator.py).
     methods:
       get_company_profile(ticker: str) -> CompanyProfile
       get_financial_statements(ticker: str) -> FinancialStatementSummary
       get_ratios(ticker: str) -> FinancialRatios
       get_analyst_estimates(ticker: str) -> AnalystEstimates
+      health() -> ProviderHealth   # probes get_company_profile("AAPL"); never raises
     implementations:
       - name: FmpFinancialProvider
         api_key_env_var: FMP_API_KEY
+        free_tier: ~250 requests/day; full interface coverage (why it leads the default fallback order)
         base_url: https://financialmodelingprep.com/api/v3
         endpoints:
           get_company_profile: GET /profile/{ticker}
           get_financial_statements: GET /income-statement/{ticker}, /cash-flow-statement/{ticker} (period=annual, limit=1)
           get_ratios: GET /ratios/{ticker} (limit=1)
           get_analyst_estimates: GET /analyst-estimates/{ticker} (limit=1)
+      - name: FinnhubFinancialProvider
+        api_key_env_var: FINNHUB_API_KEY   # same key as the Finnhub news adapter
+        free_tier: ~60 requests/min; PARTIAL interface coverage
+        base_url: https://finnhub.io/api/v1
+        endpoints:
+          get_company_profile: GET /stock/profile2?symbol={ticker} (market cap reported in millions, scaled up; sector not exposed)
+          get_financial_statements: >
+            Not available on the free tier — raises
+            FinancialProviderUnsupported (retryable), so the router
+            falls through to FMP/Alpha Vantage for statements while
+            still using Finnhub for what it covers, the same
+            partial-coverage pattern as BLS/BEA in the macro package.
+          get_ratios: GET /stock/metric?symbol={ticker}&metric=all (TTM metrics; percentage figures converted to fractions to match the schema convention)
+          get_analyst_estimates: >
+            GET /stock/recommendation?symbol={ticker} —
+            consensus_rating is DERIVED as the largest bucket of the
+            latest month's analyst counts
+            (strongBuy/buy/hold/sell/strongSell), a summary of
+            provider-supplied tallies with ties breaking toward the
+            more cautious label; num_analysts is the sum of counts.
+            Price targets are a premium endpoint and stay null rather
+            than being guessed.
       - name: AlphaVantageFinancialProvider
         api_key_env_var: ALPHA_VANTAGE_API_KEY
+        free_tier: ~25 requests/day (why it sits last in the default fallback order)
         base_url: https://www.alphavantage.co/query
         endpoints:
           get_company_profile: GET ?function=OVERVIEW&symbol={ticker}
@@ -253,6 +287,36 @@ interfaces:
             schema defaults, the same "missing data stays missing"
             convention FmpFinancialProvider already follows.
         quirk: Same HTTP-200-with-"Information"/"Note" rate-limit quirk as AlphaVantageNewsProvider.
+    deferred:
+      - name: polygon
+        reason: >
+          Free tier is heavily rate limited (~5 calls/min) with
+          restricted fundamentals access — too constrained to add
+          meaningful redundancy over the three free adapters above.
+      - name: intrinio_and_factset
+        reason: Paid/enterprise services; deferred until a production deployment needs them.
+      - name: marketaux_analyst_signals
+        reason: Analyst/sentiment signals sit behind a limited tier; revisit if the free adapters' analyst coverage proves insufficient.
+      - name: interface_extensions_earnings_insider_ownership_etf
+        reason: >
+          The source list groups earnings calendars/surprises, insider
+          trading (SEC Form 4), institutional ownership (13F), and ETF
+          holdings under financial research — all free on FMP/Finnhub/
+          SEC EDGAR — but each is a NEW interface method plus new
+          normalized models plus prompt/schema/UI changes for the
+          financial_research agent, not just a new adapter. Deferred as
+          their own pass; the categories map cleanly onto the existing
+          adapters when picked up.
+      - name: other_source_list_categories
+        reason: >
+          The remaining categories in the source list map to other
+          interfaces that already exist: filings -> SECProvider (SEC
+          EDGAR, shipped), macroeconomic -> MacroProvider (FRED/BLS/BEA
+          shipped; IMF and World Bank are possible future adapters),
+          market_data -> MarketDataProvider (yfinance, shipped),
+          ai_research -> thesis.llm_client (multi-provider router,
+          shipped). Alternative data (Reddit/Stocktwits/Google Trends/
+          OpenInsider) has no owning interface yet.
 
   MacroProvider:
     module: agentic_options_reporter.data.macro_provider

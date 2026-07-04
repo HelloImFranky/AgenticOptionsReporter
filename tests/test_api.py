@@ -471,7 +471,7 @@ def test_generate_thesis_absent_research_findings_round_trip_as_null(client):
 @pytest.mark.parametrize(
     "error_cls_path",
     [
-        "agentic_options_reporter.data.financial_provider.FinancialProviderError",
+        "agentic_options_reporter.data.financial.FinancialProviderError",
         "agentic_options_reporter.data.news.NewsProviderError",
         "agentic_options_reporter.data.macro_provider.MacroProviderError",
     ],

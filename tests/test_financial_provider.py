@@ -1,283 +1,428 @@
+import asyncio
+from datetime import datetime, timezone
+
+import httpx
 import pytest
 
-from agentic_options_reporter.data.financial_provider import (
+from agentic_options_reporter.data.async_http import AsyncHttpProviderBase
+from agentic_options_reporter.data.financial import (
     AlphaVantageFinancialProvider,
     FinancialProvider,
     FinancialProviderError,
     FinancialProviderRateLimited,
     FinancialProviderRouter,
+    FinancialProviderUnavailable,
     FinancialProviderUnsupported,
+    FinnhubFinancialProvider,
     FmpFinancialProvider,
     build_financial_provider,
 )
+from agentic_options_reporter.models.schemas import CompanyProfile
 
-from conftest import FakeHttpResponse, FakeRequestsGet
+
+@pytest.fixture(autouse=True)
+def _reset_provider_cache():
+    """The response cache is class-level on purpose (free tiers meter by
+    the day, and main.py rebuilds providers per request) — reset it so
+    tests stay independent."""
+    AsyncHttpProviderBase.clear_shared_cache()
+    yield
+    AsyncHttpProviderBase.clear_shared_cache()
 
 
-def test_requires_api_key(monkeypatch):
-    monkeypatch.delenv("FMP_API_KEY", raising=False)
+@pytest.fixture(autouse=True)
+def _clear_key_env_vars(monkeypatch):
+    for var in ("FMP_API_KEY", "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER", raising=False)
+
+
+class RecordingTransport:
+    """httpx.MockTransport handler that queues responses and records
+    every request for assertions."""
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if not self._responses:
+            raise AssertionError("No more fake HTTP responses queued")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        status_code, payload = item
+        return httpx.Response(status_code, json=payload)
+
+
+def _client(transport: RecordingTransport) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(transport))
+
+
+_ALL_PROVIDERS = [FmpFinancialProvider, FinnhubFinancialProvider, AlphaVantageFinancialProvider]
+
+
+@pytest.mark.parametrize("provider_cls", _ALL_PROVIDERS)
+def test_provider_requires_api_key(provider_cls):
     with pytest.raises(FinancialProviderError):
-        FmpFinancialProvider()
+        provider_cls()
 
 
-def test_accepts_explicit_api_key(monkeypatch):
-    monkeypatch.delenv("FMP_API_KEY", raising=False)
-    provider = FmpFinancialProvider(api_key="test-key")
-    assert isinstance(provider, FinancialProvider)
+@pytest.mark.parametrize("provider_cls", _ALL_PROVIDERS)
+def test_provider_accepts_explicit_api_key(provider_cls):
+    assert isinstance(provider_cls(api_key="test-key"), FinancialProvider)
 
 
-def test_get_company_profile(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            [
-                {
-                    "companyName": "Apple Inc.",
-                    "sector": "Technology",
-                    "industry": "Consumer Electronics",
-                    "mktCap": 3_000_000_000_000,
-                    "description": "Makes phones.",
-                }
-            ]
-        )
+# -- Financial Modeling Prep --
+
+
+def test_fmp_get_company_profile():
+    transport = RecordingTransport(
+        (200, [
+            {
+                "companyName": "Apple Inc.",
+                "sector": "Technology",
+                "industry": "Consumer Electronics",
+                "mktCap": 3_000_000_000_000,
+                "description": "Makes phones.",
+            }
+        ])
     )
-    provider = FmpFinancialProvider(api_key="test-key")
-    profile = provider.get_company_profile("aapl")
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+
+    profile = asyncio.run(provider.get_company_profile("aapl"))
+
     assert profile.ticker == "AAPL"
     assert profile.name == "Apple Inc."
-    assert profile.sector == "Technology"
     assert profile.market_cap == 3_000_000_000_000
+    assert "apikey" in dict(transport.requests[0].url.params)
 
 
-def test_get_company_profile_handles_empty_response(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse([]))
-    provider = FmpFinancialProvider(api_key="test-key")
-    profile = provider.get_company_profile("AAPL")
-    assert profile.name == ""
-    assert profile.market_cap is None
-
-
-def test_get_financial_statements(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse([{"calendarYear": "2025", "revenue": 400_000_000_000, "netIncome": 100_000_000_000}]),
-        FakeHttpResponse([{"operatingCashFlow": 120_000_000_000, "freeCashFlow": 100_000_000_000}]),
+def test_fmp_get_financial_statements():
+    transport = RecordingTransport(
+        (200, [{"calendarYear": "2025", "revenue": 400_000_000_000, "netIncome": 100_000_000_000}]),
+        (200, [{"operatingCashFlow": 120_000_000_000, "freeCashFlow": 100_000_000_000}]),
     )
-    provider = FmpFinancialProvider(api_key="test-key")
-    summary = provider.get_financial_statements("AAPL")
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+
+    summary = asyncio.run(provider.get_financial_statements("AAPL"))
+
     assert summary.period == "2025"
     assert summary.revenue == 400_000_000_000
-    assert summary.operating_cash_flow == 120_000_000_000
     assert summary.free_cash_flow == 100_000_000_000
 
 
-def test_get_ratios(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            [
-                {
-                    "priceEarningsRatio": 28.5,
-                    "priceToBookRatio": 40.1,
-                    "debtEquityRatio": 1.5,
-                    "currentRatio": 1.1,
-                    "returnOnEquity": 0.6,
-                    "grossProfitMargin": 0.45,
-                    "netProfitMargin": 0.25,
-                }
-            ]
-        )
+def test_fmp_get_ratios():
+    transport = RecordingTransport(
+        (200, [{"priceEarningsRatio": 28.5, "returnOnEquity": 0.6, "debtEquityRatio": 1.5}])
     )
-    provider = FmpFinancialProvider(api_key="test-key")
-    ratios = provider.get_ratios("AAPL")
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+
+    ratios = asyncio.run(provider.get_ratios("AAPL"))
+
     assert ratios.pe_ratio == 28.5
-    assert ratios.return_on_equity == 0.6
+    assert ratios.debt_to_equity == 1.5
 
 
-def test_get_analyst_estimates(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            [
-                {
-                    "consensusRating": "Buy",
-                    "estimatedPriceTargetAvg": 250.0,
-                    "estimatedPriceTargetHigh": 300.0,
-                    "estimatedPriceTargetLow": 200.0,
-                    "numberAnalystEstimatedRevenue": 30,
-                }
-            ]
-        )
+def test_fmp_get_analyst_estimates():
+    transport = RecordingTransport(
+        (200, [
+            {
+                "consensusRating": "Buy",
+                "estimatedPriceTargetAvg": 250.0,
+                "numberAnalystEstimatedRevenue": 30,
+            }
+        ])
     )
-    provider = FmpFinancialProvider(api_key="test-key")
-    estimates = provider.get_analyst_estimates("AAPL")
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+
+    estimates = asyncio.run(provider.get_analyst_estimates("AAPL"))
+
     assert estimates.consensus_rating == "Buy"
     assert estimates.num_analysts == 30
 
 
-def test_get_analyst_estimates_defaults_when_empty(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse([]))
-    provider = FmpFinancialProvider(api_key="test-key")
-    estimates = provider.get_analyst_estimates("AAPL")
-    assert estimates.consensus_rating == "N/A"
-    assert estimates.num_analysts == 0
+def test_fmp_empty_response_falls_back_to_defaults():
+    transport = RecordingTransport((200, []))
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+
+    profile = asyncio.run(provider.get_company_profile("AAPL"))
+
+    assert profile.name == ""
+    assert profile.market_cap is None
 
 
-def test_http_failure_raises_financial_provider_error(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(None, raise_exc=fake_requests_module.exceptions.RequestException("boom"))
+# -- Finnhub --
+
+
+def test_finnhub_get_company_profile_scales_market_cap_from_millions():
+    transport = RecordingTransport(
+        (200, {"name": "Apple Inc", "finnhubIndustry": "Technology", "marketCapitalization": 3_000_000})
     )
-    provider = FmpFinancialProvider(api_key="test-key")
-    with pytest.raises(FinancialProviderError):
-        provider.get_company_profile("AAPL")
+    provider = FinnhubFinancialProvider(api_key="test-key", client=_client(transport))
 
+    profile = asyncio.run(provider.get_company_profile("aapl"))
 
-def test_rate_limit_status_raises_financial_provider_rate_limited(fake_requests_module):
-    exc = fake_requests_module.exceptions.RequestException("too many requests")
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(None, status_code=429, raise_exc=exc))
-    provider = FmpFinancialProvider(api_key="test-key")
-    with pytest.raises(FinancialProviderRateLimited):
-        provider.get_company_profile("AAPL")
-
-
-# -- AlphaVantageFinancialProvider --
-
-
-def test_alpha_vantage_requires_api_key(monkeypatch):
-    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
-    with pytest.raises(FinancialProviderError):
-        AlphaVantageFinancialProvider()
-
-
-def test_alpha_vantage_get_company_profile(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            {
-                "Name": "Apple Inc.",
-                "Sector": "TECHNOLOGY",
-                "Industry": "CONSUMER ELECTRONICS",
-                "MarketCapitalization": "3000000000000",
-                "Description": "Makes phones.",
-            }
-        )
-    )
-    provider = AlphaVantageFinancialProvider(api_key="test-key")
-    profile = provider.get_company_profile("aapl")
     assert profile.ticker == "AAPL"
-    assert profile.name == "Apple Inc."
+    assert profile.industry == "Technology"
     assert profile.market_cap == 3_000_000_000_000
 
 
-def test_alpha_vantage_get_financial_statements_computes_free_cash_flow(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            {"annualReports": [{"fiscalDateEnding": "2025-09-30", "totalRevenue": "400000000000", "netIncome": "100000000000"}]}
-        ),
-        FakeHttpResponse(
-            {"annualReports": [{"operatingCashflow": "120000000000", "capitalExpenditures": "20000000000"}]}
-        ),
-    )
-    provider = AlphaVantageFinancialProvider(api_key="test-key")
-    summary = provider.get_financial_statements("AAPL")
-    assert summary.period == "2025-09-30"
-    assert summary.revenue == 400_000_000_000
-    assert summary.operating_cash_flow == 120_000_000_000
-    assert summary.free_cash_flow == 100_000_000_000
-
-
-def test_alpha_vantage_get_financial_statements_handles_missing_reports(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"annualReports": []}),
-        FakeHttpResponse({"annualReports": []}),
-    )
-    provider = AlphaVantageFinancialProvider(api_key="test-key")
-    summary = provider.get_financial_statements("AAPL")
-    assert summary.revenue is None
-    assert summary.free_cash_flow is None
-
-
-def test_alpha_vantage_get_ratios_computes_gross_margin(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            {
-                "PERatio": "28.5",
-                "PriceToBookRatio": "40.1",
-                "ReturnOnEquityTTM": "0.6",
-                "RevenueTTM": "400000000000",
-                "GrossProfitTTM": "180000000000",
-                "ProfitMargin": "0.25",
+def test_finnhub_get_ratios_converts_percentage_metrics_to_fractions():
+    transport = RecordingTransport(
+        (200, {
+            "metric": {
+                "peTTM": 28.5,
+                "pb": 40.0,
+                "totalDebt/totalEquityQuarterly": 1.5,
+                "currentRatioQuarterly": 1.1,
+                "roeTTM": 60.0,
+                "grossMarginTTM": 45.0,
+                "netProfitMarginTTM": 25.0,
             }
-        )
+        })
     )
-    provider = AlphaVantageFinancialProvider(api_key="test-key")
-    ratios = provider.get_ratios("AAPL")
+    provider = FinnhubFinancialProvider(api_key="test-key", client=_client(transport))
+
+    ratios = asyncio.run(provider.get_ratios("AAPL"))
+
     assert ratios.pe_ratio == 28.5
-    assert ratios.debt_to_equity is None
-    assert ratios.current_ratio is None
+    assert ratios.return_on_equity == pytest.approx(0.6)
     assert ratios.gross_margin == pytest.approx(0.45)
-    assert ratios.net_margin == 0.25
+    assert ratios.net_margin == pytest.approx(0.25)
 
 
-def test_alpha_vantage_get_analyst_estimates_uses_target_price_only(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse({"AnalystTargetPrice": "250.0"}))
-    provider = AlphaVantageFinancialProvider(api_key="test-key")
-    estimates = provider.get_analyst_estimates("AAPL")
+def test_finnhub_get_analyst_estimates_derives_consensus_from_counts():
+    transport = RecordingTransport(
+        (200, [{"strongBuy": 10, "buy": 15, "hold": 5, "sell": 1, "strongSell": 0}])
+    )
+    provider = FinnhubFinancialProvider(api_key="test-key", client=_client(transport))
+
+    estimates = asyncio.run(provider.get_analyst_estimates("AAPL"))
+
+    assert estimates.consensus_rating == "Buy"
+    assert estimates.num_analysts == 31
+    assert estimates.price_target_mean is None  # premium endpoint, never guessed
+
+
+def test_finnhub_get_analyst_estimates_handles_empty_response():
+    transport = RecordingTransport((200, []))
+    provider = FinnhubFinancialProvider(api_key="test-key", client=_client(transport))
+
+    estimates = asyncio.run(provider.get_analyst_estimates("AAPL"))
+
     assert estimates.consensus_rating == "N/A"
-    assert estimates.price_target_mean == 250.0
-    assert estimates.price_target_high is None
     assert estimates.num_analysts == 0
 
 
-def test_alpha_vantage_information_field_raises_rate_limited(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"Note": "Thank you for using Alpha Vantage! Our standard API rate limit is 25 requests per day."})
+def test_finnhub_get_financial_statements_is_unsupported():
+    provider = FinnhubFinancialProvider(api_key="test-key")
+    with pytest.raises(FinancialProviderUnsupported):
+        asyncio.run(provider.get_financial_statements("AAPL"))
+
+
+# -- Alpha Vantage --
+
+
+def test_alpha_vantage_get_company_profile():
+    transport = RecordingTransport(
+        (200, {
+            "Name": "Apple Inc.",
+            "Sector": "TECHNOLOGY",
+            "Industry": "CONSUMER ELECTRONICS",
+            "MarketCapitalization": "3000000000000",
+            "Description": "Makes phones.",
+        })
     )
-    provider = AlphaVantageFinancialProvider(api_key="test-key")
+    provider = AlphaVantageFinancialProvider(api_key="test-key", client=_client(transport))
+
+    profile = asyncio.run(provider.get_company_profile("aapl"))
+
+    assert profile.ticker == "AAPL"
+    assert profile.market_cap == 3_000_000_000_000
+
+
+def test_alpha_vantage_statements_compute_free_cash_flow():
+    transport = RecordingTransport(
+        (200, {"annualReports": [{"fiscalDateEnding": "2025-09-30", "totalRevenue": "400000000000", "netIncome": "100000000000"}]}),
+        (200, {"annualReports": [{"operatingCashflow": "120000000000", "capitalExpenditures": "20000000000"}]}),
+    )
+    provider = AlphaVantageFinancialProvider(api_key="test-key", client=_client(transport))
+
+    summary = asyncio.run(provider.get_financial_statements("AAPL"))
+
+    assert summary.free_cash_flow == 100_000_000_000
+
+
+def test_alpha_vantage_ratios_leave_unavailable_fields_null():
+    transport = RecordingTransport(
+        (200, {
+            "PERatio": "28.5",
+            "ReturnOnEquityTTM": "0.6",
+            "RevenueTTM": "400000000000",
+            "GrossProfitTTM": "180000000000",
+            "ProfitMargin": "0.25",
+        })
+    )
+    provider = AlphaVantageFinancialProvider(api_key="test-key", client=_client(transport))
+
+    ratios = asyncio.run(provider.get_ratios("AAPL"))
+
+    assert ratios.debt_to_equity is None
+    assert ratios.current_ratio is None
+    assert ratios.gross_margin == pytest.approx(0.45)
+
+
+def test_alpha_vantage_information_note_raises_rate_limited():
+    transport = RecordingTransport((200, {"Information": "rate limit reached"}))
+    provider = AlphaVantageFinancialProvider(api_key="test-key", client=_client(transport))
+
     with pytest.raises(FinancialProviderRateLimited):
-        provider.get_company_profile("AAPL")
+        asyncio.run(provider.get_company_profile("AAPL"))
+
+
+# -- Shared adapter behavior --
+
+
+def test_http_429_raises_rate_limited():
+    transport = RecordingTransport((429, {}))
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+    with pytest.raises(FinancialProviderRateLimited):
+        asyncio.run(provider.get_company_profile("AAPL"))
+
+
+def test_http_5xx_raises_unavailable():
+    transport = RecordingTransport((503, {}))
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+    with pytest.raises(FinancialProviderUnavailable):
+        asyncio.run(provider.get_company_profile("AAPL"))
+
+
+def test_identical_requests_are_served_from_cache_across_instances():
+    transport = RecordingTransport((200, []))
+
+    first = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+    asyncio.run(first.get_company_profile("AAPL"))
+    second = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+    asyncio.run(second.get_company_profile("AAPL"))
+
+    assert len(transport.requests) == 1
+
+
+def test_health_reports_healthy_with_latency():
+    transport = RecordingTransport((200, [{"companyName": "Apple Inc."}]))
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+
+    health = asyncio.run(provider.health())
+
+    assert health.healthy is True
+    assert health.provider == "Financial Modeling Prep"
+    assert health.latency_ms is not None
+
+
+def test_health_reports_unhealthy_instead_of_raising():
+    transport = RecordingTransport((503, {}))
+    provider = FmpFinancialProvider(api_key="test-key", client=_client(transport))
+
+    health = asyncio.run(provider.health())
+
+    assert health.healthy is False
+    assert "unavailable" in health.detail.lower()
 
 
 # -- FinancialProviderRouter --
 
 
-class _FakeFinancialClient(FinancialProvider):
-    def __init__(self, profile=None, error=None):
+class _StubFinancialProvider(FinancialProvider):
+    def __init__(self, profile=None, error=None, name="stub"):
         self._profile = profile
         self._error = error
+        self._name = name
 
-    def get_company_profile(self, ticker):
+    async def get_company_profile(self, ticker):
         if self._error is not None:
             raise self._error
         return self._profile
 
-    def get_financial_statements(self, ticker):
+    async def get_financial_statements(self, ticker):
+        if self._error is not None:
+            raise self._error
+        raise FinancialProviderUnsupported("stub has no statements")
+
+    async def get_ratios(self, ticker):
         raise NotImplementedError
 
-    def get_ratios(self, ticker):
+    async def get_analyst_estimates(self, ticker):
         raise NotImplementedError
 
-    def get_analyst_estimates(self, ticker):
-        raise NotImplementedError
+    async def health(self):
+        from agentic_options_reporter.data.financial import ProviderHealth
+
+        return ProviderHealth(
+            provider=self._name,
+            healthy=self._error is None,
+            detail="" if self._error is None else str(self._error),
+            checked_at=datetime.now(timezone.utc),
+        )
 
 
-def test_financial_provider_router_rejects_empty_client_list():
+def test_router_rejects_empty_client_list():
     with pytest.raises(FinancialProviderError):
         FinancialProviderRouter([])
 
 
-def test_financial_provider_router_falls_through_on_retryable_error():
-    from agentic_options_reporter.models.schemas import CompanyProfile
+def test_router_falls_through_on_unsupported_method():
+    """The Finnhub case: no statements on the free tier, but still used
+    for everything it does support."""
+    partial = _StubFinancialProvider(profile=CompanyProfile(ticker="AAPL", name="From partial"))
+    full = _StubFinancialProvider(profile=CompanyProfile(ticker="AAPL", name="From full"))
+    router = FinancialProviderRouter([("partial", partial), ("full", full)])
 
-    first = _FakeFinancialClient(error=FinancialProviderUnsupported("no profile"))
-    second = _FakeFinancialClient(profile=CompanyProfile(ticker="AAPL", name="Apple Inc."))
-    router = FinancialProviderRouter([("first", first), ("second", second)])
+    profile = asyncio.run(router.get_company_profile("AAPL"))
+    assert profile.name == "From partial"
 
-    result = router.get_company_profile("AAPL")
+    with pytest.raises(FinancialProviderError, match="partial:.*full:"):
+        # both stubs raise Unsupported for statements → all-failed error
+        asyncio.run(router.get_financial_statements("AAPL"))
 
-    assert result.name == "Apple Inc."
+
+def test_router_falls_through_on_rate_limit():
+    limited = _StubFinancialProvider(error=FinancialProviderRateLimited("429"))
+    healthy = _StubFinancialProvider(profile=CompanyProfile(ticker="AAPL", name="Apple Inc."))
+    router = FinancialProviderRouter([("limited", limited), ("healthy", healthy)])
+
+    profile = asyncio.run(router.get_company_profile("AAPL"))
+
+    assert profile.name == "Apple Inc."
 
 
-def test_build_financial_provider_returns_none_equivalent_when_unconfigured(monkeypatch):
-    for var in ("FMP_API_KEY", "ALPHA_VANTAGE_API_KEY"):
-        monkeypatch.delenv(var, raising=False)
+def test_router_health_aggregates():
+    healthy = _StubFinancialProvider(name="up")
+    unhealthy = _StubFinancialProvider(error=FinancialProviderUnavailable("down"), name="down")
+    router = FinancialProviderRouter([("up", healthy), ("down", unhealthy)])
+
+    health = asyncio.run(router.health())
+
+    assert health.healthy is True
+    assert "up: ok" in health.detail
+
+
+# -- build_financial_provider --
+
+
+def test_build_financial_provider_raises_when_unconfigured():
     with pytest.raises(FinancialProviderError):
         build_financial_provider()
+
+
+def test_build_financial_provider_orders_configured_providers(monkeypatch):
+    monkeypatch.setenv("FMP_API_KEY", "test-key")
+    monkeypatch.setenv("FINNHUB_API_KEY", "test-key")
+
+    provider = build_financial_provider()
+
+    assert provider.provider_names == ["fmp", "finnhub"]
 
 
 def test_build_financial_provider_respects_fallback_order_env_var(monkeypatch):
