@@ -1,20 +1,23 @@
 """Macroeconomic provider interface and adapter base.
 
-`MacroProvider` is the async interface the macro_research agent depends
-on (dependency injection — same pattern as data.news/data.financial).
-One adapter per source lives in this package (see specs/providers.yaml);
-`router.build_macro_provider()` composes whichever are configured into a
-failover router.
+`MacroProvider` is the async, CAPABILITY-BASED interface the
+macro_research agent depends on (via the router). Rather than a fixed
+method per metric, a provider declares which metric ids it serves
+(`supported_metrics`) and fetches any one of them through a single
+`fetch(metric_id)` coroutine returning a normalized `MacroObservation`.
 
-Most macro sources are specialists, not full-interface providers: BLS
-publishes CPI but not GDP or rates; BEA publishes GDP but not CPI; IMF
-and the World Bank publish CPI/GDP but not US policy rates. Each raises
-`MacroProviderUnsupported` — retryable — for the methods outside its
-domain, so the router still uses every source for what it does cover.
+This is the redesign from the provider-architecture doc: the router
+FILTERS to providers that advertise a metric before calling, so a
+specialist is never asked for data it doesn't have (the "World Bank has
+no US policy rate" case). Adding a metric is a registry entry plus the
+adapters that serve it — no new interface method, no provider forced to
+stub out data it lacks. Unsupported metrics are structural (a provider
+simply isn't in the candidate list), not an exception caught mid-call.
 
 `_HttpMacroProvider` binds the shared async-HTTP infrastructure
 (data.async_http: key handling, error normalization, class-level TTL
-response cache, health probe) to this interface's error hierarchy.
+response cache, health probe) to this interface's error hierarchy and
+provides the metric-dispatch + health-probe scaffolding.
 """
 
 from __future__ import annotations
@@ -28,12 +31,7 @@ from agentic_options_reporter.data.provider_errors import (
     ProviderUnavailable,
     ProviderUnsupported,
 )
-from agentic_options_reporter.models.schemas import (
-    CpiSnapshot,
-    GdpSnapshot,
-    InterestRates,
-    MacroEvent,
-)
+from agentic_options_reporter.models.schemas import MacroObservation
 
 __all__ = [
     "MacroProvider",
@@ -63,26 +61,30 @@ class MacroProviderUnavailable(MacroProviderError, ProviderUnavailable):
 
 
 class MacroProviderUnsupported(MacroProviderError, ProviderUnsupported):
-    """This provider doesn't publish the requested data at all (e.g. BLS has no GDP series)."""
+    """This provider doesn't publish the requested metric (e.g. BLS has no GDP series).
+
+    In the capability model the router filters these out up front, so
+    this is mostly a defensive guard for a direct `fetch` of an
+    unadvertised metric.
+    """
 
 
 class MacroProvider(ABC):
     """Interface implemented by all macroeconomic data providers."""
 
+    @property
     @abstractmethod
-    async def get_interest_rates(self) -> InterestRates:
+    def supported_metrics(self) -> frozenset[str]:
+        """The metric ids (data.macro.metrics) this provider serves."""
         raise NotImplementedError
 
-    @abstractmethod
-    async def get_cpi(self) -> CpiSnapshot:
-        raise NotImplementedError
+    def supports(self, metric_id: str) -> bool:
+        return metric_id in self.supported_metrics
 
     @abstractmethod
-    async def get_gdp(self) -> GdpSnapshot:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def get_macro_calendar(self) -> list[MacroEvent]:
+    async def fetch(self, metric_id: str) -> MacroObservation:
+        """Return the latest normalized observation for `metric_id`, or
+        raise MacroProviderUnsupported if this provider doesn't serve it."""
         raise NotImplementedError
 
     @abstractmethod
@@ -99,12 +101,38 @@ def yoy_change_pct(latest: float, year_ago: float | None) -> float | None:
 
 
 class _HttpMacroProvider(AsyncHttpProviderBase, MacroProvider):
-    """Base for HTTP-backed macro adapters. Each adapter implements
-    `_health_probe` against a series it actually publishes (a full-
-    interface default would mark specialists unhealthy for data they
-    never claimed to have)."""
+    """Base for HTTP-backed macro adapters.
+
+    A subclass sets `METRICS` (the ids it serves) and implements
+    `_fetch(metric_id)`. This base validates the id against `METRICS`
+    (defensive — the router already filters), and probes the first
+    supported metric for `health()` so a specialist is never marked
+    unhealthy for data it never claimed to have.
+    """
 
     ERROR_CLS = MacroProviderError
     RATE_LIMITED_CLS = MacroProviderRateLimited
     TIMEOUT_CLS = MacroProviderTimeout
     UNAVAILABLE_CLS = MacroProviderUnavailable
+
+    METRICS: frozenset[str] = frozenset()
+
+    @property
+    def supported_metrics(self) -> frozenset[str]:
+        return self.METRICS
+
+    async def fetch(self, metric_id: str) -> MacroObservation:
+        if metric_id not in self.METRICS:
+            raise MacroProviderUnsupported(
+                f"{self.PROVIDER_LABEL} does not publish '{metric_id}'."
+            )
+        return await self._fetch(metric_id)
+
+    @abstractmethod
+    async def _fetch(self, metric_id: str) -> MacroObservation:
+        raise NotImplementedError
+
+    async def _health_probe(self) -> None:
+        metric_id = next(iter(self.METRICS), None)
+        if metric_id is not None:
+            await self.fetch(metric_id)

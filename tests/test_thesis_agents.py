@@ -6,12 +6,10 @@ import pytest
 from agentic_options_reporter.models.schemas import (
     AnalystEstimates,
     CompanyProfile,
-    CpiSnapshot,
     FinancialRatios,
     FinancialStatementSummary,
-    GdpSnapshot,
     IndicatorSnapshot,
-    InterestRates,
+    MacroObservation,
     NewsArticle,
     Recommendation,
     RiskAssessment,
@@ -356,16 +354,21 @@ def test_news_research_raises_on_invalid_sentiment():
         news_research.run(llm, _articles())
 
 
-def _rates() -> InterestRates:
-    return InterestRates(fed_funds_rate=5.25, ten_year_yield=4.3, two_year_yield=4.1, as_of=date(2026, 6, 1))
-
-
-def _cpi() -> CpiSnapshot:
-    return CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date(2026, 6, 1))
-
-
-def _gdp() -> GdpSnapshot:
-    return GdpSnapshot(value=23000.0, yoy_growth_pct=2.1, as_of=date(2026, 4, 1))
+def _observations() -> list[MacroObservation]:
+    return [
+        MacroObservation(
+            metric_id="policy_rate", label="Federal funds rate", value=5.25,
+            unit="percent", as_of=date(2026, 6, 1), source="FRED",
+        ),
+        MacroObservation(
+            metric_id="cpi", label="Consumer Price Index", value=310.0, unit="index",
+            as_of=date(2026, 6, 1), source="BLS", yoy_change_pct=3.3,
+        ),
+        MacroObservation(
+            metric_id="gdp", label="Gross domestic product (nominal)", value=23000.0,
+            unit="usd", as_of=date(2026, 4, 1), source="BEA", yoy_change_pct=2.1,
+        ),
+    ]
 
 
 def test_macro_research_parses_response():
@@ -380,7 +383,7 @@ def test_macro_research_parses_response():
             )
         }
     )
-    result = macro_research.run(llm, _rates(), _cpi(), _gdp(), [])
+    result = macro_research.run(llm, _observations())
     assert result.regime == "risk_on"
     assert "risk assets" in result.outlook.lower()
 
@@ -394,4 +397,4 @@ def test_macro_research_raises_on_invalid_regime():
         }
     )
     with pytest.raises(ThesisGenerationError):
-        macro_research.run(llm, _rates(), _cpi(), _gdp(), [])
+        macro_research.run(llm, _observations())

@@ -91,3 +91,16 @@ async def acall_with_fallback(
     raise all_failed_error_cls(
         f"All configured providers failed for {method_name}(): " + "; ".join(failures)
     )
+
+
+def filter_supporting(
+    clients: list[tuple[str, Any]], capability: Any
+) -> list[tuple[str, Any]]:
+    """Narrow `clients` to those whose `.supports(capability)` is true,
+    preserving order. The capability-based counterpart to the try/catch-
+    Unsupported pattern: the router selects providers that ADVERTISE a
+    capability before calling, instead of discovering unsupported data by
+    catching an exception mid-request (see data.macro; the news/financial
+    routers can adopt this next). `capability` is whatever a provider's
+    `supports` accepts — a macro metric id today."""
+    return [(name, client) for name, client in clients if client.supports(capability)]

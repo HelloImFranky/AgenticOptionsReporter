@@ -140,16 +140,17 @@ agents:
     calls_llm: true
     requires_provider: macro_provider
     input:
-      - InterestRates
-      - CpiSnapshot
-      - GdpSnapshot
-      - list[MacroEvent]
+      - list[MacroObservation]   # whatever DEFAULT_MACRO_METRICS the capability router could serve, fetched concurrently
     output: MacroResearchFinding
     contract: >
-      Interprets provider-supplied macro data into a risk_on/risk_off/
-      neutral regime label plus an outlook narrative. Does not compute or
-      forecast any macro figure itself. Skipped entirely (null finding)
-      if macro_provider is null. Market-wide, not ticker-specific — runs
+      Interprets provider-supplied macro observations into a risk_on/
+      risk_off/neutral regime label plus an outlook narrative. Reasons
+      over whatever metrics are present — a keyless-only deployment sees
+      CPI and GDP but no policy rate (see specs/providers.yaml
+      MacroProvider capability model) — and does not compute or forecast
+      any macro figure itself. Skipped entirely (null finding) if
+      macro_provider is null OR no configured provider serves any
+      requested metric. Market-wide, not ticker-specific — runs
       independent of no_candidate_short_circuit.
 
   - name: risk_challenger

@@ -8,12 +8,10 @@ from agentic_options_reporter.models.schemas import (
     AnalysisResult,
     AnalystEstimates,
     CompanyProfile,
-    CpiSnapshot,
     FinancialRatios,
     FinancialStatementSummary,
-    GdpSnapshot,
     IndicatorSnapshot,
-    InterestRates,
+    MacroObservation,
     NewsArticle,
     Recommendation,
     ScoredCandidate,
@@ -106,17 +104,22 @@ class FakeNewsProvider(NewsProvider):
 
 
 class FakeMacroProvider(MacroProvider):
-    async def get_interest_rates(self) -> InterestRates:
-        return InterestRates(fed_funds_rate=5.25, ten_year_yield=4.3, two_year_yield=4.1, as_of=date(2026, 6, 1))
+    _VALUES = {
+        "policy_rate": (5.25, "percent"),
+        "cpi": (310.0, "index"),
+        "gdp": (23000.0, "usd"),
+    }
 
-    async def get_cpi(self) -> CpiSnapshot:
-        return CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date(2026, 6, 1))
+    @property
+    def supported_metrics(self) -> frozenset[str]:
+        return frozenset(self._VALUES)
 
-    async def get_gdp(self) -> GdpSnapshot:
-        return GdpSnapshot(value=23000.0, yoy_growth_pct=2.1, as_of=date(2026, 4, 1))
-
-    async def get_macro_calendar(self) -> list:
-        return []
+    async def fetch(self, metric_id: str) -> MacroObservation:
+        value, unit = self._VALUES[metric_id]
+        return MacroObservation(
+            metric_id=metric_id, label=metric_id, value=value, unit=unit,
+            as_of=date(2026, 6, 1), source="fake",
+        )
 
     async def health(self) -> ProviderHealth:
         return ProviderHealth(
