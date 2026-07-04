@@ -122,15 +122,15 @@ agents:
     calls_llm: true
     requires_provider: news_provider
     input:
-      - list[NewsArticle] (company news)
-      - SentimentSnapshot
+      - list[NewsArticle] (from NewsProvider.search(ticker) — async, bridged via asyncio.run in the orchestrator)
     output: NewsResearchFinding
     contract: >
       Summarizes recent news into a sentiment label, a narrative summary,
-      and lists of catalysts/risks. sentiment score in the input
-      SentimentSnapshot is provider-supplied, not LLM-derived; the agent
-      may use it as context but must not report a different number as if
-      computed. Skipped entirely (null finding) if news_provider is null.
+      and lists of catalysts/risks. The sentiment label is the agent's
+      own qualitative judgment over the actual articles (a judgment call
+      over given facts, like risk_level), never a number the quant
+      engine computes. Skipped entirely (null finding) if news_provider
+      is null.
 
   - name: macro_research
     module: agentic_options_reporter.thesis.macro_research

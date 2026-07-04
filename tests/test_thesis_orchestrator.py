@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 
 from agentic_options_reporter.data.financial_provider import FinancialProvider
 from agentic_options_reporter.data.macro_provider import MacroProvider
-from agentic_options_reporter.data.news_provider import NewsProvider
+from agentic_options_reporter.data.news import NewsProvider, ProviderHealth
 from agentic_options_reporter.models.schemas import (
     AnalysisResult,
     AnalystEstimates,
@@ -17,7 +17,6 @@ from agentic_options_reporter.models.schemas import (
     NewsArticle,
     Recommendation,
     ScoredCandidate,
-    SentimentSnapshot,
     SupportResistanceLevel,
     TrendAssessment,
     VolumeAssessment,
@@ -84,7 +83,7 @@ class FakeFinancialProvider(FinancialProvider):
 
 
 class FakeNewsProvider(NewsProvider):
-    def get_company_news(self, ticker: str, limit: int = 20) -> list[NewsArticle]:
+    async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
         return [
             NewsArticle(
                 headline="Company beats earnings", source="Reuters", url="https://example.com/a",
@@ -92,11 +91,13 @@ class FakeNewsProvider(NewsProvider):
             )
         ]
 
-    def get_market_news(self, limit: int = 20) -> list[NewsArticle]:
+    async def top_headlines(self, category=None, limit=20):
         return []
 
-    def get_sentiment(self, ticker: str) -> SentimentSnapshot:
-        return SentimentSnapshot(ticker=ticker, score=0.4, label="bullish", article_count=12)
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider="fake", healthy=True, checked_at=datetime.now(timezone.utc)
+        )
 
 
 class FakeMacroProvider(MacroProvider):
@@ -218,19 +219,20 @@ def test_pipeline_records_no_warnings_when_research_succeeds():
 
 
 class RateLimitedNewsProvider(NewsProvider):
-    """Simulates the GDELT-rate-limited case: a provider that IS
-    configured but 429s at call time."""
+    """Simulates a provider that IS configured but 429s at call time."""
 
-    def get_company_news(self, ticker: str, limit: int = 20):
-        from agentic_options_reporter.data.news_provider import NewsProviderRateLimited
+    async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
+        from agentic_options_reporter.data.news import NewsProviderRateLimited
 
-        raise NewsProviderRateLimited("GDELT rate limited: 429 Too Many Requests")
+        raise NewsProviderRateLimited("Finnhub rate limited: 429 Too Many Requests")
 
-    def get_market_news(self, limit: int = 20):
+    async def top_headlines(self, category=None, limit=20):
         raise NotImplementedError
 
-    def get_sentiment(self, ticker: str):
-        raise NotImplementedError
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider="rate-limited", healthy=False, checked_at=datetime.now(timezone.utc)
+        )
 
 
 def test_provider_failure_mid_run_records_warning_instead_of_crashing():

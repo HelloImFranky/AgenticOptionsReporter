@@ -70,3 +70,24 @@ def call_with_fallback(
     raise all_failed_error_cls(
         f"All configured providers failed for {method_name}(): " + "; ".join(failures)
     )
+
+
+async def acall_with_fallback(
+    clients: list[tuple[str, Any]],
+    method_name: str,
+    all_failed_error_cls: type[Exception],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Async twin of `call_with_fallback`, for provider interfaces whose
+    methods are coroutines (data.news)."""
+    failures: list[str] = []
+    for name, client in clients:
+        try:
+            return await getattr(client, method_name)(*args, **kwargs)
+        except RetryableProviderError as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+    raise all_failed_error_cls(
+        f"All configured providers failed for {method_name}(): " + "; ".join(failures)
+    )

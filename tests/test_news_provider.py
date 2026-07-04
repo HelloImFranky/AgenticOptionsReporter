@@ -1,369 +1,584 @@
+import asyncio
+import json
+from datetime import datetime, timezone
+
+import httpx
 import pytest
 
-from agentic_options_reporter.data.news_provider import (
+from agentic_options_reporter.data.news import (
     AlphaVantageNewsProvider,
     FinnhubNewsProvider,
-    GdeltNewsProvider,
+    GNewsProvider,
+    GuardianNewsProvider,
+    HackerNewsProvider,
     NewsApiOrgProvider,
+    NewsDataProvider,
     NewsProvider,
     NewsProviderError,
     NewsProviderRateLimited,
     NewsProviderRouter,
-    NewsProviderUnsupported,
+    NewsProviderTimeout,
+    NewsProviderUnavailable,
     build_news_provider,
 )
+from agentic_options_reporter.data.news.base import _HttpNewsProvider
+from agentic_options_reporter.models.schemas import NewsArticle
 
-from conftest import FakeHttpResponse, FakeRequestsGet
+
+@pytest.fixture(autouse=True)
+def _reset_news_cache():
+    """The response cache is class-level on purpose (free tiers meter by
+    the day, and main.py rebuilds providers per request) — reset it so
+    tests stay independent."""
+    _HttpNewsProvider.clear_shared_cache()
+    yield
+    _HttpNewsProvider.clear_shared_cache()
 
 
-def test_requires_api_key(monkeypatch):
-    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+class RecordingTransport:
+    """httpx.MockTransport handler that queues responses and records
+    every request for assertions."""
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if not self._responses:
+            raise AssertionError("No more fake HTTP responses queued")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        status_code, payload = item
+        return httpx.Response(status_code, json=payload)
+
+
+def _client(transport: RecordingTransport) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(transport))
+
+
+_ALL_KEY_ENV_VARS = (
+    "FINNHUB_API_KEY",
+    "ALPHA_VANTAGE_API_KEY",
+    "NEWSAPI_API_KEY",
+    "NEWSDATA_API_KEY",
+    "GUARDIAN_API_KEY",
+    "GNEWS_API_KEY",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_news_key_env_vars(monkeypatch):
+    for var in _ALL_KEY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("AOR_NEWS_PROVIDER_FALLBACK_ORDER", raising=False)
+
+
+_KEYED_PROVIDERS = [
+    FinnhubNewsProvider,
+    AlphaVantageNewsProvider,
+    NewsApiOrgProvider,
+    NewsDataProvider,
+    GuardianNewsProvider,
+    GNewsProvider,
+]
+
+
+@pytest.mark.parametrize("provider_cls", _KEYED_PROVIDERS)
+def test_keyed_provider_requires_api_key(provider_cls):
     with pytest.raises(NewsProviderError):
-        FinnhubNewsProvider()
+        provider_cls()
 
 
-def test_accepts_explicit_api_key(monkeypatch):
-    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
-    provider = FinnhubNewsProvider(api_key="test-key")
-    assert isinstance(provider, NewsProvider)
+@pytest.mark.parametrize("provider_cls", _KEYED_PROVIDERS)
+def test_keyed_provider_accepts_explicit_api_key(provider_cls):
+    assert isinstance(provider_cls(api_key="test-key"), NewsProvider)
 
 
-def test_get_company_news_maps_articles(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            [
-                {
-                    "headline": "Company beats earnings",
-                    "source": "Reuters",
-                    "url": "https://example.com/a",
-                    "datetime": 1700000000,
-                    "summary": "Solid quarter.",
-                }
-            ]
-        )
+def test_hackernews_needs_no_api_key():
+    assert isinstance(HackerNewsProvider(), NewsProvider)
+
+
+# -- Finnhub --
+
+
+def test_finnhub_search_maps_articles():
+    transport = RecordingTransport(
+        (200, [
+            {
+                "headline": "Company beats earnings",
+                "source": "Reuters",
+                "url": "https://example.com/a",
+                "datetime": 1700000000,
+                "summary": "Solid quarter.",
+            }
+        ])
     )
-    provider = FinnhubNewsProvider(api_key="test-key")
-    articles = provider.get_company_news("AAPL", limit=5)
+    provider = FinnhubNewsProvider(api_key="test-key", client=_client(transport))
+
+    articles = asyncio.run(provider.search("aapl", limit=5))
 
     assert len(articles) == 1
     assert articles[0].headline == "Company beats earnings"
     assert articles[0].source == "Reuters"
-    assert articles[0].summary == "Solid quarter."
+    params = transport.requests[0].url.params
+    assert params["symbol"] == "AAPL"
+    assert "from" in params and "to" in params
 
 
-def test_get_company_news_respects_limit(fake_requests_module):
-    items = [
-        {"headline": f"Story {i}", "source": "s", "url": "u", "datetime": 1700000000, "summary": ""}
-        for i in range(5)
-    ]
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(items))
-    provider = FinnhubNewsProvider(api_key="test-key")
-    articles = provider.get_company_news("AAPL", limit=2)
-    assert len(articles) == 2
+def test_finnhub_search_respects_date_range():
+    transport = RecordingTransport((200, []))
+    provider = FinnhubNewsProvider(api_key="test-key", client=_client(transport))
 
-
-def test_get_market_news_maps_articles(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            [{"headline": "Fed holds rates", "source": "AP", "url": "u", "datetime": 1700000000, "summary": ""}]
+    asyncio.run(
+        provider.search(
+            "AAPL",
+            start_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            end_date=datetime(2026, 6, 30, tzinfo=timezone.utc),
         )
     )
-    provider = FinnhubNewsProvider(api_key="test-key")
-    articles = provider.get_market_news(limit=5)
-    assert articles[0].headline == "Fed holds rates"
+
+    params = transport.requests[0].url.params
+    assert params["from"] == "2026-06-01"
+    assert params["to"] == "2026-06-30"
 
 
-def test_get_sentiment_classifies_bullish(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            {
-                "sentiment": {"bullishPercent": 0.8, "bearishPercent": 0.2},
-                "buzz": {"articlesInLastWeek": 12},
-            }
-        )
+def test_finnhub_top_headlines_maps_unknown_category_to_general():
+    transport = RecordingTransport((200, []))
+    provider = FinnhubNewsProvider(api_key="test-key", client=_client(transport))
+
+    asyncio.run(provider.top_headlines(category="business"))
+
+    assert transport.requests[0].url.params["category"] == "general"
+
+
+# -- Alpha Vantage --
+
+
+def test_alpha_vantage_search_maps_articles():
+    transport = RecordingTransport(
+        (200, {
+            "feed": [
+                {
+                    "title": "Company beats earnings",
+                    "source": "Reuters",
+                    "url": "https://example.com/a",
+                    "time_published": "20260703T120000",
+                    "summary": "Solid quarter.",
+                }
+            ]
+        })
     )
-    provider = FinnhubNewsProvider(api_key="test-key")
-    snapshot = provider.get_sentiment("AAPL")
-    assert snapshot.label == "bullish"
-    assert snapshot.article_count == 12
-    assert snapshot.ticker == "AAPL"
+    provider = AlphaVantageNewsProvider(api_key="test-key", client=_client(transport))
 
+    articles = asyncio.run(provider.search("aapl"))
 
-def test_get_sentiment_classifies_bearish(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"sentiment": {"bullishPercent": 0.1, "bearishPercent": 0.9}, "buzz": {}})
-    )
-    provider = FinnhubNewsProvider(api_key="test-key")
-    snapshot = provider.get_sentiment("AAPL")
-    assert snapshot.label == "bearish"
-
-
-def test_get_sentiment_classifies_neutral_when_balanced(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"sentiment": {"bullishPercent": 0.5, "bearishPercent": 0.5}, "buzz": {}})
-    )
-    provider = FinnhubNewsProvider(api_key="test-key")
-    snapshot = provider.get_sentiment("AAPL")
-    assert snapshot.label == "neutral"
-
-
-def test_http_failure_raises_news_provider_error(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(None, raise_exc=fake_requests_module.exceptions.RequestException("boom"))
-    )
-    provider = FinnhubNewsProvider(api_key="test-key")
-    with pytest.raises(NewsProviderError):
-        provider.get_market_news()
-
-
-def test_rate_limit_status_raises_news_provider_rate_limited(fake_requests_module):
-    exc = fake_requests_module.exceptions.RequestException("too many requests")
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(None, status_code=429, raise_exc=exc))
-    provider = FinnhubNewsProvider(api_key="test-key")
-    with pytest.raises(NewsProviderRateLimited):
-        provider.get_market_news()
-
-
-# -- AlphaVantageNewsProvider --
-
-
-def test_alpha_vantage_requires_api_key(monkeypatch):
-    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
-    with pytest.raises(NewsProviderError):
-        AlphaVantageNewsProvider()
-
-
-def test_alpha_vantage_get_company_news(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            {
-                "feed": [
-                    {
-                        "title": "Company beats earnings",
-                        "source": "Reuters",
-                        "url": "https://example.com/a",
-                        "time_published": "20260703T120000",
-                        "summary": "Solid quarter.",
-                    }
-                ]
-            }
-        )
-    )
-    provider = AlphaVantageNewsProvider(api_key="test-key")
-    articles = provider.get_company_news("AAPL", limit=5)
     assert articles[0].headline == "Company beats earnings"
-    assert articles[0].summary == "Solid quarter."
+    assert transport.requests[0].url.params["tickers"] == "AAPL"
 
 
-def test_alpha_vantage_get_sentiment_uses_ticker_sentiment_when_present(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            {
-                "feed": [
-                    {
-                        "overall_sentiment_score": 0.05,
-                        "ticker_sentiment": [
-                            {"ticker": "AAPL", "ticker_sentiment_score": "0.4"},
-                        ],
-                    }
-                ]
-            }
-        )
-    )
-    provider = AlphaVantageNewsProvider(api_key="test-key")
-    snapshot = provider.get_sentiment("AAPL")
-    assert snapshot.label == "bullish"
-    assert snapshot.article_count == 1
+def test_alpha_vantage_information_note_raises_rate_limited():
+    transport = RecordingTransport((200, {"Information": "rate limit reached"}))
+    provider = AlphaVantageNewsProvider(api_key="test-key", client=_client(transport))
 
-
-def test_alpha_vantage_get_sentiment_falls_back_to_overall_score(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"feed": [{"overall_sentiment_score": -0.3, "ticker_sentiment": []}]})
-    )
-    provider = AlphaVantageNewsProvider(api_key="test-key")
-    snapshot = provider.get_sentiment("AAPL")
-    assert snapshot.label == "bearish"
-
-
-def test_alpha_vantage_information_field_raises_rate_limited(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"Information": "Thank you for using Alpha Vantage! Our standard API rate limit is 25 requests per day."})
-    )
-    provider = AlphaVantageNewsProvider(api_key="test-key")
     with pytest.raises(NewsProviderRateLimited):
-        provider.get_company_news("AAPL")
+        asyncio.run(provider.search("AAPL"))
 
 
-# -- NewsApiOrgProvider --
+# -- NewsAPI --
 
 
-def test_newsapi_requires_api_key(monkeypatch):
-    monkeypatch.delenv("NEWSAPI_API_KEY", raising=False)
-    with pytest.raises(NewsProviderError):
-        NewsApiOrgProvider()
-
-
-def test_newsapi_get_company_news(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            {
-                "articles": [
-                    {
-                        "title": "Company beats earnings",
-                        "source": {"name": "Reuters"},
-                        "url": "https://example.com/a",
-                        "publishedAt": "2026-07-03T12:00:00Z",
-                        "description": "Solid quarter.",
-                    }
-                ]
-            }
-        )
+def test_newsapi_search_maps_articles():
+    transport = RecordingTransport(
+        (200, {
+            "articles": [
+                {
+                    "title": "Company beats earnings",
+                    "source": {"name": "Reuters"},
+                    "url": "https://example.com/a",
+                    "publishedAt": "2026-07-03T12:00:00Z",
+                    "description": "Solid quarter.",
+                }
+            ]
+        })
     )
-    provider = NewsApiOrgProvider(api_key="test-key")
-    articles = provider.get_company_news("AAPL", limit=5)
-    assert articles[0].headline == "Company beats earnings"
+    provider = NewsApiOrgProvider(api_key="test-key", client=_client(transport))
+
+    articles = asyncio.run(provider.search("AAPL", language="en"))
+
     assert articles[0].source == "Reuters"
+    request = transport.requests[0]
+    assert request.headers["X-Api-Key"] == "test-key"
+    assert request.url.params["language"] == "en"
 
 
-def test_newsapi_get_sentiment_is_unsupported(fake_requests_module):
-    provider = NewsApiOrgProvider(api_key="test-key")
-    with pytest.raises(NewsProviderUnsupported):
-        provider.get_sentiment("AAPL")
+def test_newsapi_top_headlines_defaults_to_business():
+    transport = RecordingTransport((200, {"articles": []}))
+    provider = NewsApiOrgProvider(api_key="test-key", client=_client(transport))
+
+    asyncio.run(provider.top_headlines())
+
+    assert transport.requests[0].url.params["category"] == "business"
 
 
-# -- GdeltNewsProvider --
+# -- NewsData.io --
 
 
-def test_gdelt_needs_no_api_key():
-    provider = GdeltNewsProvider()
-    assert isinstance(provider, NewsProvider)
+def test_newsdata_search_maps_articles():
+    transport = RecordingTransport(
+        (200, {
+            "status": "success",
+            "results": [
+                {
+                    "title": "Company beats earnings",
+                    "source_id": "reuters",
+                    "link": "https://example.com/a",
+                    "pubDate": "2026-07-03 12:00:00",
+                    "description": "Solid quarter.",
+                }
+            ],
+        })
+    )
+    provider = NewsDataProvider(api_key="test-key", client=_client(transport))
+
+    articles = asyncio.run(provider.search("AAPL"))
+
+    assert articles[0].headline == "Company beats earnings"
+    assert articles[0].source == "reuters"
+    assert transport.requests[0].url.params["q"] == "AAPL"
 
 
-def test_gdelt_get_company_news(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            {
-                "articles": [
+def test_newsdata_search_ignores_dates_on_free_tier():
+    transport = RecordingTransport((200, {"results": []}))
+    provider = NewsDataProvider(api_key="test-key", client=_client(transport))
+
+    asyncio.run(
+        provider.search("AAPL", start_date=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    )
+
+    params = transport.requests[0].url.params
+    assert "from_date" not in params and "from" not in params
+
+
+# -- The Guardian --
+
+
+def test_guardian_search_maps_articles():
+    transport = RecordingTransport(
+        (200, {
+            "response": {
+                "results": [
                     {
-                        "title": "Company beats earnings",
-                        "domain": "reuters.com",
-                        "url": "https://example.com/a",
-                        "seendate": "20260703T120000Z",
+                        "webTitle": "Company beats earnings",
+                        "webUrl": "https://theguardian.com/a",
+                        "webPublicationDate": "2026-07-03T12:00:00Z",
+                        "fields": {"trailText": "Solid quarter."},
                     }
                 ]
             }
+        })
+    )
+    provider = GuardianNewsProvider(api_key="test-key", client=_client(transport))
+
+    articles = asyncio.run(
+        provider.search(
+            "AAPL",
+            start_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            end_date=datetime(2026, 6, 30, tzinfo=timezone.utc),
         )
     )
-    provider = GdeltNewsProvider()
-    articles = provider.get_company_news("AAPL", limit=5)
+
+    assert articles[0].source == "The Guardian"
+    assert articles[0].summary == "Solid quarter."
+    params = transport.requests[0].url.params
+    assert params["from-date"] == "2026-06-01"
+    assert params["to-date"] == "2026-06-30"
+
+
+def test_guardian_top_headlines_uses_section():
+    transport = RecordingTransport((200, {"response": {"results": []}}))
+    provider = GuardianNewsProvider(api_key="test-key", client=_client(transport))
+
+    asyncio.run(provider.top_headlines(category="technology"))
+
+    assert transport.requests[0].url.params["section"] == "technology"
+
+
+# -- GNews --
+
+
+def test_gnews_search_maps_articles():
+    transport = RecordingTransport(
+        (200, {
+            "articles": [
+                {
+                    "title": "Company beats earnings",
+                    "description": "Solid quarter.",
+                    "url": "https://example.com/a",
+                    "publishedAt": "2026-07-03T12:00:00Z",
+                    "source": {"name": "Reuters"},
+                }
+            ]
+        })
+    )
+    provider = GNewsProvider(api_key="test-key", client=_client(transport))
+
+    articles = asyncio.run(provider.search("AAPL", language="en", limit=5))
+
     assert articles[0].headline == "Company beats earnings"
-    assert articles[0].source == "reuters.com"
+    params = transport.requests[0].url.params
+    assert params["lang"] == "en"
+    assert params["max"] == "5"
 
 
-def test_gdelt_get_sentiment_uses_tone_timeline(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"articles": [{"title": "x", "domain": "d", "url": "u", "seendate": "20260703T120000Z"}]}),
-        FakeHttpResponse({"timeline": [{"series": "tone", "data": [{"date": "20260701", "value": 2.0}, {"date": "20260702", "value": 5.0}]}]}),
+# -- Hacker News --
+
+
+def test_hackernews_search_maps_hits():
+    transport = RecordingTransport(
+        (200, {
+            "hits": [
+                {
+                    "title": "Company open-sources model",
+                    "url": "https://example.com/a",
+                    "created_at": "2026-07-03T12:00:00Z",
+                    "objectID": "1",
+                }
+            ]
+        })
     )
-    provider = GdeltNewsProvider()
-    snapshot = provider.get_sentiment("AAPL")
-    assert snapshot.label == "bullish"
-    assert snapshot.score == pytest.approx(0.5)
-    assert snapshot.article_count == 1
+    provider = HackerNewsProvider(client=_client(transport))
+
+    articles = asyncio.run(provider.search("AAPL"))
+
+    assert articles[0].source == "Hacker News"
+    assert transport.requests[0].url.params["tags"] == "story"
 
 
-def test_gdelt_get_sentiment_uses_modest_article_sample(fake_requests_module):
-    """The sentiment article sample stays small — GDELT rate-limits
-    aggressively, and a 429 here used to take down the whole thesis
-    pipeline."""
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"articles": []}),
-        FakeHttpResponse({"timeline": []}),
+def test_hackernews_linkless_story_falls_back_to_thread_url():
+    transport = RecordingTransport(
+        (200, {"hits": [{"title": "Ask HN: thoughts?", "url": None, "created_at": "", "objectID": "42"}]})
     )
-    provider = GdeltNewsProvider()
-    provider.get_sentiment("AAPL")
+    provider = HackerNewsProvider(client=_client(transport))
 
-    article_call = fake_requests_module.get.calls[0]
-    assert article_call["params"]["maxrecords"] == GdeltNewsProvider.SENTIMENT_ARTICLE_SAMPLE
-    assert GdeltNewsProvider.SENTIMENT_ARTICLE_SAMPLE <= 50
+    articles = asyncio.run(provider.search("AAPL"))
+
+    assert articles[0].url == "https://news.ycombinator.com/item?id=42"
 
 
-def test_gdelt_get_sentiment_handles_missing_timeline(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"articles": []}),
-        FakeHttpResponse({"timeline": []}),
-    )
-    provider = GdeltNewsProvider()
-    snapshot = provider.get_sentiment("AAPL")
-    assert snapshot.label == "neutral"
-    assert snapshot.score == 0.0
+def test_hackernews_search_applies_date_filters():
+    transport = RecordingTransport((200, {"hits": []}))
+    provider = HackerNewsProvider(client=_client(transport))
+
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    asyncio.run(provider.search("AAPL", start_date=start))
+
+    assert f"created_at_i>{int(start.timestamp())}" in transport.requests[0].url.params["numericFilters"]
+
+
+def test_hackernews_top_headlines_uses_front_page():
+    transport = RecordingTransport((200, {"hits": []}))
+    provider = HackerNewsProvider(client=_client(transport))
+
+    asyncio.run(provider.top_headlines())
+
+    assert transport.requests[0].url.params["tags"] == "front_page"
+
+
+# -- Error classification (shared _HttpNewsProvider behavior) --
+
+
+def test_http_429_raises_rate_limited():
+    transport = RecordingTransport((429, {}))
+    provider = HackerNewsProvider(client=_client(transport))
+    with pytest.raises(NewsProviderRateLimited):
+        asyncio.run(provider.search("AAPL"))
+
+
+def test_http_5xx_raises_unavailable():
+    transport = RecordingTransport((503, {}))
+    provider = HackerNewsProvider(client=_client(transport))
+    with pytest.raises(NewsProviderUnavailable):
+        asyncio.run(provider.search("AAPL"))
+
+
+def test_timeout_raises_news_provider_timeout():
+    transport = RecordingTransport(httpx.ReadTimeout("timed out"))
+    provider = HackerNewsProvider(client=_client(transport))
+    with pytest.raises(NewsProviderTimeout):
+        asyncio.run(provider.search("AAPL"))
+
+
+def test_connect_error_raises_unavailable():
+    transport = RecordingTransport(httpx.ConnectError("refused"))
+    provider = HackerNewsProvider(client=_client(transport))
+    with pytest.raises(NewsProviderUnavailable):
+        asyncio.run(provider.search("AAPL"))
+
+
+def test_http_4xx_raises_plain_provider_error():
+    transport = RecordingTransport((404, {}))
+    provider = HackerNewsProvider(client=_client(transport))
+    with pytest.raises(NewsProviderError) as excinfo:
+        asyncio.run(provider.search("AAPL"))
+    assert not isinstance(excinfo.value, (NewsProviderRateLimited, NewsProviderUnavailable))
+
+
+# -- Response cache --
+
+
+def test_identical_requests_are_served_from_cache_across_instances():
+    """Free tiers meter by the day and main.py rebuilds providers per
+    request, so a regenerate click must not re-spend quota."""
+    transport = RecordingTransport((200, {"hits": []}))
+
+    first = HackerNewsProvider(client=_client(transport))
+    asyncio.run(first.search("AAPL"))
+    second = HackerNewsProvider(client=_client(transport))
+    asyncio.run(second.search("AAPL"))
+
+    assert len(transport.requests) == 1
+
+
+def test_different_requests_are_not_cache_collided():
+    transport = RecordingTransport((200, {"hits": []}), (200, {"hits": []}))
+    provider = HackerNewsProvider(client=_client(transport))
+
+    asyncio.run(provider.search("AAPL"))
+    asyncio.run(provider.search("MSFT"))
+
+    assert len(transport.requests) == 2
+
+
+# -- health() --
+
+
+def test_health_reports_healthy_with_latency():
+    transport = RecordingTransport((200, {"hits": []}))
+    provider = HackerNewsProvider(client=_client(transport))
+
+    health = asyncio.run(provider.health())
+
+    assert health.healthy is True
+    assert health.provider == "Hacker News"
+    assert health.latency_ms is not None
+
+
+def test_health_reports_unhealthy_instead_of_raising():
+    transport = RecordingTransport((503, {}))
+    provider = HackerNewsProvider(client=_client(transport))
+
+    health = asyncio.run(provider.health())
+
+    assert health.healthy is False
+    assert "unavailable" in health.detail.lower()
 
 
 # -- NewsProviderRouter --
 
 
-class _FakeNewsClient(NewsProvider):
-    def __init__(self, articles=None, sentiment=None, error=None):
-        self._articles = articles
-        self._sentiment = sentiment
+class _StubNewsProvider(NewsProvider):
+    def __init__(self, articles=None, error=None, name="stub"):
+        self._articles = articles or []
         self._error = error
+        self._name = name
 
-    def get_company_news(self, ticker, limit=20):
+    async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
         if self._error is not None:
             raise self._error
-        return self._articles or []
+        return self._articles
 
-    def get_market_news(self, limit=20):
+    async def top_headlines(self, category=None, limit=20):
         if self._error is not None:
             raise self._error
-        return self._articles or []
+        return self._articles
 
-    def get_sentiment(self, ticker):
-        if self._error is not None:
-            raise self._error
-        return self._sentiment
+    async def health(self):
+        from agentic_options_reporter.data.news import ProviderHealth
+
+        return ProviderHealth(
+            provider=self._name,
+            healthy=self._error is None,
+            detail="" if self._error is None else str(self._error),
+            checked_at=datetime.now(timezone.utc),
+        )
 
 
-def test_news_provider_router_rejects_empty_client_list():
+def _article() -> NewsArticle:
+    return NewsArticle(
+        headline="x", source="s", url="u", published_at=datetime.now(timezone.utc)
+    )
+
+
+def test_router_rejects_empty_client_list():
     with pytest.raises(NewsProviderError):
         NewsProviderRouter([])
 
 
-def test_news_provider_router_falls_through_on_unsupported_sentiment():
-    from agentic_options_reporter.models.schemas import SentimentSnapshot
+def test_router_returns_first_success():
+    first = _StubNewsProvider(articles=[_article()])
+    second = _StubNewsProvider(articles=[])
+    router = NewsProviderRouter([("first", first), ("second", second)])
 
-    unsupported = _FakeNewsClient(error=NewsProviderUnsupported("no sentiment"))
-    supported = _FakeNewsClient(
-        sentiment=SentimentSnapshot(ticker="AAPL", score=0.5, label="bullish", article_count=3)
-    )
-    router = NewsProviderRouter([("first", unsupported), ("second", supported)])
+    articles = asyncio.run(router.search("AAPL"))
 
-    result = router.get_sentiment("AAPL")
-
-    assert result.label == "bullish"
+    assert len(articles) == 1
 
 
-def test_news_provider_router_provider_names():
-    router = NewsProviderRouter([("a", _FakeNewsClient()), ("b", _FakeNewsClient())])
-    assert router.provider_names == ["a", "b"]
+def test_router_falls_through_on_retryable_error():
+    first = _StubNewsProvider(error=NewsProviderRateLimited("429"))
+    second = _StubNewsProvider(articles=[_article()])
+    router = NewsProviderRouter([("first", first), ("second", second)])
+
+    articles = asyncio.run(router.search("AAPL"))
+
+    assert len(articles) == 1
 
 
-def test_build_news_provider_skips_unconfigured_and_includes_gdelt(monkeypatch):
-    for var in ("FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "NEWSAPI_API_KEY"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.delenv("AOR_NEWS_PROVIDER_FALLBACK_ORDER", raising=False)
+def test_router_raises_with_all_failures_when_every_provider_fails():
+    first = _StubNewsProvider(error=NewsProviderRateLimited("429"))
+    second = _StubNewsProvider(error=NewsProviderUnavailable("down"))
+    router = NewsProviderRouter([("first", first), ("second", second)])
+
+    with pytest.raises(NewsProviderError, match="first:.*429.*second:.*down"):
+        asyncio.run(router.search("AAPL"))
+
+
+def test_router_health_aggregates_and_is_healthy_if_any_provider_is():
+    healthy = _StubNewsProvider(name="up")
+    unhealthy = _StubNewsProvider(error=NewsProviderUnavailable("down"), name="down")
+    router = NewsProviderRouter([("up", healthy), ("down", unhealthy)])
+
+    health = asyncio.run(router.health())
+
+    assert health.healthy is True
+    assert "up: ok" in health.detail
+    assert "down" in health.detail
+
+
+# -- build_news_provider --
+
+
+def test_build_news_provider_includes_only_configured_plus_keyless():
+    provider = build_news_provider()
+    assert provider.provider_names == ["hackernews"]
+
+
+def test_build_news_provider_orders_configured_providers(monkeypatch):
+    monkeypatch.setenv("FINNHUB_API_KEY", "test-key")
+    monkeypatch.setenv("GUARDIAN_API_KEY", "test-key")
 
     provider = build_news_provider()
 
-    assert isinstance(provider, NewsProviderRouter)
-    assert provider.provider_names == ["gdelt"]
+    assert provider.provider_names == ["finnhub", "guardian", "hackernews"]
 
 
 def test_build_news_provider_respects_fallback_order_env_var(monkeypatch):
     monkeypatch.setenv("FINNHUB_API_KEY", "test-key")
-    monkeypatch.setenv("NEWSAPI_API_KEY", "test-key")
-    monkeypatch.setenv("AOR_NEWS_PROVIDER_FALLBACK_ORDER", "newsapi,finnhub")
+    monkeypatch.setenv("GNEWS_API_KEY", "test-key")
+    monkeypatch.setenv("AOR_NEWS_PROVIDER_FALLBACK_ORDER", "gnews,finnhub")
 
     provider = build_news_provider()
 
-    assert provider.provider_names == ["newsapi", "finnhub"]
+    assert provider.provider_names == ["gnews", "finnhub"]

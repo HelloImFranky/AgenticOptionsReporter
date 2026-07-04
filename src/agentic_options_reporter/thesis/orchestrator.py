@@ -9,11 +9,12 @@ options_strategy, then investment_thesis, and assembles the result.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from agentic_options_reporter.data.financial_provider import FinancialProvider, FinancialProviderError
 from agentic_options_reporter.data.macro_provider import MacroProvider, MacroProviderError
-from agentic_options_reporter.data.news_provider import NewsProvider, NewsProviderError
+from agentic_options_reporter.data.news import NewsProvider, NewsProviderError
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
     AnalysisResult,
@@ -93,11 +94,10 @@ def run_thesis_pipeline(
     if news_provider is not None:
         ticker = analysis_result.symbol
         try:
-            news_finding = news_research.run(
-                llm_client,
-                news_provider.get_company_news(ticker),
-                news_provider.get_sentiment(ticker),
-            )
+            # NewsProvider is async (specs/providers.yaml); this pipeline is
+            # sync, so bridge with a private event loop for the fetch.
+            articles = asyncio.run(news_provider.search(ticker))
+            news_finding = news_research.run(llm_client, articles)
         except NewsProviderError as exc:
             pipeline_warnings.append(f"news_research: provider failed during the run — {exc}")
 
