@@ -19,17 +19,23 @@ from agentic_options_reporter.frontend.formatting import (
     CANDIDATE_COLUMNS,
     RUN_COLUMNS,
     candidates_to_rows,
+    cash_flow_tone,
+    company_health_tone,
     consensus_tone,
     format_indicator_summary,
     format_recommendation,
     format_trend_summary,
     format_volume_summary,
+    growth_tone,
     macro_regime_tone,
+    profitability_tone,
+    quant_score_tone,
     recommendation_tone,
     risk_level_tone,
     runs_to_rows,
     trend_tone,
 )
+from agentic_options_reporter.frontend.report_pdf import build_report_pdf
 
 _SEED_COLOR = ft.Colors.INDIGO
 
@@ -68,6 +74,29 @@ def _chip(text: str) -> ft.Container:
         border_radius=8,
         padding=ft.padding.symmetric(vertical=4, horizontal=10),
     )
+
+
+def _toned_chip(text: str, tone: str) -> ft.Container:
+    """A chip carrying semantic tone colour — a solid tinted pill with white
+    text, so a finding's value (e.g. Growth: accelerating) reads its own
+    tone the way the other agent sections' badges do."""
+    color, _ = _tone_colors(tone)
+    return ft.Container(
+        content=ft.Text(text, size=12, weight=ft.FontWeight.W_600, color=ft.Colors.WHITE),
+        bgcolor=color,
+        border_radius=8,
+        padding=ft.padding.symmetric(vertical=4, horizontal=10),
+    )
+
+
+def _fill_pill(badge: ft.Container, text: str, tone: str) -> None:
+    """Populate a placeholder container as a solid tone-coloured headline
+    pill, matching the leading badges used across the agent sections."""
+    badge.content = ft.Text(text, size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE)
+    badge.bgcolor = _tone_colors(tone)[0]
+    badge.border_radius = 20
+    badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+    badge.visible = True
 
 
 def _bullet_list(items: list[str]) -> ft.Column:
@@ -212,6 +241,9 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
 
     current_run_id: dict[str, int | None] = {"value": None}
     last_recommendation: dict[str, object] = {"action": "—", "confidence": 0.0}
+    # Raw payloads retained for the PDF export: the last analysis result and,
+    # once generated, the investment-thesis result. Rebuilt on each run.
+    report_state: dict[str, object | None] = {"analysis": None, "thesis": None}
 
     progress = ft.ProgressRing(visible=False, width=18, height=18, stroke_width=2)
     analyze_button = ft.ElevatedButton(
@@ -395,6 +427,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
 
     def _render_result(result: dict) -> None:
         current_run_id["value"] = result["run_id"]
+        report_state["analysis"] = result
         recommendation = result["recommendation"]
         last_recommendation["action"] = recommendation.get("action", "—")
         last_recommendation["confidence"] = recommendation.get("confidence") or 0.0
@@ -562,6 +595,58 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
     final_action_badge = ft.Container(visible=False)
     final_consensus_badge = ft.Container(visible=False)
     final_confidence_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+
+    download_pdf_button = ft.OutlinedButton(
+        "Download PDF",
+        icon=ft.Icons.PICTURE_AS_PDF_OUTLINED,
+        disabled=True,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+    )
+
+    def _assemble_report() -> dict:
+        """Fold the retained analysis + thesis payloads into the single dict
+        build_report_pdf expects."""
+        analysis = report_state.get("analysis") or {}
+        return {
+            "symbol": analysis.get("symbol"),
+            "generated_at": analysis.get("generated_at"),
+            "recommendation": analysis.get("recommendation"),
+            "trend": analysis.get("trend"),
+            "volume": analysis.get("volume"),
+            "indicators": analysis.get("indicators"),
+            "candidates": analysis.get("candidates"),
+            "thesis": report_state.get("thesis"),
+        }
+
+    def _on_pdf_save_result(e: ft.FilePickerResultEvent) -> None:
+        if not e.path:  # dialog cancelled
+            return
+        path = e.path if e.path.lower().endswith(".pdf") else f"{e.path}.pdf"
+        try:
+            pdf_bytes = build_report_pdf(_assemble_report())
+            with open(path, "wb") as handle:
+                handle.write(pdf_bytes)
+        except Exception as exc:  # noqa: BLE001 - surface any build/write failure to the user
+            thesis_error_banner.content.controls[1].value = f"Could not save PDF: {exc}"
+            thesis_error_banner.visible = True
+            page.update()
+            return
+        page.open(ft.SnackBar(ft.Text(f"Report saved to {path}")))
+
+    pdf_file_picker = ft.FilePicker(on_result=_on_pdf_save_result)
+    page.overlay.append(pdf_file_picker)
+
+    def _download_pdf(_: ft.ControlEvent) -> None:
+        analysis = report_state.get("analysis") or {}
+        symbol = str(analysis.get("symbol") or "report")
+        pdf_file_picker.save_file(
+            dialog_title="Save analysis report",
+            file_name=f"{symbol}_options_report.pdf",
+            allowed_extensions=["pdf"],
+        )
+
+    download_pdf_button.on_click = _download_pdf
+
     final_output_card = ft.Column(
         [
             _card(
@@ -571,21 +656,28 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
                     spacing=10,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+                ft.Row([download_pdf_button], spacing=10),
             ),
         ],
         visible=False,
     )
 
     # -- agent conversation: sequential message transcript --
+    quant_score_badge = ft.Container(visible=False)
     quant_narrative_text = ft.Text("", size=13, selectable=True)
     quant_factors_row = ft.Row([], wrap=True, spacing=6)
-    quant_message_body = ft.Column([quant_narrative_text, quant_factors_row], spacing=8, tight=True)
+    quant_message_body = ft.Column(
+        [quant_score_badge, quant_narrative_text, quant_factors_row], spacing=8, tight=True
+    )
 
+    financial_health_badge = ft.Container(visible=False)
     financial_chips_row = ft.Row([], wrap=True, spacing=6)
     financial_analyst_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, italic=True)
     financial_narrative_text = ft.Text("", size=13, selectable=True)
     financial_message_body = ft.Column(
-        [financial_chips_row, financial_analyst_text, financial_narrative_text], spacing=6, tight=True
+        [financial_health_badge, financial_chips_row, financial_analyst_text, financial_narrative_text],
+        spacing=6,
+        tight=True,
     )
 
     news_sentiment_badge = ft.Container(visible=False)
@@ -668,6 +760,9 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         thesis_button.text = "Generate investment thesis"
         final_output_card.visible = False
         conversation_card.visible = False
+        # A fresh analysis invalidates any thesis captured for the PDF export.
+        report_state["thesis"] = None
+        download_pdf_button.disabled = True
 
     def generate_thesis(_: ft.ControlEvent) -> None:
         if current_run_id["value"] is None:
@@ -738,22 +833,34 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         final_output_card.visible = True
 
         # -- conversation transcript --
+        quant_score = quant.get("overall_score") or 0.0
+        _fill_pill(quant_score_badge, f"SCORE {quant_score:.0f}/100", quant_score_tone(quant_score))
         quant_narrative_text.value = quant.get("narrative", "")
         quant_factors_row.controls = [_chip(factor) for factor in quant.get("key_factors", [])]
 
         if financial is not None:
+            _fill_pill(
+                financial_health_badge,
+                f"HEALTH: {financial.get('company_health', '—').upper()}",
+                company_health_tone(financial.get("company_health", "")),
+            )
             financial_chips_row.controls = [
-                _chip(f"Health: {financial.get('company_health', '—')}"),
-                _chip(f"Growth: {financial.get('growth', '—')}"),
-                _chip(f"Profitability: {financial.get('profitability', '—')}"),
-                _chip(f"Cash flow: {financial.get('cash_flow', '—')}"),
+                _toned_chip(f"Growth: {financial.get('growth', '—')}", growth_tone(financial.get("growth", ""))),
+                _toned_chip(
+                    f"Profitability: {financial.get('profitability', '—')}",
+                    profitability_tone(financial.get("profitability", "")),
+                ),
+                _toned_chip(
+                    f"Cash flow: {financial.get('cash_flow', '—')}", cash_flow_tone(financial.get("cash_flow", ""))
+                ),
             ]
             financial_analyst_text.value = f"Analyst consensus: {financial.get('analyst_consensus', '—')}"
             financial_narrative_text.value = financial.get("narrative", "")
             financial_message_body.controls = [
-                financial_chips_row, financial_analyst_text, financial_narrative_text
+                financial_health_badge, financial_chips_row, financial_analyst_text, financial_narrative_text
             ]
         else:
+            financial_health_badge.visible = False
             financial_chips_row.controls = []
             financial_analyst_text.value = ""
             financial_narrative_text.value = ""
@@ -883,6 +990,10 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         thesis_text.value = investment_thesis.get("thesis", "")
 
         conversation_card.visible = True
+
+        # Retain the payload and unlock the PDF export now that a full run exists.
+        report_state["thesis"] = result
+        download_pdf_button.disabled = False
 
         thesis_progress.visible = False
         thesis_button.disabled = False

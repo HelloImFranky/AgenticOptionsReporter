@@ -27,6 +27,7 @@ openai = "^2.0.0"
 alembic = "^1.18.5"
 google-genai = "^2.10.0"
 httpx = "^0.28.1"
+reportlab = "^5.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.2"

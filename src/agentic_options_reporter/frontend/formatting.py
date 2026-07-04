@@ -62,6 +62,33 @@ _MACRO_REGIME_TONES = {
     "neutral": TONE_NEUTRAL,
 }
 
+# Financial-research finding tones. Mirrors the enums in
+# specs/api.yaml (CompanyHealth/GrowthTrend/ProfitabilityLevel/CashFlowState):
+# the healthiest value reads success, the weakest danger, the middle neutral.
+_COMPANY_HEALTH_TONES = {
+    "strong": TONE_SUCCESS,
+    "stable": TONE_NEUTRAL,
+    "weak": TONE_DANGER,
+}
+
+_GROWTH_TONES = {
+    "accelerating": TONE_SUCCESS,
+    "steady": TONE_NEUTRAL,
+    "decelerating": TONE_DANGER,
+}
+
+_PROFITABILITY_TONES = {
+    "high": TONE_SUCCESS,
+    "moderate": TONE_NEUTRAL,
+    "low": TONE_DANGER,
+}
+
+_CASH_FLOW_TONES = {
+    "positive": TONE_SUCCESS,
+    "neutral": TONE_NEUTRAL,
+    "negative": TONE_DANGER,
+}
+
 
 def recommendation_tone(action: str) -> str:
     return _RECOMMENDATION_TONES.get(action, TONE_NEUTRAL)
@@ -81,6 +108,33 @@ def risk_level_tone(risk_level: str) -> str:
 
 def macro_regime_tone(regime: str) -> str:
     return _MACRO_REGIME_TONES.get(regime, TONE_NEUTRAL)
+
+
+def company_health_tone(value: str) -> str:
+    return _COMPANY_HEALTH_TONES.get(value, TONE_NEUTRAL)
+
+
+def growth_tone(value: str) -> str:
+    return _GROWTH_TONES.get(value, TONE_NEUTRAL)
+
+
+def profitability_tone(value: str) -> str:
+    return _PROFITABILITY_TONES.get(value, TONE_NEUTRAL)
+
+
+def cash_flow_tone(value: str) -> str:
+    return _CASH_FLOW_TONES.get(value, TONE_NEUTRAL)
+
+
+def quant_score_tone(score: float) -> str:
+    """Tone for the quant overall_score (0-100), aligned with the
+    recommendation thresholds in specs/scoring.yaml: BUY/STRONG_BUY (>=60)
+    reads success, HOLD (>=40) warning, AVOID danger."""
+    if score >= 60:
+        return TONE_SUCCESS
+    if score >= 40:
+        return TONE_WARNING
+    return TONE_DANGER
 
 
 def format_recommendation(recommendation: dict[str, Any]) -> str:
