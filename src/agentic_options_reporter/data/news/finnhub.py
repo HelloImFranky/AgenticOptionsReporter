@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from agentic_options_reporter.data.news.base import _HttpNewsProvider
+from agentic_options_reporter.data.news.base import COMPANY_NEWS, TOP_HEADLINES, _HttpNewsProvider
 from agentic_options_reporter.models.schemas import NewsArticle
 
 _DEFAULT_SEARCH_WINDOW_DAYS = 14
@@ -22,6 +22,9 @@ class FinnhubNewsProvider(_HttpNewsProvider):
     BASE_URL = "https://finnhub.io/api/v1"
     PROVIDER_LABEL = "Finnhub"
     API_KEY_ENV_VAR = "FINNHUB_API_KEY"
+
+    # search is ticker-aware (/company-news), not general keyword search.
+    CAPABILITIES = frozenset({COMPANY_NEWS, TOP_HEADLINES})
 
     def _to_article(self, item: dict[str, Any]) -> NewsArticle:
         return NewsArticle(

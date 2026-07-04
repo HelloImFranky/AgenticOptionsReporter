@@ -55,6 +55,12 @@ _ALL_RESPONSES_WITH_RESEARCH = {
 
 
 class FakeFinancialProvider(FinancialProvider):
+    _DATASETS = frozenset({"profile", "statements", "ratios", "analyst_estimates"})
+
+    @property
+    def supported_datasets(self) -> frozenset[str]:
+        return self._DATASETS
+
     async def get_company_profile(self, ticker: str) -> CompanyProfile:
         return CompanyProfile(
             ticker=ticker, name="Test Corp", sector="Technology", industry="Software",
@@ -86,6 +92,10 @@ class FakeFinancialProvider(FinancialProvider):
 
 
 class FakeNewsProvider(NewsProvider):
+    @property
+    def capabilities(self):
+        return frozenset({"company_news", "top_headlines"})
+
     async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
         return [
             NewsArticle(
@@ -218,6 +228,39 @@ def test_pipeline_runs_only_configured_research_agents():
     assert thesis.macro_research is None
 
 
+class PartialFinancialProvider(FakeFinancialProvider):
+    """A Finnhub-style provider: no statements. get_financial_statements
+    must never be called (the router filters it out)."""
+
+    _DATASETS = frozenset({"profile", "ratios", "analyst_estimates"})
+
+    async def get_financial_statements(self, ticker):
+        raise AssertionError("router must not call an unadvertised dataset")
+
+
+def test_financial_research_runs_with_partial_dataset_coverage():
+    """Finnhub-only financial: profile/ratios/estimates present, statements
+    absent — the agent still produces a finding over what's available."""
+    llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(result, llm, financial_provider=PartialFinancialProvider())
+
+    assert thesis.financial_research is not None
+    assert thesis.financial_research.company_health == "strong"
+    assert thesis.financial_research.analyst_consensus == "Buy"
+    assert thesis.pipeline_warnings == []
+    # The prompt must reflect the missing statements section, not fabricate it.
+    _, user_prompt = next(
+        (c for c in reversed(llm.calls) if "financial research analyst" in c[0]), (None, "")
+    )
+    assert "Financial statements: not available." in user_prompt
+
+
 def test_pipeline_records_no_warnings_when_research_succeeds():
     llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
     candidate = _candidate()
@@ -233,6 +276,10 @@ def test_pipeline_records_no_warnings_when_research_succeeds():
 
 class RateLimitedNewsProvider(NewsProvider):
     """Simulates a provider that IS configured but 429s at call time."""
+
+    @property
+    def capabilities(self):
+        return frozenset({"company_news", "top_headlines"})
 
     async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
         from agentic_options_reporter.data.news import NewsProviderRateLimited

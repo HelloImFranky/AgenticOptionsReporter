@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from agentic_options_reporter.data.news.alphavantage import AlphaVantageNewsProvider
 from agentic_options_reporter.data.news.base import (
+    COMPANY_NEWS,
     NewsProvider,
     NewsProviderError,
     ProviderHealth,
@@ -18,7 +19,10 @@ from agentic_options_reporter.data.news.guardian import GuardianNewsProvider
 from agentic_options_reporter.data.news.hackernews import HackerNewsProvider
 from agentic_options_reporter.data.news.newsapi import NewsApiOrgProvider
 from agentic_options_reporter.data.news.newsdata import NewsDataProvider
-from agentic_options_reporter.data.provider_router import acall_with_fallback
+from agentic_options_reporter.data.provider_router import (
+    acall_with_fallback,
+    prioritize_supporting,
+)
 from agentic_options_reporter.models.schemas import NewsArticle
 
 
@@ -41,6 +45,11 @@ class NewsProviderRouter(NewsProvider):
     def provider_names(self) -> list[str]:
         return [name for name, _ in self._clients]
 
+    @property
+    def capabilities(self) -> frozenset[str]:
+        """Union of every configured adapter's capabilities."""
+        return frozenset().union(*(client.capabilities for _, client in self._clients))
+
     async def search(
         self,
         query: str,
@@ -49,8 +58,13 @@ class NewsProviderRouter(NewsProvider):
         language: str = "en",
         limit: int = 20,
     ) -> list[NewsArticle]:
+        # `search` treats the query as a ticker/company. Prefer providers
+        # that advertise COMPANY_NEWS, but keep general-news providers as a
+        # fallback (they can still surface a keyword match) — a SOFT
+        # priority, not a hard filter (see data.provider_router).
+        candidates = prioritize_supporting(self._clients, COMPANY_NEWS)
         return await acall_with_fallback(
-            self._clients,
+            candidates,
             "search",
             NewsProviderError,
             query,

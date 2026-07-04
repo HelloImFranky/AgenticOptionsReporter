@@ -11,7 +11,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from agentic_options_reporter.data.news.base import NewsProviderRateLimited, _HttpNewsProvider
+from agentic_options_reporter.data.news.base import (
+    COMPANY_NEWS,
+    TOP_HEADLINES,
+    NewsProviderRateLimited,
+    _HttpNewsProvider,
+)
 from agentic_options_reporter.models.schemas import NewsArticle
 
 
@@ -19,6 +24,9 @@ class AlphaVantageNewsProvider(_HttpNewsProvider):
     BASE_URL = "https://www.alphavantage.co/query"
     PROVIDER_LABEL = "Alpha Vantage"
     API_KEY_ENV_VAR = "ALPHA_VANTAGE_API_KEY"
+
+    # search is ticker-aware (NEWS_SENTIMENT&tickers=), not general search.
+    CAPABILITIES = frozenset({COMPANY_NEWS, TOP_HEADLINES})
 
     def _check_payload(self, payload: Any) -> None:
         if isinstance(payload, dict) and ("Information" in payload or "Note" in payload):

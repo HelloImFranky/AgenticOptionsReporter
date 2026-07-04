@@ -105,17 +105,23 @@ agents:
     requires_provider: financial_provider
     input:
       - CompanyProfile
-      - FinancialStatementSummary
-      - FinancialRatios
-      - AnalystEstimates
-      # All four fetched concurrently from the async FinancialProvider
-      # via asyncio.gather, bridged with asyncio.run in the orchestrator.
+      - FinancialStatementSummary | null
+      - FinancialRatios | null
+      - AnalystEstimates | null
+      # Fetched concurrently from the async FinancialProvider via
+      # asyncio.gather, bridged with asyncio.run in the orchestrator. Only
+      # the datasets the capability router serves are fetched (see
+      # specs/providers.yaml FinancialProvider capability_model); any the
+      # deployment can't serve arrive as null.
     output: FinancialResearchFinding
     contract: >
       Interprets provider-supplied fundamentals (all of which are
       FinancialProvider facts, never computed by this codebase) into
       qualitative company_health/growth/profitability/cash_flow labels
       plus a narrative and the analyst consensus passed through verbatim.
+      Reasons over whatever datasets are present — a deployment whose only
+      financial source is Finnhub sees no raw statements (rendered "not
+      available" in the prompt) — and never fabricates a missing figure.
       Skipped entirely (null finding) if financial_provider is null.
 
   - name: news_research
@@ -124,7 +130,7 @@ agents:
     calls_llm: true
     requires_provider: news_provider
     input:
-      - list[NewsArticle] (from NewsProvider.search(ticker) — async, bridged via asyncio.run in the orchestrator)
+      - list[NewsArticle] (from NewsProvider.search(ticker) — async, bridged via asyncio.run in the orchestrator; the router prioritizes company_news specialists but falls back to general-news providers, see specs/providers.yaml NewsProvider capability_model)
     output: NewsResearchFinding
     contract: >
       Summarizes recent news into a sentiment label, a narrative summary,

@@ -123,9 +123,32 @@ interfaces:
       with asyncio.run() at the news_research step
       (thesis/orchestrator.py).
     methods:
+      capabilities -> frozenset[str]   # the NEWS_CAPABILITIES this provider advertises
+      supports(capability: str) -> bool
       search(query: str, start_date: datetime | null = null, end_date: datetime | null = null, language: str = "en", limit: int = 20) -> list[NewsArticle]
       top_headlines(category: str | null = null, limit: int = 20) -> list[NewsArticle]
       health() -> ProviderHealth   # {provider, healthy, latency_ms, detail, checked_at}; probes the source, never raises
+    capability_model: >
+      Providers declare capabilities (data.news.base.NEWS_CAPABILITIES:
+      company_news, general_news, top_headlines). Unlike macro/financial,
+      the router PRIORITIZES rather than FILTERS by capability
+      (data.provider_router.prioritize_supporting): `search` treats the
+      query as a ticker/company, so it prefers company_news specialists
+      (Finnhub, Alpha Vantage — ticker-aware endpoints) but KEEPS
+      general-news providers as a valid fallback (they can still surface a
+      keyword match). This is the SOFT counterpart to macro's hard
+      filter_supporting — a general-news source genuinely can answer a
+      ticker query (just less precisely), whereas World Bank genuinely has
+      no policy rate. The router's own `capabilities` is the union across
+      configured adapters.
+    provider_capabilities:
+      FinnhubNewsProvider: [company_news, top_headlines]        # /company-news is ticker-aware
+      AlphaVantageNewsProvider: [company_news, top_headlines]   # NEWS_SENTIMENT&tickers= is ticker-aware
+      NewsDataProvider: [general_news, top_headlines]
+      GuardianNewsProvider: [general_news, top_headlines]
+      GNewsProvider: [general_news, top_headlines]
+      NewsApiOrgProvider: [general_news, top_headlines]
+      HackerNewsProvider: [general_news, top_headlines]
     shared_adapter_behavior: >
       All HTTP adapters extend _HttpNewsProvider (base.py): API-key
       handling, httpx-error normalization into the NewsProviderError
@@ -234,11 +257,32 @@ interfaces:
       financial_research step, fetching all four datasets CONCURRENTLY
       via asyncio.gather (thesis/orchestrator.py).
     methods:
+      supported_datasets -> frozenset[str]   # the FINANCIAL_DATASETS this provider serves
+      supports(dataset: str) -> bool
       get_company_profile(ticker: str) -> CompanyProfile
       get_financial_statements(ticker: str) -> FinancialStatementSummary
       get_ratios(ticker: str) -> FinancialRatios
       get_analyst_estimates(ticker: str) -> AnalystEstimates
       health() -> ProviderHealth   # probes get_company_profile("AAPL"); never raises
+    capability_model: >
+      Providers declare which datasets they serve
+      (data.financial.base.FINANCIAL_DATASETS: profile, statements,
+      ratios, analyst_estimates). Like macro, the router FILTERS (hard)
+      by capability (data.provider_router.filter_supporting): a provider
+      that doesn't advertise a dataset is never asked for it — Finnhub's
+      free tier has no statements, so a statements request routes only to
+      FMP/Alpha Vantage. Per-dataset priority override
+      AOR_FINANCIAL_PRIORITY_<DATASET> reorders candidates for one
+      dataset (mirrors macro's AOR_MACRO_PRIORITY_<METRIC>). The
+      orchestrator fetches only the datasets the router supports; a
+      dataset no configured provider serves is simply absent (the
+      financial_research agent renders it "not available" and reasons over
+      the rest), not an error. The router's supported_datasets is the
+      union across configured adapters.
+    provider_capabilities:
+      FmpFinancialProvider: [profile, statements, ratios, analyst_estimates]        # full coverage
+      AlphaVantageFinancialProvider: [profile, statements, ratios, analyst_estimates]
+      FinnhubFinancialProvider: [profile, ratios, analyst_estimates]                # no statements on the free tier
     implementations:
       - name: FmpFinancialProvider
         api_key_env_var: FMP_API_KEY

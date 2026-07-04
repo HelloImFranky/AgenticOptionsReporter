@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+from agentic_options_reporter.data import financial as financial_data
 from agentic_options_reporter.data.financial import FinancialProvider, FinancialProviderError
 from agentic_options_reporter.data.macro import (
     DEFAULT_MACRO_METRICS,
@@ -37,11 +38,21 @@ from agentic_options_reporter.thesis.llm_client import LlmClient
 
 
 async def _fetch_financial_inputs(provider: FinancialProvider, ticker: str) -> tuple:
+    """Fetch the company profile (the required anchor) plus whichever of
+    statements/ratios/estimates the configured providers actually serve,
+    concurrently. A dataset no provider covers (e.g. statements when only
+    Finnhub is configured) comes back None and the agent omits it."""
+
+    async def optional(dataset: str, method: str):
+        if not provider.supports(dataset):
+            return None
+        return await getattr(provider, method)(ticker)
+
     return await asyncio.gather(
         provider.get_company_profile(ticker),
-        provider.get_financial_statements(ticker),
-        provider.get_ratios(ticker),
-        provider.get_analyst_estimates(ticker),
+        optional(financial_data.STATEMENTS, "get_financial_statements"),
+        optional(financial_data.RATIOS, "get_ratios"),
+        optional(financial_data.ANALYST_ESTIMATES, "get_analyst_estimates"),
     )
 
 

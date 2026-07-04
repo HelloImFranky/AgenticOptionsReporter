@@ -17,7 +17,7 @@ from agentic_options_reporter.data.financial import (
     FmpFinancialProvider,
     build_financial_provider,
 )
-from agentic_options_reporter.models.schemas import CompanyProfile
+from agentic_options_reporter.models.schemas import CompanyProfile, FinancialStatementSummary
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +35,8 @@ def _clear_key_env_vars(monkeypatch):
     for var in ("FMP_API_KEY", "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.delenv("AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER", raising=False)
+    for dataset in ("PROFILE", "STATEMENTS", "RATIOS", "ANALYST_ESTIMATES"):
+        monkeypatch.delenv(f"AOR_FINANCIAL_PRIORITY_{dataset}", raising=False)
 
 
 class RecordingTransport:
@@ -216,10 +218,25 @@ def test_finnhub_get_analyst_estimates_handles_empty_response():
     assert estimates.num_analysts == 0
 
 
-def test_finnhub_get_financial_statements_is_unsupported():
+def test_finnhub_does_not_advertise_statements():
     provider = FinnhubFinancialProvider(api_key="test-key")
+    assert provider.supported_datasets == frozenset({"profile", "ratios", "analyst_estimates"})
+    assert provider.supports("statements") is False
+    # The method is still a defensive guard for a direct call.
     with pytest.raises(FinancialProviderUnsupported):
         asyncio.run(provider.get_financial_statements("AAPL"))
+
+
+@pytest.mark.parametrize(
+    "provider_cls,expected",
+    [
+        (FmpFinancialProvider, {"profile", "statements", "ratios", "analyst_estimates"}),
+        (AlphaVantageFinancialProvider, {"profile", "statements", "ratios", "analyst_estimates"}),
+    ],
+)
+def test_full_coverage_providers_advertise_all_datasets(provider_cls, expected):
+    provider = provider_cls(api_key="test-key")
+    assert provider.supported_datasets == frozenset(expected)
 
 
 # -- Alpha Vantage --
@@ -335,20 +352,29 @@ def test_health_reports_unhealthy_instead_of_raising():
 
 
 class _StubFinancialProvider(FinancialProvider):
-    def __init__(self, profile=None, error=None, name="stub"):
+    def __init__(self, datasets, profile=None, statements=None, error=None, name="stub"):
+        self._datasets = frozenset(datasets)
         self._profile = profile
+        self._statements = statements
         self._error = error
         self._name = name
+        self.calls: list[str] = []
+
+    @property
+    def supported_datasets(self):
+        return self._datasets
 
     async def get_company_profile(self, ticker):
+        self.calls.append("get_company_profile")
         if self._error is not None:
             raise self._error
         return self._profile
 
     async def get_financial_statements(self, ticker):
+        self.calls.append("get_financial_statements")
         if self._error is not None:
             raise self._error
-        raise FinancialProviderUnsupported("stub has no statements")
+        return self._statements
 
     async def get_ratios(self, ticker):
         raise NotImplementedError
@@ -372,24 +398,52 @@ def test_router_rejects_empty_client_list():
         FinancialProviderRouter([])
 
 
-def test_router_falls_through_on_unsupported_method():
-    """The Finnhub case: no statements on the free tier, but still used
-    for everything it does support."""
-    partial = _StubFinancialProvider(profile=CompanyProfile(ticker="AAPL", name="From partial"))
-    full = _StubFinancialProvider(profile=CompanyProfile(ticker="AAPL", name="From full"))
-    router = FinancialProviderRouter([("partial", partial), ("full", full)])
+def test_router_only_queries_providers_that_advertise_the_dataset():
+    """The Finnhub case: it doesn't advertise statements, so it's never
+    asked for them — only FMP (which does) is queried."""
+    finnhub = _StubFinancialProvider(
+        {"profile", "ratios", "analyst_estimates"},
+        profile=CompanyProfile(ticker="AAPL", name="From Finnhub"),
+        name="finnhub",
+    )
+    fmp = _StubFinancialProvider(
+        {"profile", "statements"},
+        profile=CompanyProfile(ticker="AAPL", name="From FMP"),
+        statements=FinancialStatementSummary(ticker="AAPL", period="2025"),
+        name="fmp",
+    )
+    router = FinancialProviderRouter([("finnhub", finnhub), ("fmp", fmp)])
 
-    profile = asyncio.run(router.get_company_profile("AAPL"))
-    assert profile.name == "From partial"
+    statements = asyncio.run(router.get_financial_statements("AAPL"))
 
-    with pytest.raises(FinancialProviderError, match="partial:.*full:"):
-        # both stubs raise Unsupported for statements → all-failed error
+    assert statements.period == "2025"
+    assert finnhub.calls == []  # never asked — it doesn't advertise statements
+
+
+def test_router_raises_unsupported_when_no_provider_serves_dataset():
+    finnhub = _StubFinancialProvider({"profile", "ratios"}, name="finnhub")
+    router = FinancialProviderRouter([("finnhub", finnhub)])
+
+    with pytest.raises(FinancialProviderUnsupported):
         asyncio.run(router.get_financial_statements("AAPL"))
 
 
+def test_router_supported_datasets_is_union():
+    finnhub = _StubFinancialProvider({"profile", "ratios", "analyst_estimates"})
+    fmp = _StubFinancialProvider({"profile", "statements"})
+    router = FinancialProviderRouter([("finnhub", finnhub), ("fmp", fmp)])
+    assert router.supported_datasets == frozenset(
+        {"profile", "statements", "ratios", "analyst_estimates"}
+    )
+
+
 def test_router_falls_through_on_rate_limit():
-    limited = _StubFinancialProvider(error=FinancialProviderRateLimited("429"))
-    healthy = _StubFinancialProvider(profile=CompanyProfile(ticker="AAPL", name="Apple Inc."))
+    limited = _StubFinancialProvider(
+        {"profile"}, error=FinancialProviderRateLimited("429"), name="limited"
+    )
+    healthy = _StubFinancialProvider(
+        {"profile"}, profile=CompanyProfile(ticker="AAPL", name="Apple Inc."), name="healthy"
+    )
     router = FinancialProviderRouter([("limited", limited), ("healthy", healthy)])
 
     profile = asyncio.run(router.get_company_profile("AAPL"))
@@ -397,9 +451,26 @@ def test_router_falls_through_on_rate_limit():
     assert profile.name == "Apple Inc."
 
 
+def test_router_applies_per_dataset_priority_override(monkeypatch):
+    monkeypatch.setenv("AOR_FINANCIAL_PRIORITY_PROFILE", "second,first")
+    first = _StubFinancialProvider(
+        {"profile"}, profile=CompanyProfile(ticker="AAPL", name="First"), name="first"
+    )
+    second = _StubFinancialProvider(
+        {"profile"}, profile=CompanyProfile(ticker="AAPL", name="Second"), name="second"
+    )
+    router = FinancialProviderRouter([("first", first), ("second", second)])
+
+    profile = asyncio.run(router.get_company_profile("AAPL"))
+
+    assert profile.name == "Second"
+
+
 def test_router_health_aggregates():
-    healthy = _StubFinancialProvider(name="up")
-    unhealthy = _StubFinancialProvider(error=FinancialProviderUnavailable("down"), name="down")
+    healthy = _StubFinancialProvider({"profile"}, name="up")
+    unhealthy = _StubFinancialProvider(
+        {"profile"}, error=FinancialProviderUnavailable("down"), name="down"
+    )
     router = FinancialProviderRouter([("up", healthy), ("down", unhealthy)])
 
     health = asyncio.run(router.health())
