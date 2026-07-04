@@ -129,6 +129,7 @@ def persist_thesis(session: Session, thesis_result: AgentThesisResult) -> None:
     financial = thesis_result.financial_research
     news = thesis_result.news_research
     macro = thesis_result.macro_research
+    catalyst = thesis_result.catalyst_research
     risk = thesis_result.risk_assessment
     strategy = thesis_result.strategy_suggestion
 
@@ -153,6 +154,11 @@ def persist_thesis(session: Session, thesis_result: AgentThesisResult) -> None:
             macro_regime=macro.regime if macro else None,
             macro_outlook=macro.outlook if macro else None,
             macro_summary=macro.summary if macro else None,
+            catalyst_net_bias=catalyst.net_bias if catalyst else None,
+            catalyst_summary=catalyst.summary if catalyst else None,
+            catalyst_items=(
+                [item.model_dump() for item in catalyst.catalysts] if catalyst else None
+            ),
             risk_level=risk.risk_level if risk else None,
             risk_concerns=risk.concerns if risk else None,
             risk_position_sizing_note=risk.position_sizing_note if risk else None,

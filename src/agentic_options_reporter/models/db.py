@@ -183,6 +183,13 @@ class AgentThesisRow(Base):
     macro_outlook: Mapped[str | None] = mapped_column(String, nullable=True)
     macro_summary: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # Catalyst research (news + SEC filings + macro). Null when none of
+    # those providers was configured. `catalyst_items` is the list of
+    # {title, category, horizon, direction, detail} dicts.
+    catalyst_net_bias: Mapped[str | None] = mapped_column(String, nullable=True)
+    catalyst_summary: Mapped[str | None] = mapped_column(String, nullable=True)
+    catalyst_items: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     risk_level: Mapped[str | None] = mapped_column(String, nullable=True)
     risk_concerns: Mapped[list | None] = mapped_column(JSON, nullable=True)
     risk_position_sizing_note: Mapped[str | None] = mapped_column(String, nullable=True)

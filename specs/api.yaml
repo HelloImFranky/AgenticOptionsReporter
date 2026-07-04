@@ -105,6 +105,7 @@ models:
     financial_research: FinancialResearchFinding | null
     news_research: NewsResearchFinding | null
     macro_research: MacroResearchFinding | null
+    catalyst_research: CatalystFinding | null
     risk_assessment: RiskAssessment | null
     strategy_suggestion: StrategySuggestion | null
     investment_thesis: InvestmentThesis
@@ -134,6 +135,18 @@ models:
     regime: str   # risk_on | risk_off | neutral
     outlook: str
     summary: str
+
+  CatalystItem:
+    title: str
+    category: str    # earnings | filing | news | macro | corporate_action | other
+    horizon: str     # recent | near_term | long_term | unknown
+    direction: str   # bullish | bearish | uncertain
+    detail: str
+
+  CatalystFinding:
+    catalysts: list[CatalystItem]
+    summary: str
+    net_bias: str   # bullish | bearish | neutral | mixed
 
   RiskAssessment:
     risk_level: str   # low | medium | high

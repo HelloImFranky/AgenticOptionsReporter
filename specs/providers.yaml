@@ -29,11 +29,14 @@ phase_2b_scope: >
   provider's outage, rate limit, or quota exhaustion no longer skips the
   whole research agent; the router falls over to the next configured
   implementation instead.
-deferred:
+shipped:
   - name: catalyst_agent
-    reason: >
-      Depends on NewsProvider + SECProvider + MacroProvider all being
-      wired up; deferred until those three have shipped and proven out.
+    note: >
+      The catalyst_research agent (specs/agents.yaml, phase_2b) combines
+      NewsProvider + SECProvider + MacroProvider into a structured list of
+      dateable catalysts; SECProvider was async-ified onto data.async_http
+      and wired into the pipeline for it.
+deferred:
   - name: additional_market_data_providers
     reason: >
       Alpha Vantage, Twelve Data remain unimplemented alternates to the
@@ -447,19 +450,36 @@ interfaces:
 
   SECProvider:
     module: agentic_options_reporter.data.sec_provider
+    interface_style: >
+      ASYNC, like news/financial/macro — SecEdgarProvider extends the
+      shared async-HTTP infrastructure in data.async_http (httpx-error
+      normalization into the SecProviderError hierarchy, class-level TTL
+      response cache, health probe). One keyless source and no failover
+      router (EDGAR is the sole free provider of the full filings index),
+      so this stays a single adapter module rather than a package. The
+      sync thesis pipeline bridges with asyncio.run() at the
+      catalyst_research step (thesis/orchestrator._fetch_catalyst_inputs).
     methods:
       get_recent_filings(ticker: str, limit: int = 10) -> list[SecFiling]
       get_10k(ticker: str) -> SecFiling | null
       get_10q(ticker: str) -> SecFiling | null
       get_8k(ticker: str) -> SecFiling | null
+      health() -> ProviderHealth   # probes the ticker->CIK map; never raises
     implementations:
       - name: SecEdgarProvider
         api_key_env_var: null   # SEC EDGAR is free and keyless
-        required_header: "User-Agent: <descriptive app name + contact email>, per SEC fair-access policy"
+        required_header: "User-Agent: <descriptive app name + contact email>, per SEC fair-access policy (SEC_EDGAR_USER_AGENT)"
         base_url: https://data.sec.gov
         endpoints:
-          ticker_to_cik_lookup: GET https://www.sec.gov/files/company_tickers.json
+          ticker_to_cik_lookup: GET https://www.sec.gov/files/company_tickers.json   # parsed map memoized on the instance
           get_recent_filings: GET /submissions/CIK{cik:0>10}.json
+        errors: >
+          httpx errors normalize into SecProviderError with retryable
+          subclasses SecProviderRateLimited/Timeout/Unavailable (the same
+          markers the other async adapters use), so a future
+          SECProviderRouter or catalyst fan-out can treat SEC failures
+          generically.
     note: >
-      Not yet wired into a router or agent (reserved for a future
-      Catalyst agent); only one implementation exists.
+      Wired into the catalyst_research agent (specs/agents.yaml) as the
+      filings stream; SEC EDGAR is the only implementation. Keyless, so it
+      is always available — the catalyst agent always has at least filings.

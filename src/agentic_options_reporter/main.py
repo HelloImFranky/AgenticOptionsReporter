@@ -21,11 +21,18 @@ from agentic_options_reporter.data.news import (
     NewsProviderError,
     build_news_provider,
 )
+from agentic_options_reporter.data.sec_provider import (
+    SECProvider,
+    SecProviderError,
+    build_sec_provider,
+)
 from agentic_options_reporter.models.db import AgentThesisRow, AnalysisRun
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
     AnalysisResult,
     AnalysisRunSummary,
+    CatalystFinding,
+    CatalystItem,
     FinancialResearchFinding,
     IndicatorSnapshot,
     InvestmentThesis,
@@ -117,6 +124,15 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
         if row.macro_regime is not None
         else None
     )
+    catalyst = (
+        CatalystFinding(
+            net_bias=row.catalyst_net_bias,
+            summary=row.catalyst_summary or "",
+            catalysts=[CatalystItem(**item) for item in (row.catalyst_items or [])],
+        )
+        if row.catalyst_net_bias is not None
+        else None
+    )
     risk = (
         RiskAssessment(
             risk_level=row.risk_level,
@@ -143,6 +159,7 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
         financial_research=financial,
         news_research=news,
         macro_research=macro,
+        catalyst_research=catalyst,
         risk_assessment=risk,
         strategy_suggestion=strategy,
         investment_thesis=InvestmentThesis(thesis=row.thesis, consensus=row.consensus),
@@ -168,6 +185,15 @@ def _optional_macro_provider() -> MacroProvider | None:
     try:
         return build_macro_provider()
     except MacroProviderError:
+        return None
+
+
+def _optional_sec_provider() -> SECProvider | None:
+    # SEC EDGAR is keyless, so this always builds — the catalyst agent
+    # always has at least the filings stream available.
+    try:
+        return build_sec_provider()
+    except SecProviderError:
         return None
 
 
@@ -259,6 +285,7 @@ def generate_thesis(
                 financial_provider=_optional_financial_provider(),
                 news_provider=_optional_news_provider(),
                 macro_provider=_optional_macro_provider(),
+                sec_provider=_optional_sec_provider(),
             )
         except (
             LlmError,
@@ -266,6 +293,7 @@ def generate_thesis(
             FinancialProviderError,
             NewsProviderError,
             MacroProviderError,
+            SecProviderError,
         ) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 

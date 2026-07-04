@@ -12,6 +12,7 @@ whatever is present rather than erroring.
 from __future__ import annotations
 
 from agentic_options_reporter.models.schemas import (
+    CatalystFinding,
     FinancialResearchFinding,
     InvestmentThesis,
     MacroResearchFinding,
@@ -29,9 +30,9 @@ from agentic_options_reporter.thesis.parsing import parse_response
 _SYSTEM_PROMPT = """\
 You are a portfolio manager writing a final investment thesis for a
 client. You are given a quant interpretation, optional financial/news/
-macro research findings, an optional risk assessment, an optional
-strategy suggestion, and the underlying recommendation and market
-context. Synthesize them into one coherent paragraph — do not just
+macro/catalyst research findings, an optional risk assessment, an
+optional strategy suggestion, and the underlying recommendation and
+market context. Synthesize them into one coherent paragraph — do not just
 concatenate them. If any findings seem to disagree (e.g. strong
 fundamentals but bearish news, or a bullish quant read against a
 risk-off macro regime), address the tension directly rather than
@@ -51,6 +52,7 @@ def _build_prompt(
     financial_research: FinancialResearchFinding | None,
     news_research: NewsResearchFinding | None,
     macro_research: MacroResearchFinding | None,
+    catalyst_research: CatalystFinding | None,
     risk_assessment: RiskAssessment | None,
     strategy_suggestion: StrategySuggestion | None,
     recommendation: Recommendation,
@@ -94,6 +96,21 @@ def _build_prompt(
     else:
         parts.append("Macro research: not applicable (no macro provider configured).")
 
+    if catalyst_research is not None:
+        catalyst_lines = "; ".join(
+            f"{c.title} ({c.category}/{c.horizon}, {c.direction})"
+            for c in catalyst_research.catalysts
+        )
+        parts.append(
+            f"Catalyst research: net_bias={catalyst_research.net_bias}. "
+            f"{catalyst_research.summary} "
+            f"Catalysts: {catalyst_lines or 'none identified'}."
+        )
+    else:
+        parts.append(
+            "Catalyst research: not applicable (no news/SEC/macro provider configured)."
+        )
+
     if risk_assessment is not None:
         parts.append(
             f"Risk assessment: level={risk_assessment.risk_level}, "
@@ -117,6 +134,7 @@ def run(
     financial_research: FinancialResearchFinding | None,
     news_research: NewsResearchFinding | None,
     macro_research: MacroResearchFinding | None,
+    catalyst_research: CatalystFinding | None,
     risk_assessment: RiskAssessment | None,
     strategy_suggestion: StrategySuggestion | None,
     recommendation: Recommendation,
@@ -128,6 +146,7 @@ def run(
         financial_research,
         news_research,
         macro_research,
+        catalyst_research,
         risk_assessment,
         strategy_suggestion,
         recommendation,

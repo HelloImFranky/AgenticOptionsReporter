@@ -5,6 +5,8 @@ import pytest
 
 from agentic_options_reporter.models.schemas import (
     AnalystEstimates,
+    CatalystFinding,
+    CatalystItem,
     CompanyProfile,
     FinancialRatios,
     FinancialStatementSummary,
@@ -14,11 +16,13 @@ from agentic_options_reporter.models.schemas import (
     Recommendation,
     RiskAssessment,
     ScoredCandidate,
+    SecFiling,
     SupportResistanceLevel,
     TrendAssessment,
     VolumeAssessment,
 )
 from agentic_options_reporter.thesis import (
+    catalyst_research,
     financial_research,
     investment_thesis,
     macro_research,
@@ -156,7 +160,7 @@ def test_investment_thesis_with_risk_and_strategy():
     strategy = StrategySuggestion(strategy="Bull Call Spread", rationale="Defined risk.")
 
     result = investment_thesis.run(
-        llm, quant, None, None, None, risk, strategy, _recommendation(), _trend(), _volume()
+        llm, quant, None, None, None, None, risk, strategy, _recommendation(), _trend(), _volume()
     )
     assert result.consensus == "bullish"
     assert "defined risk" in result.thesis.lower()
@@ -188,8 +192,21 @@ def test_investment_thesis_synthesizes_all_research_findings():
     risk = RiskAssessment(risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.")
     strategy = StrategySuggestion(strategy="Bull Call Spread", rationale="Defined risk.")
 
+    catalyst = CatalystFinding(
+        net_bias="bullish",
+        summary="Earnings just beat.",
+        catalysts=[
+            CatalystItem(
+                title="Q2 earnings beat",
+                category="earnings",
+                horizon="recent",
+                direction="bullish",
+                detail="Beat consensus on revenue and EPS.",
+            )
+        ],
+    )
     result = investment_thesis.run(
-        llm, quant, financial, news, macro, risk, strategy, _recommendation(), _trend(), _volume()
+        llm, quant, financial, news, macro, catalyst, risk, strategy, _recommendation(), _trend(), _volume()
     )
     assert result.consensus == "bullish"
 
@@ -198,6 +215,8 @@ def test_investment_thesis_synthesizes_all_research_findings():
     assert "health=strong" in user_prompt
     assert "sentiment=bullish" in user_prompt
     assert "regime=risk_on" in user_prompt
+    assert "net_bias=bullish" in user_prompt
+    assert "Q2 earnings beat" in user_prompt
 
 
 def test_investment_thesis_handles_missing_risk_and_strategy():
@@ -210,7 +229,7 @@ def test_investment_thesis_handles_missing_risk_and_strategy():
     recommendation = Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="no candidates")
 
     result = investment_thesis.run(
-        llm, quant, None, None, None, None, None, recommendation, _trend(), _volume()
+        llm, quant, None, None, None, None, None, None, recommendation, _trend(), _volume()
     )
     assert result.consensus == "neutral"
 
@@ -398,3 +417,96 @@ def test_macro_research_raises_on_invalid_regime():
     )
     with pytest.raises(ThesisGenerationError):
         macro_research.run(llm, _observations())
+
+
+def _filings() -> list[SecFiling]:
+    return [
+        SecFiling(
+            ticker="TEST", form_type="8-K", filed_at=date(2026, 6, 2),
+            url="https://sec.gov/a", accession_number="0000-26-01",
+        ),
+        SecFiling(
+            ticker="TEST", form_type="10-Q", filed_at=date(2026, 5, 1),
+            url="https://sec.gov/b", accession_number="0000-26-02",
+        ),
+    ]
+
+
+_CATALYST_RESPONSE = json.dumps(
+    {
+        "catalysts": [
+            {
+                "title": "Q2 earnings beat",
+                "category": "earnings",
+                "horizon": "recent",
+                "direction": "bullish",
+                "detail": "Beat consensus on revenue and EPS.",
+            },
+            {
+                "title": "8-K material event",
+                "category": "filing",
+                "horizon": "recent",
+                "direction": "uncertain",
+                "detail": "Company filed an 8-K on 2026-06-02.",
+            },
+        ],
+        "summary": "Recent earnings and a fresh 8-K dominate the near-term picture.",
+        "net_bias": "bullish",
+    }
+)
+
+
+def test_catalyst_research_parses_response():
+    llm = FakeLlmClient({"catalyst analyst": _CATALYST_RESPONSE})
+    result = catalyst_research.run(llm, _articles(), _filings(), _observations())
+
+    assert result.net_bias == "bullish"
+    assert len(result.catalysts) == 2
+    assert result.catalysts[0].category == "earnings"
+    assert result.catalysts[1].horizon == "recent"
+
+    # Every stream must reach the prompt.
+    _, user_prompt = llm.calls[-1]
+    assert "Company beats earnings" in user_prompt   # news
+    assert "8-K" in user_prompt                        # filings
+    assert "Federal funds rate" in user_prompt         # macro
+
+
+def test_catalyst_research_handles_all_streams_empty():
+    llm = FakeLlmClient(
+        {"catalyst analyst": json.dumps({"catalysts": [], "summary": "Nothing notable.", "net_bias": "neutral"})}
+    )
+    result = catalyst_research.run(llm, [], [], [])
+    assert result.net_bias == "neutral"
+    assert result.catalysts == []
+
+    _, user_prompt = llm.calls[-1]
+    assert "(no recent articles)" in user_prompt
+    assert "(no recent filings)" in user_prompt
+
+
+def test_catalyst_research_raises_on_invalid_category():
+    llm = FakeLlmClient(
+        {
+            "catalyst analyst": json.dumps(
+                {
+                    "catalysts": [
+                        {"title": "x", "category": "rumor", "horizon": "recent",
+                         "direction": "bullish", "detail": ""}
+                    ],
+                    "summary": "x",
+                    "net_bias": "bullish",
+                }
+            )
+        }
+    )
+    with pytest.raises(ThesisGenerationError):
+        catalyst_research.run(llm, _articles(), _filings(), _observations())
+
+
+def test_catalyst_research_raises_on_invalid_net_bias():
+    llm = FakeLlmClient(
+        {"catalyst analyst": json.dumps({"catalysts": [], "summary": "x", "net_bias": "euphoric"})}
+    )
+    with pytest.raises(ThesisGenerationError):
+        catalyst_research.run(llm, [], [], [])
