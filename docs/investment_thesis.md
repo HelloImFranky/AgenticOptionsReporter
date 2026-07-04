@@ -95,7 +95,13 @@ transient failure (rate limit, quota, timeout, 5xx) advances to the next
 configured provider the same way (see `specs/providers.yaml:
 provider_router` for the full error-classification detail). Since GDELT
 needs no API key, News Research now effectively always has at least one
-provider available.
+provider available. Because that also makes GDELT the provider most
+likely to be alone in the router (nothing to fail over to), it defends
+itself against its strict per-IP throttle: responses are cached
+process-wide for 5 minutes, `get_company_news` and `get_sentiment` share
+one article fetch per ticker, uncached requests are spaced 5 seconds
+apart, and a 429 is retried once (see `specs/providers.yaml:
+rate_limit_defense`).
 
 ### When every data provider fails: warnings, not a crash
 

@@ -234,8 +234,32 @@ def test_newsapi_get_sentiment_is_unsupported(fake_requests_module):
 # -- GdeltNewsProvider --
 
 
+@pytest.fixture(autouse=True)
+def _reset_gdelt_shared_state():
+    """GDELT's cache/throttle state is class-level on purpose (rate limits
+    are per IP, and main.py rebuilds the provider per request) — reset it
+    so tests stay independent."""
+    GdeltNewsProvider.clear_shared_state()
+    yield
+    GdeltNewsProvider.clear_shared_state()
+
+
+def _gdelt() -> tuple[GdeltNewsProvider, list[float]]:
+    """A GdeltNewsProvider on a fake clock: sleeps are recorded (and
+    advance the clock) instead of actually sleeping."""
+    clock = {"now": 0.0}
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    provider = GdeltNewsProvider(monotonic=lambda: clock["now"], sleep=fake_sleep)
+    return provider, sleeps
+
+
 def test_gdelt_needs_no_api_key():
-    provider = GdeltNewsProvider()
+    provider, _ = _gdelt()
     assert isinstance(provider, NewsProvider)
 
 
@@ -254,8 +278,9 @@ def test_gdelt_get_company_news(fake_requests_module):
             }
         )
     )
-    provider = GdeltNewsProvider()
+    provider, _ = _gdelt()
     articles = provider.get_company_news("AAPL", limit=5)
+    assert len(articles) == 1
     assert articles[0].headline == "Company beats earnings"
     assert articles[0].source == "reuters.com"
 
@@ -265,7 +290,7 @@ def test_gdelt_get_sentiment_uses_tone_timeline(fake_requests_module):
         FakeHttpResponse({"articles": [{"title": "x", "domain": "d", "url": "u", "seendate": "20260703T120000Z"}]}),
         FakeHttpResponse({"timeline": [{"series": "tone", "data": [{"date": "20260701", "value": 2.0}, {"date": "20260702", "value": 5.0}]}]}),
     )
-    provider = GdeltNewsProvider()
+    provider, _ = _gdelt()
     snapshot = provider.get_sentiment("AAPL")
     assert snapshot.label == "bullish"
     assert snapshot.score == pytest.approx(0.5)
@@ -280,7 +305,7 @@ def test_gdelt_get_sentiment_uses_modest_article_sample(fake_requests_module):
         FakeHttpResponse({"articles": []}),
         FakeHttpResponse({"timeline": []}),
     )
-    provider = GdeltNewsProvider()
+    provider, _ = _gdelt()
     provider.get_sentiment("AAPL")
 
     article_call = fake_requests_module.get.calls[0]
@@ -293,10 +318,82 @@ def test_gdelt_get_sentiment_handles_missing_timeline(fake_requests_module):
         FakeHttpResponse({"articles": []}),
         FakeHttpResponse({"timeline": []}),
     )
-    provider = GdeltNewsProvider()
+    provider, _ = _gdelt()
     snapshot = provider.get_sentiment("AAPL")
     assert snapshot.label == "neutral"
     assert snapshot.score == 0.0
+
+
+def test_gdelt_company_news_and_sentiment_share_one_artlist_fetch(fake_requests_module):
+    """A thesis run calls get_company_news then get_sentiment for the same
+    ticker; that must cost 2 GDELT requests (artlist + timelinetone), not
+    3 — the burst of near-identical artlist fetches is what got us rate
+    limited."""
+    fake_requests_module.get = FakeRequestsGet(
+        FakeHttpResponse({"articles": [{"title": "x", "domain": "d", "url": "u", "seendate": "20260703T120000Z"}]}),
+        FakeHttpResponse({"timeline": []}),
+    )
+    provider, _ = _gdelt()
+
+    provider.get_company_news("AAPL")  # default limit=20, fetched at the shared sample size
+    provider.get_sentiment("AAPL")
+
+    assert len(fake_requests_module.get.calls) == 2
+    modes = [call["params"]["mode"] for call in fake_requests_module.get.calls]
+    assert modes == ["artlist", "timelinetone"]
+
+
+def test_gdelt_cache_is_shared_across_provider_instances(fake_requests_module):
+    """main.py builds a fresh provider per request, so the cache must
+    outlive a single instance for the regenerate-click case to stop
+    re-hitting GDELT inside its cooldown window."""
+    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse({"articles": []}))
+
+    first, _ = _gdelt()
+    first.get_company_news("AAPL")
+    second, _ = _gdelt()
+    second.get_company_news("AAPL")
+
+    assert len(fake_requests_module.get.calls) == 1
+
+
+def test_gdelt_spaces_uncached_requests(fake_requests_module):
+    fake_requests_module.get = FakeRequestsGet(
+        FakeHttpResponse({"articles": []}),
+        FakeHttpResponse({"timeline": []}),
+    )
+    provider, sleeps = _gdelt()
+    provider.get_sentiment("AAPL")  # artlist then timelinetone, back-to-back
+
+    assert sleeps == [GdeltNewsProvider.MIN_REQUEST_INTERVAL_SECONDS]
+
+
+def test_gdelt_retries_once_after_rate_limit(fake_requests_module):
+    exc = fake_requests_module.exceptions.RequestException("429 Too Many Requests")
+    fake_requests_module.get = FakeRequestsGet(
+        FakeHttpResponse(None, status_code=429, raise_exc=exc),
+        FakeHttpResponse({"articles": [{"title": "x", "domain": "d", "url": "u", "seendate": "20260703T120000Z"}]}),
+    )
+    provider, sleeps = _gdelt()
+
+    articles = provider.get_company_news("AAPL")
+
+    assert len(articles) == 1
+    assert len(fake_requests_module.get.calls) == 2
+    assert GdeltNewsProvider.RATE_LIMIT_RETRY_SECONDS in sleeps
+
+
+def test_gdelt_second_rate_limit_propagates(fake_requests_module):
+    def _rate_limited():
+        exc = fake_requests_module.exceptions.RequestException("429 Too Many Requests")
+        return FakeHttpResponse(None, status_code=429, raise_exc=exc)
+
+    fake_requests_module.get = FakeRequestsGet(_rate_limited(), _rate_limited())
+    provider, _ = _gdelt()
+
+    with pytest.raises(NewsProviderRateLimited):
+        provider.get_company_news("AAPL")
+    assert len(fake_requests_module.get.calls) == 2
 
 
 # -- NewsProviderRouter --

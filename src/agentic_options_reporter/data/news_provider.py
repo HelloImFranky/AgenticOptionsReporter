@@ -12,9 +12,11 @@ over between them per method call, the data-provider analog of
 from __future__ import annotations
 
 import os
+import threading
+import time
 from abc import ABC, abstractmethod
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from agentic_options_reporter.data.provider_errors import (
     ProviderRateLimited,
@@ -324,15 +326,60 @@ class GdeltNewsProvider(NewsProvider):
     clipped to align with this project's -1..1 SentimentSnapshot.score
     convention — a unit conversion of a real provider-supplied signal, not
     a fabricated value.
+
+    GDELT throttles per IP at roughly one request every 5 seconds and
+    429s anything faster, so this provider is deliberately defensive:
+
+    - Responses are cached for CACHE_TTL_SECONDS in CLASS-level state.
+      main.py builds a fresh provider per request, so instance state
+      would be reset by exactly the "Regenerate" click most likely to
+      re-hit GDELT inside its cooldown window.
+    - get_company_news always fetches SENTIMENT_ARTICLE_SAMPLE records
+      (slicing down to `limit`), so it and get_sentiment share one
+      cached artlist response per ticker instead of issuing two nearly
+      identical requests per pipeline run.
+    - Uncached requests are serialized and spaced
+      MIN_REQUEST_INTERVAL_SECONDS apart, and a 429 is retried once
+      after Retry-After (or RATE_LIMIT_RETRY_SECONDS when absent). A
+      second 429 propagates as NewsProviderRateLimited, which the
+      router/orchestrator degrade as before.
     """
 
     BASE_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
     PROVIDER_LABEL = "GDELT"
 
-    def __init__(self, timeout_seconds: int = 15) -> None:
-        self._timeout = timeout_seconds
+    # Article sample used for get_sentiment's article_count and as the
+    # shared artlist fetch size (see class docstring). Kept modest:
+    # GDELT rate-limits aggressively, and a larger sample only sharpens
+    # a count.
+    SENTIMENT_ARTICLE_SAMPLE = 50
+    MIN_REQUEST_INTERVAL_SECONDS = 5.0
+    RATE_LIMIT_RETRY_SECONDS = 5.0
+    CACHE_TTL_SECONDS = 300.0
 
-    def _get(self, params: dict[str, Any]) -> Any:
+    # Shared across instances (and therefore across API requests) —
+    # rate limits are per IP, not per provider object.
+    _shared_lock = threading.Lock()
+    _shared_cache: dict[tuple, tuple[float, Any]] = {}
+    _last_request_at: float | None = None
+
+    def __init__(
+        self,
+        timeout_seconds: int = 15,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._timeout = timeout_seconds
+        self._monotonic = monotonic
+        self._sleep = sleep
+
+    @classmethod
+    def clear_shared_state(cls) -> None:
+        with cls._shared_lock:
+            cls._shared_cache.clear()
+            cls._last_request_at = None
+
+    def _request(self, params: dict[str, Any]) -> Any:
         import requests
 
         try:
@@ -348,6 +395,47 @@ class GdeltNewsProvider(NewsProvider):
                 unavailable_cls=NewsProviderUnavailable,
             ) from exc
         return response.json()
+
+    def _throttle(self) -> None:
+        cls = GdeltNewsProvider
+        if cls._last_request_at is not None:
+            remaining = self.MIN_REQUEST_INTERVAL_SECONDS - (self._monotonic() - cls._last_request_at)
+            if remaining > 0:
+                self._sleep(remaining)
+        cls._last_request_at = self._monotonic()
+
+    @staticmethod
+    def _retry_after_seconds(exc: NewsProviderRateLimited) -> float:
+        response = getattr(getattr(exc, "__cause__", None), "response", None)
+        header = getattr(response, "headers", {}).get("Retry-After") if response is not None else None
+        try:
+            return max(float(header), 1.0)
+        except (TypeError, ValueError):
+            return GdeltNewsProvider.RATE_LIMIT_RETRY_SECONDS
+
+    def _get(self, params: dict[str, Any]) -> Any:
+        cls = GdeltNewsProvider
+        cache_key = tuple(sorted(params.items()))
+        # The lock is held across the fetch on purpose: GDELT's limit is
+        # per IP, so concurrent callers must queue behind one in-flight
+        # request rather than race it into another 429.
+        with cls._shared_lock:
+            cached = cls._shared_cache.get(cache_key)
+            if cached is not None:
+                cached_at, payload = cached
+                if self._monotonic() - cached_at < self.CACHE_TTL_SECONDS:
+                    return payload
+
+            self._throttle()
+            try:
+                payload = self._request(params)
+            except NewsProviderRateLimited as exc:
+                self._sleep(self._retry_after_seconds(exc))
+                cls._last_request_at = self._monotonic()
+                payload = self._request(params)  # a second 429 propagates
+
+            cls._shared_cache[cache_key] = (self._monotonic(), payload)
+            return payload
 
     @staticmethod
     def _parse_seendate(value: str) -> datetime:
@@ -365,8 +453,11 @@ class GdeltNewsProvider(NewsProvider):
         )
 
     def get_company_news(self, ticker: str, limit: int = 20) -> list[NewsArticle]:
+        # Fetch the shared sample size even for smaller limits so this
+        # response is one cache entry with get_sentiment's article fetch.
+        maxrecords = max(limit, self.SENTIMENT_ARTICLE_SAMPLE)
         data = self._get(
-            {"query": ticker, "mode": "artlist", "maxrecords": limit, "format": "json", "sort": "hybridrel"}
+            {"query": ticker, "mode": "artlist", "maxrecords": maxrecords, "format": "json", "sort": "hybridrel"}
         )
         articles = data.get("articles") or []
         return [self._to_article(item) for item in articles[:limit]]
@@ -377,11 +468,6 @@ class GdeltNewsProvider(NewsProvider):
         )
         articles = data.get("articles") or []
         return [self._to_article(item) for item in articles[:limit]]
-
-    # Article sample used for get_sentiment's article_count. Kept modest:
-    # GDELT rate-limits aggressively, and a larger sample only sharpens a
-    # count while doubling the odds of a 429 killing the whole call.
-    SENTIMENT_ARTICLE_SAMPLE = 50
 
     def get_sentiment(self, ticker: str) -> SentimentSnapshot:
         articles = self.get_company_news(ticker, limit=self.SENTIMENT_ARTICLE_SAMPLE)

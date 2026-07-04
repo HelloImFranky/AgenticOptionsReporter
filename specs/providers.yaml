@@ -158,9 +158,27 @@ interfaces:
             -1..1 SentimentSnapshot.score convention. A unit conversion
             of a real provider-supplied signal, not a fabricated value.
             The accompanying article sample is capped at
-            SENTIMENT_ARTICLE_SAMPLE (50, down from 250) — GDELT
-            rate-limits aggressively and the larger sample only
-            sharpened article_count while inviting 429s.
+            SENTIMENT_ARTICLE_SAMPLE (50) — GDELT rate-limits
+            aggressively and a larger sample only sharpened
+            article_count while inviting 429s.
+        rate_limit_defense: >
+          GDELT throttles per IP at roughly one request every 5 seconds
+          and 429s anything faster — and being keyless, it's often the
+          only provider in the news router, with nothing to fail over
+          to. GdeltNewsProvider therefore (a) caches responses for
+          CACHE_TTL_SECONDS (300) in CLASS-level state, because main.py
+          rebuilds the provider per request and instance state would be
+          reset by exactly the "Regenerate" click most likely to re-hit
+          GDELT inside its cooldown; (b) has get_company_news always
+          fetch SENTIMENT_ARTICLE_SAMPLE records and slice down to
+          `limit`, so it and get_sentiment share one cached artlist
+          response per ticker (2 GDELT requests per pipeline run, not
+          3); (c) serializes uncached requests behind a class-level lock
+          and spaces them MIN_REQUEST_INTERVAL_SECONDS (5) apart; and
+          (d) retries a 429 once after Retry-After (or
+          RATE_LIMIT_RETRY_SECONDS=5 when the header is absent). A
+          second 429 propagates as NewsProviderRateLimited, degrading
+          via the router/pipeline_warnings path as usual.
 
   FinancialProvider:
     module: agentic_options_reporter.data.financial_provider
