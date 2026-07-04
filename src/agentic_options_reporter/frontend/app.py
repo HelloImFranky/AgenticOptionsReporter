@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import tempfile
 
 import flet as ft
 
@@ -219,7 +221,7 @@ def _stat_card(icon: str, label: str, value: ft.Text, icon_color: str | None = N
     )
 
 
-def build_view(page: ft.Page, client: ApiClient) -> None:
+def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None) -> None:
     page.title = "AgenticOptionsReporter"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.theme = ft.Theme(color_scheme_seed=_SEED_COLOR, use_material3=True)
@@ -602,6 +604,11 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         disabled=True,
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
     )
+    # Desktop: a persistent line confirming where the file landed. Web: a real
+    # link the user taps (launches in-gesture, so the browser won't block it —
+    # unlike a programmatic launch_url after the click round-trips to the server).
+    download_status = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True, visible=False)
+    download_pdf_link = ft.Markdown("", auto_follow_links=True, visible=False)
 
     def _assemble_report() -> dict:
         """Fold the retained analysis + thesis payloads into the single dict
@@ -618,32 +625,64 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             "thesis": report_state.get("thesis"),
         }
 
-    def _on_pdf_save_result(e: ft.FilePickerResultEvent) -> None:
-        if not e.path:  # dialog cancelled
-            return
-        path = e.path if e.path.lower().endswith(".pdf") else f"{e.path}.pdf"
-        try:
-            pdf_bytes = build_report_pdf(_assemble_report())
-            with open(path, "wb") as handle:
-                handle.write(pdf_bytes)
-        except Exception as exc:  # noqa: BLE001 - surface any build/write failure to the user
-            thesis_error_banner.content.controls[1].value = f"Could not save PDF: {exc}"
-            thesis_error_banner.visible = True
-            page.update()
-            return
-        page.open(ft.SnackBar(ft.Text(f"Report saved to {path}")))
+    def _report_pdf_error(message: str) -> None:
+        thesis_error_banner.content.controls[1].value = message
+        thesis_error_banner.visible = True
+        page.update()
 
-    pdf_file_picker = ft.FilePicker(on_result=_on_pdf_save_result)
-    page.overlay.append(pdf_file_picker)
+    def _downloads_dir() -> str:
+        """Best writable spot for a saved report, preferring the user's
+        Downloads folder and degrading to home, then a temp dir."""
+        for candidate in (os.path.join(os.path.expanduser("~"), "Downloads"), os.path.expanduser("~")):
+            if os.path.isdir(candidate):
+                return candidate
+        return tempfile.gettempdir()
 
     def _download_pdf(_: ft.ControlEvent) -> None:
+        download_status.visible = False
+        download_pdf_link.visible = False
         analysis = report_state.get("analysis") or {}
-        symbol = str(analysis.get("symbol") or "report")
-        pdf_file_picker.save_file(
-            dialog_title="Save analysis report",
-            file_name=f"{symbol}_options_report.pdf",
-            allowed_extensions=["pdf"],
-        )
+        symbol = re.sub(r"[^A-Za-z0-9_-]", "", str(analysis.get("symbol") or "report")) or "report"
+        try:
+            pdf_bytes = build_report_pdf(_assemble_report())
+        except Exception as exc:  # noqa: BLE001 - surface any build failure to the user
+            _report_pdf_error(f"Could not build PDF: {exc}")
+            return
+        filename = f"{symbol}_run{analysis.get('run_id') or 0}_report.pdf"
+
+        if page.web:
+            # Browser build: write the PDF into the served assets dir and reveal
+            # a link. FilePicker.save_file has no dialog here, and a programmatic
+            # launch_url gets popup-blocked; a user-clicked link does not.
+            if not reports_dir:
+                _report_pdf_error("PDF download isn't available in this build.")
+                return
+            try:
+                with open(os.path.join(reports_dir, filename), "wb") as handle:
+                    handle.write(pdf_bytes)
+            except OSError as exc:
+                _report_pdf_error(f"Could not prepare PDF: {exc}")
+                return
+            base = (page.url or "").rstrip("/")
+            url = f"{base}/{filename}" if base else f"/{filename}"
+            download_pdf_link.value = f"**[⬇  Download {filename}]({url})**  — opens in a new tab"
+            download_pdf_link.visible = True
+            page.update()
+            return
+
+        # Desktop build: FilePicker's native dialog is unreliable across
+        # platforms, so save straight to Downloads and show the exact path.
+        path = os.path.join(_downloads_dir(), filename)
+        try:
+            with open(path, "wb") as handle:
+                handle.write(pdf_bytes)
+        except OSError as exc:
+            _report_pdf_error(f"Could not save PDF: {exc}")
+            return
+        download_status.value = f"✓  Saved to {path}"
+        download_status.visible = True
+        page.open(ft.SnackBar(ft.Text(f"Report saved to {path}")))
+        page.update()
 
     download_pdf_button.on_click = _download_pdf
 
@@ -657,6 +696,8 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 ft.Row([download_pdf_button], spacing=10),
+                download_status,
+                download_pdf_link,
             ),
         ],
         visible=False,
@@ -763,12 +804,16 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         # A fresh analysis invalidates any thesis captured for the PDF export.
         report_state["thesis"] = None
         download_pdf_button.disabled = True
+        download_status.visible = False
+        download_pdf_link.visible = False
 
     def generate_thesis(_: ft.ControlEvent) -> None:
         if current_run_id["value"] is None:
             return
         thesis_error_banner.visible = False
         pipeline_warnings_banner.visible = False
+        download_status.visible = False
+        download_pdf_link.visible = False
         thesis_progress.visible = True
         thesis_button.disabled = True
         page.update()
@@ -1196,11 +1241,11 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
     )
 
 
-def make_main(base_url: str):
+def make_main(base_url: str, reports_dir: str | None = None):
     client = ApiClient(base_url=base_url)
 
     def main(page: ft.Page) -> None:
-        build_view(page, client)
+        build_view(page, client, reports_dir)
 
     return main
 
@@ -1221,10 +1266,20 @@ def run(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=0, help="Port to serve on when --web is set")
     args = parser.parse_args(argv)
 
+    # In the browser build the PDF export can't use a native save dialog, so it
+    # writes reports here and Flet serves them from the web root for download.
+    reports_dir = os.path.join(tempfile.gettempdir(), "aor_reports")
+    os.makedirs(reports_dir, exist_ok=True)
+
+    app_kwargs: dict[str, object] = {}
+    if args.web:
+        app_kwargs["assets_dir"] = reports_dir
+
     ft.app(
-        target=make_main(args.base_url),
+        target=make_main(args.base_url, reports_dir),
         view=ft.AppView.WEB_BROWSER if args.web else ft.AppView.FLET_APP,
         port=args.port,
+        **app_kwargs,
     )
 
 
