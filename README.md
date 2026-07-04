@@ -75,6 +75,13 @@ the run in `pipeline_warnings` (an amber banner in the Agents tab)
 rather than crashing the request.
 
 ```bash
+# Market data (/analyze) — yfinance is keyless and serves both price
+# history and option chains, so no key is required. These optional keys
+# add price-history redundancy/failover (option chains stay yfinance-only):
+export ALPHA_VANTAGE_API_KEY=... # alphavantage.co, daily price history
+export TWELVE_DATA_API_KEY=...   # twelvedata.com, daily price history
+export FINNHUB_API_KEY=...       # finnhub.io stock candles (may be premium-gated)
+
 # Financial Research — all free tier; FINNHUB_API_KEY/ALPHA_VANTAGE_API_KEY
 # do double duty for News Research below
 export FMP_API_KEY=...           # financialmodelingprep.com, full coverage

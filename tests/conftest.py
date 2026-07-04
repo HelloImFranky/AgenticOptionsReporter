@@ -94,11 +94,23 @@ class FakeMarketDataProvider(MarketDataProvider):
         self._history = history
         self._chain = chain
 
-    def get_price_history(self, symbol: str, lookback_days: int = 365) -> PriceHistory:
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return frozenset({"price_history", "option_chain"})
+
+    async def get_price_history(self, symbol: str, lookback_days: int = 365) -> PriceHistory:
         return self._history
 
-    def get_option_chain(self, symbol: str, expiration: str | None = None) -> OptionChain:
+    async def get_option_chain(self, symbol: str, expiration: str | None = None) -> OptionChain:
         return self._chain
+
+    async def health(self):
+        from agentic_options_reporter.data.market_data import ProviderHealth
+        from datetime import datetime, timezone
+
+        return ProviderHealth(
+            provider="fake", healthy=True, checked_at=datetime.now(timezone.utc)
+        )
 
 
 @pytest.fixture

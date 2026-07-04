@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import sessionmaker
@@ -14,9 +15,21 @@ from agentic_options_reporter.analysis.support_resistance import detect_levels
 from agentic_options_reporter.analysis.trend import detect_trend
 from agentic_options_reporter.analysis.volume import analyze_volume
 from agentic_options_reporter.config import get_settings
-from agentic_options_reporter.data.market_data import MarketDataProvider, YFinanceProvider
-from agentic_options_reporter.models.schemas import AnalysisResult
+from agentic_options_reporter.data.market_data import MarketDataProvider, build_market_data_provider
+from agentic_options_reporter.models.schemas import AnalysisResult, OptionChain, PriceHistory
 from agentic_options_reporter.persistence import make_session_factory, persist_analysis_run
+
+
+async def _fetch_market_data(
+    provider: MarketDataProvider, symbol: str, lookback_days: int, expiration: str | None
+) -> tuple[PriceHistory, OptionChain]:
+    """Fetch price history and the option chain concurrently — they're
+    independent, so overlap the two round-trips (the MarketDataProvider is
+    async; see specs/providers.yaml)."""
+    return await asyncio.gather(
+        provider.get_price_history(symbol, lookback_days),
+        provider.get_option_chain(symbol, expiration),
+    )
 
 
 def run_analysis(
@@ -27,11 +40,14 @@ def run_analysis(
     session_factory: sessionmaker | None = None,
 ) -> AnalysisResult:
     settings = get_settings()
-    provider = provider or YFinanceProvider(cache_ttl_seconds=settings.cache_ttl_seconds)
+    provider = provider or build_market_data_provider()
     session_factory = session_factory or make_session_factory(settings.database_url)
 
-    history = provider.get_price_history(symbol, lookback_days)
-    chain = provider.get_option_chain(symbol, expiration)
+    # The MarketDataProvider is async; this pipeline is sync, so bridge
+    # with a private event loop and fetch the two inputs concurrently.
+    history, chain = asyncio.run(
+        _fetch_market_data(provider, symbol, lookback_days, expiration)
+    )
 
     indicators = compute_indicators(history)
     trend = detect_trend(history, indicators)

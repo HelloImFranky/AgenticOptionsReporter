@@ -14,6 +14,13 @@ steps:
     function: MarketDataProvider.get_price_history + get_option_chain
     input: [symbol, lookback_days, expiration]
     output: [PriceHistory, OptionChain]
+    note: >
+      MarketDataProvider is async and capability-based (see
+      specs/providers.yaml); run_analysis (sync) bridges with asyncio.run
+      and fetches the two inputs CONCURRENTLY via asyncio.gather. The
+      default provider is build_market_data_provider() — a
+      capability-filtering failover router across yfinance (keyless, both
+      capabilities) plus any configured HTTP price sources.
   - name: compute_indicators
     module: agentic_options_reporter.analysis.indicators
     function: compute_indicators

@@ -94,11 +94,29 @@ computes a number the quant engine hasn't already computed — see
 
 ## Market data
 
-Primary source is Yahoo Finance via `yfinance` for OHLCV and option chains.
-The `MarketDataProvider` interface in `data/market_data.py` is written so
-that Polygon.io, Alpaca, Tradier, Interactive Brokers, Finnhub, or Alpha
-Vantage can be added as alternate providers without changing downstream
-analysis code. Responses are cached to reduce rate-limit pressure.
+`MarketDataProvider` (`data/market_data/`) is an **async, capability-based
+multi-provider layer**, the same shape as the news/financial/macro
+research providers. Sources declare which capabilities they serve
+(`price_history`, `option_chain`) and a capability-filtering failover
+router (`build_market_data_provider()`,
+`AOR_MARKET_DATA_PROVIDER_FALLBACK_ORDER`) routes each request to the
+sources that advertise it:
+
+| implementation | capabilities | env var |
+|---|---|---|
+| `YFinanceProvider` (keyless) | price history + **option chains** | — |
+| `AlphaVantageMarketDataProvider` | price history | `ALPHA_VANTAGE_API_KEY` |
+| `TwelveDataMarketDataProvider` | price history | `TWELVE_DATA_API_KEY` |
+| `FinnhubMarketDataProvider` | price history | `FINNHUB_API_KEY` |
+
+Free option-chain data is rare, so only yfinance advertises `option_chain`
+and chain requests route solely to it; price-history requests fail over
+across all configured sources. yfinance is the one adapter that can't sit
+on the shared httpx base (the `yfinance` package is synchronous), so it
+implements the async interface directly and offloads its blocking calls to
+a worker thread via `asyncio.to_thread`. The sync `/analyze` pipeline
+bridges with `asyncio.run` and fetches price history + option chain
+concurrently. Responses are cached to reduce rate-limit pressure.
 
 ## Research providers
 

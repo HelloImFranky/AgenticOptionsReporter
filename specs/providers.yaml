@@ -36,13 +36,15 @@ shipped:
       NewsProvider + SECProvider + MacroProvider into a structured list of
       dateable catalysts; SECProvider was async-ified onto data.async_http
       and wired into the pipeline for it.
+  - name: multi_provider_market_data
+    note: >
+      MarketDataProvider became an async, capability-based failover layer
+      (data.market_data package) mirroring news/financial/macro: yfinance
+      (keyless, both capabilities) plus Alpha Vantage / Twelve Data /
+      Finnhub price-history adapters, a capability-filtering router, and
+      run_analysis bridged with asyncio.run + gather. See the
+      MarketDataProvider section below.
 deferred:
-  - name: additional_market_data_providers
-    reason: >
-      Alpha Vantage, Twelve Data remain unimplemented alternates to the
-      existing YFinanceProvider (price/option-chain data — a different
-      interface from FinancialProvider); not needed until a concrete
-      reason to switch (rate limits, data quality) arises.
   - name: additional_news_providers
     reason: RSS feeds, Reddit — Alpha Vantage News, NewsAPI, and GDELT shipped in phase_2b.
   - name: production_market_data_providers
@@ -105,16 +107,87 @@ provider_router:
     news: build_news_provider() — AOR_NEWS_PROVIDER_FALLBACK_ORDER, default "finnhub,newsdata,guardian,gnews,alphavantage,newsapi,hackernews"
     financial: build_financial_provider() — AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER, default "fmp,finnhub,alphavantage"
     macro: build_macro_provider() — AOR_MACRO_PROVIDER_FALLBACK_ORDER, default "fred,bls,bea,imf,worldbank"
+    market_data: build_market_data_provider() — AOR_MARKET_DATA_PROVIDER_FALLBACK_ORDER, default "yfinance,alphavantage,twelvedata,finnhub"
   keyless_sources_are_always_available: >
-    HackerNewsProvider (news) and ImfMacroProvider/WorldBankMacroProvider
-    (macro) need no API key, so build_news_provider() and
-    build_macro_provider() never return an empty router — News and Macro
-    Research effectively always run, at minimum against the keyless
-    sources alone. This is intentional, not a contract change: an agent
-    still only runs when its provider constructed successfully. Only
+    HackerNewsProvider (news), ImfMacroProvider/WorldBankMacroProvider
+    (macro), and YFinanceProvider (market data) need no API key, so
+    build_news_provider()/build_macro_provider()/build_market_data_provider()
+    never return an empty router — News, Macro Research, and the core
+    /analyze pipeline effectively always run, at minimum against the
+    keyless sources alone. This is intentional, not a contract change: an
+    agent still only runs when its provider constructed successfully. Only
     Financial Research still requires at least one configured key.
 
 interfaces:
+  MarketDataProvider:
+    module: agentic_options_reporter.data.market_data   # one adapter per source (base.py, router.py, <source>.py)
+    interface_style: >
+      ASYNC and CAPABILITY-BASED, like macro/financial. Providers declare
+      which capabilities they serve (price_history, option_chain) and the
+      router FILTERS to supporters before calling
+      (data.provider_router.filter_supporting): free option-chain data is
+      rare, so only yfinance advertises option_chain and a chain request
+      routes solely to it, while price-history requests fail over across
+      every configured source. The sync /analyze pipeline (workflow.py)
+      bridges with asyncio.run and fetches price history + chain
+      CONCURRENTLY via asyncio.gather.
+    capabilities: [price_history, option_chain]
+    methods:
+      capabilities -> frozenset[str]
+      supports(capability: str) -> bool
+      get_price_history(symbol: str, lookback_days: int = 365) -> PriceHistory
+      get_option_chain(symbol: str, expiration: str | null = null) -> OptionChain
+      health() -> ProviderHealth   # probes a cheap price-history fetch; never raises
+    implementations:
+      - name: YFinanceProvider
+        api_key_env_var: null   # keyless
+        capabilities: [price_history, option_chain]   # the only option-chain source
+        note: >
+          Backed by the SYNCHRONOUS `yfinance` package (pandas-returning,
+          no async API), so it's the one adapter that can't sit on the
+          httpx _HttpMarketDataProvider base — it implements the async
+          interface directly and offloads each blocking call to a worker
+          thread via asyncio.to_thread. Keeps its own instance-level TTL
+          cache. Unexpected yfinance/network errors normalize to
+          MarketDataUnavailable (retryable) so the router fails over.
+      - name: AlphaVantageMarketDataProvider
+        api_key_env_var: ALPHA_VANTAGE_API_KEY
+        capabilities: [price_history]
+        endpoint: GET /query?function=TIME_SERIES_DAILY&symbol={s}&outputsize={compact|full}
+        quirk: Same HTTP-200-with-"Information"/"Note" rate-limit quirk as the other Alpha Vantage adapters.
+      - name: TwelveDataMarketDataProvider
+        api_key_env_var: TWELVE_DATA_API_KEY   # new env var for this pass
+        capabilities: [price_history]
+        endpoint: GET /time_series?symbol={s}&interval=1day&outputsize={n}
+        note: Returns newest-first; adapter sorts ascending. Errors arrive as {"status":"error","message":...}.
+      - name: FinnhubMarketDataProvider
+        api_key_env_var: FINNHUB_API_KEY   # same key as the Finnhub news/fundamentals adapters
+        capabilities: [price_history]
+        endpoint: GET /stock/candle?symbol={s}&resolution=D&from={ts}&to={ts}
+        note: >
+          /stock/candle moved behind a paid tier for many accounts; where
+          unavailable it returns {"s":"no_data"} or 403, which normalize
+          to MarketDataError/MarketDataUnavailable so the router fails
+          over. Implemented against the documented free contract.
+    capability_gating: >
+      The HTTP sources serve price history only; _HttpMarketDataProvider's
+      get_option_chain raises MarketDataUnsupported (retryable), and they
+      don't advertise option_chain — so the router never asks them for a
+      chain. If no configured provider serves a capability the router
+      raises MarketDataUnsupported (can't happen for option_chain in
+      practice since keyless yfinance always serves it).
+    configurable_priority: >
+      Global order AOR_MARKET_DATA_PROVIDER_FALLBACK_ORDER (default
+      "yfinance,alphavantage,twelvedata,finnhub"); per-capability override
+      AOR_MARKET_DATA_PRIORITY_<CAP> (e.g.
+      AOR_MARKET_DATA_PRIORITY_PRICE_HISTORY="alphavantage,yfinance"),
+      mirroring AOR_MACRO_PRIORITY_<METRIC>.
+    error_hierarchy: >
+      MarketDataError (base) with retryable subclasses
+      MarketDataRateLimited/Timeout/Unavailable/Unsupported (the shared
+      provider_errors markers), so acall_with_fallback fails over
+      generically. main.py maps a MarketDataError out of /analyze to 404.
+
   NewsProvider:
     module: agentic_options_reporter.data.news   # one adapter per source (base.py, router.py, <source>.py)
     interface_style: >
@@ -367,7 +440,8 @@ interfaces:
           interfaces that already exist: filings -> SECProvider (SEC
           EDGAR, shipped), macroeconomic -> MacroProvider (FRED/BLS/BEA
           shipped; IMF and World Bank are possible future adapters),
-          market_data -> MarketDataProvider (yfinance, shipped),
+          market_data -> MarketDataProvider (yfinance + Alpha Vantage/
+          Twelve Data/Finnhub, async multi-provider, shipped),
           ai_research -> thesis.llm_client (multi-provider router,
           shipped). Alternative data (Reddit/Stocktwits/Google Trends/
           OpenInsider) has no owning interface yet.
