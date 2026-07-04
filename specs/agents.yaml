@@ -11,7 +11,7 @@ description: >
   normalized models) and add interpretation and judgment on top of it —
   never their own numbers.
 
-status: phase_2a
+status: phase_2b
 phase_1_recap: >
   Phase 1 shipped quant_interpreter, risk_challenger, options_strategy,
   and investment_thesis, reasoning only over data the quant engine
@@ -23,12 +23,15 @@ phase_2a_scope: >
   new agent is optional at runtime — see provider_availability below —
   so a deployment without the corresponding API key still gets the full
   phase 1 pipeline, just without that section.
+phase_2b_scope: >
+  Adds catalyst_research, the first agent to combine multiple provider
+  interfaces (NewsProvider + SECProvider + MacroProvider) into one
+  finding — a structured list of discrete, dateable catalysts with a net
+  directional bias. SECProvider (async, keyless SEC EDGAR) is wired into
+  the pipeline here for the first time. Like the phase-2a research
+  agents, it is optional and degrades gracefully: it runs if ANY of its
+  three streams is configured, reasoning over whatever subset is present.
 deferred:
-  - name: catalyst_agent
-    description: >
-      Upcoming earnings/economic events/product launches and expected
-      market impact, combining NewsProvider + SECProvider + MacroProvider.
-      Deferred until those three have shipped and proven out individually.
   - name: risk_and_strategy_incorporate_research_findings
     description: >
       The Risk Challenger and Options Strategy agents currently reason
@@ -51,6 +54,7 @@ input:
   financial_provider: FinancialProvider | null = null   # see specs/providers.yaml
   news_provider: NewsProvider | null = null
   macro_provider: MacroProvider | null = null
+  sec_provider: SECProvider | null = null   # SEC EDGAR (keyless); feeds catalyst_research
 no_candidate_short_circuit: >
   If analysis_result.recommendation.contract_symbol is null (AVOID / no
   liquid candidates), the orchestrator skips the risk_challenger and
@@ -66,7 +70,10 @@ provider_availability: >
   implementation is configured (see specs/providers.yaml). An
   unconfigured provider is not an error: the orchestrator produces a
   null finding for that section, the same way no_candidate_short_circuit
-  produces null risk_assessment/strategy_suggestion.
+  produces null risk_assessment/strategy_suggestion. catalyst_research
+  combines three streams, so it runs if ANY of news_provider/sec_provider/
+  macro_provider is non-null (SEC EDGAR is keyless, so in practice it is
+  always available), and reasons over whatever subset is present.
 
 provider_failure_mid_run: >
   A CONFIGURED provider failing at call time (rate limited even after
@@ -159,6 +166,35 @@ agents:
       requested metric. Market-wide, not ticker-specific — runs
       independent of no_candidate_short_circuit.
 
+  - name: catalyst_research
+    module: agentic_options_reporter.thesis.catalyst_research
+    function: run
+    calls_llm: true
+    requires_provider: any of (news_provider, sec_provider, macro_provider)
+    input:
+      - list[NewsArticle]       # from NewsProvider.search(ticker)
+      - list[SecFiling]         # from SECProvider.get_recent_filings(ticker)
+      - list[MacroObservation]  # the serveable DEFAULT_MACRO_METRICS
+      # All three streams fetched concurrently and independently-guarded
+      # in the orchestrator (_fetch_catalyst_inputs); a stream that fails
+      # or is unconfigured comes back empty and is recorded as a
+      # pipeline_warning, without losing the others.
+    output: CatalystFinding
+    contract: >
+      Extracts discrete, dateable CATALYSTS (earnings, filings, product
+      launches, corporate actions, macro releases) from the three
+      streams, classifying each by category, timing horizon (recent /
+      near_term / long_term / unknown), and directional impact, plus a
+      net_bias over all of them. Distinct from news_research, which
+      authors an overall sentiment summary; this agent enumerates
+      individual events. Reasons over whatever streams are present (a
+      keyless-only deployment still has SEC filings) and never invents an
+      event not grounded in the material — every field is a qualitative
+      judgment over provider facts, not a number this codebase computes.
+      Skipped (null finding) only if none of the three providers is
+      configured. Market/ticker-oriented, not candidate-specific — runs
+      independent of no_candidate_short_circuit.
+
   - name: risk_challenger
     module: agentic_options_reporter.thesis.risk_challenger
     function: run
@@ -206,6 +242,7 @@ agents:
       - FinancialResearchFinding (nullable)
       - NewsResearchFinding (nullable)
       - MacroResearchFinding (nullable)
+      - CatalystFinding (nullable)
       - RiskAssessment (nullable)
       - StrategySuggestion (nullable)
       - Recommendation
@@ -215,9 +252,9 @@ agents:
     contract: >
       Synthesizes all prior agent output into one narrative paragraph
       plus a consensus label (bullish/bearish/neutral/mixed). This is
-      the text the user actually reads. If financial/news/macro findings
-      are absent (provider not configured), synthesizes over whatever
-      is present rather than erroring.
+      the text the user actually reads. If financial/news/macro/catalyst
+      findings are absent (provider not configured), synthesizes over
+      whatever is present rather than erroring.
 
 models:
   QuantInterpretation:
@@ -245,6 +282,18 @@ models:
     outlook: str
     summary: str
 
+  CatalystItem:
+    title: str
+    category: "earnings | filing | news | macro | corporate_action | other"
+    horizon: "recent | near_term | long_term | unknown"
+    direction: "bullish | bearish | uncertain"
+    detail: str
+
+  CatalystFinding:
+    catalysts: list[CatalystItem]
+    summary: str
+    net_bias: "bullish | bearish | neutral | mixed"
+
   RiskAssessment:
     risk_level: "low | medium | high"
     concerns: list[str]
@@ -265,6 +314,7 @@ models:
     financial_research: "FinancialResearchFinding | null"
     news_research: "NewsResearchFinding | null"
     macro_research: "MacroResearchFinding | null"
+    catalyst_research: "CatalystFinding | null"
     risk_assessment: "RiskAssessment | null"
     strategy_suggestion: "StrategySuggestion | null"
     investment_thesis: InvestmentThesis

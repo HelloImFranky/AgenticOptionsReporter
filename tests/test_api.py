@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from agentic_options_reporter import main as main_module
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
+    CatalystFinding,
+    CatalystItem,
     FinancialResearchFinding,
     IndicatorSnapshot,
     InvestmentThesis,
@@ -394,6 +396,20 @@ def test_generate_thesis_persists_and_returns_research_findings(client):
     fake_result.macro_research = MacroResearchFinding(
         regime="risk_on", outlook="Favorable.", summary="Rates steady."
     )
+    fake_result.catalyst_research = CatalystFinding(
+        net_bias="bullish",
+        summary="Earnings just beat; fresh 8-K.",
+        catalysts=[
+            CatalystItem(
+                title="Q2 earnings beat", category="earnings", horizon="recent",
+                direction="bullish", detail="Beat consensus.",
+            ),
+            CatalystItem(
+                title="8-K filed", category="filing", horizon="recent",
+                direction="uncertain", detail="Material event disclosed.",
+            ),
+        ],
+    )
 
     with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
         "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
@@ -405,6 +421,9 @@ def test_generate_thesis_persists_and_returns_research_findings(client):
     assert body["financial_research"]["analyst_consensus"] == "Buy"
     assert body["news_research"]["catalysts"] == ["earnings beat"]
     assert body["macro_research"]["regime"] == "risk_on"
+    assert body["catalyst_research"]["net_bias"] == "bullish"
+    assert len(body["catalyst_research"]["catalysts"]) == 2
+    assert body["catalyst_research"]["catalysts"][0]["category"] == "earnings"
 
     # Round-trip through the GET endpoint (reads back from persistence).
     get_response = test_client.get(f"/runs/{run_id}/thesis")
@@ -413,6 +432,8 @@ def test_generate_thesis_persists_and_returns_research_findings(client):
     assert get_body["financial_research"]["company_health"] == "strong"
     assert get_body["news_research"]["sentiment"] == "bullish"
     assert get_body["macro_research"]["summary"] == "Rates steady."
+    assert get_body["catalyst_research"]["summary"] == "Earnings just beat; fresh 8-K."
+    assert get_body["catalyst_research"]["catalysts"][1]["title"] == "8-K filed"
 
 
 def test_generate_thesis_pipeline_warnings_round_trip(client):
@@ -466,6 +487,7 @@ def test_generate_thesis_absent_research_findings_round_trip_as_null(client):
     assert body["financial_research"] is None
     assert body["news_research"] is None
     assert body["macro_research"] is None
+    assert body["catalyst_research"] is None
 
 
 @pytest.mark.parametrize(
@@ -474,6 +496,7 @@ def test_generate_thesis_absent_research_findings_round_trip_as_null(client):
         "agentic_options_reporter.data.financial.FinancialProviderError",
         "agentic_options_reporter.data.news.NewsProviderError",
         "agentic_options_reporter.data.macro.MacroProviderError",
+        "agentic_options_reporter.data.sec_provider.SecProviderError",
     ],
 )
 def test_generate_thesis_configured_provider_failure_returns_502(client, error_cls_path):
@@ -537,3 +560,10 @@ def test_optional_financial_provider_returns_router_when_configured(monkeypatch)
 
     assert provider is not None
     assert provider.provider_names == ["fmp"]
+
+
+def test_optional_sec_provider_is_always_available():
+    # SEC EDGAR is keyless, so the catalyst agent always has at least the
+    # filings stream (like Hacker News for news, IMF/World Bank for macro).
+    provider = main_module._optional_sec_provider()
+    assert provider is not None

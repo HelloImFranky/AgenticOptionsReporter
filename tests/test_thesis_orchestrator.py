@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 from agentic_options_reporter.data.financial import FinancialProvider, ProviderHealth as FinancialProviderHealth
 from agentic_options_reporter.data.macro import MacroProvider
 from agentic_options_reporter.data.news import NewsProvider, ProviderHealth
+from agentic_options_reporter.data.sec_provider import SECProvider
 from agentic_options_reporter.models.schemas import (
     AnalysisResult,
     AnalystEstimates,
@@ -15,6 +16,7 @@ from agentic_options_reporter.models.schemas import (
     NewsArticle,
     Recommendation,
     ScoredCandidate,
+    SecFiling,
     SupportResistanceLevel,
     TrendAssessment,
     VolumeAssessment,
@@ -51,7 +53,26 @@ _ALL_RESPONSES_WITH_RESEARCH = {
     "macroeconomic analyst": json.dumps(
         {"regime": "risk_on", "outlook": "Favorable.", "summary": "Rates steady."}
     ),
+    "catalyst analyst": json.dumps(
+        {
+            "catalysts": [
+                {"title": "Q2 earnings beat", "category": "earnings", "horizon": "recent",
+                 "direction": "bullish", "detail": "Beat consensus."}
+            ],
+            "summary": "Earnings just beat.",
+            "net_bias": "bullish",
+        }
+    ),
 }
+
+# The research-only response keys, for tests that configure providers but
+# skip the candidate-specific risk/strategy/quant agents.
+_RESEARCH_KEYS = (
+    "financial research analyst",
+    "news research analyst",
+    "macroeconomic analyst",
+    "catalyst analyst",
+)
 
 
 class FakeFinancialProvider(FinancialProvider):
@@ -137,6 +158,30 @@ class FakeMacroProvider(MacroProvider):
         )
 
 
+class FakeSecProvider(SECProvider):
+    async def get_recent_filings(self, ticker, limit=10):
+        return [
+            SecFiling(
+                ticker=ticker.upper(), form_type="8-K", filed_at=date(2026, 6, 2),
+                url="https://sec.gov/a", accession_number="0000-26-01",
+            )
+        ]
+
+    async def get_10k(self, ticker):
+        return None
+
+    async def get_10q(self, ticker):
+        return None
+
+    async def get_8k(self, ticker):
+        return None
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider="fake-sec", healthy=True, checked_at=datetime.now(timezone.utc)
+        )
+
+
 def _candidate() -> ScoredCandidate:
     return ScoredCandidate(
         contract_symbol="TESTC00100000", option_type="call", strike=100.0, expiration=date(2026, 1, 16),
@@ -188,6 +233,7 @@ def test_full_pipeline_runs_all_four_agents():
     assert thesis.financial_research is None
     assert thesis.news_research is None
     assert thesis.macro_research is None
+    assert thesis.catalyst_research is None
 
 
 def test_pipeline_runs_research_agents_when_providers_configured():
@@ -204,13 +250,18 @@ def test_pipeline_runs_research_agents_when_providers_configured():
         financial_provider=FakeFinancialProvider(),
         news_provider=FakeNewsProvider(),
         macro_provider=FakeMacroProvider(),
+        sec_provider=FakeSecProvider(),
     )
 
-    assert len(llm.calls) == 7
+    # quant, risk, strategy, financial, news, macro, catalyst, thesis
+    assert len(llm.calls) == 8
     assert thesis.financial_research.company_health == "strong"
     assert thesis.financial_research.analyst_consensus == "Buy"
     assert thesis.news_research.sentiment == "bullish"
     assert thesis.macro_research.regime == "risk_on"
+    assert thesis.catalyst_research is not None
+    assert thesis.catalyst_research.net_bias == "bullish"
+    assert thesis.catalyst_research.catalysts[0].category == "earnings"
 
 
 def test_pipeline_runs_only_configured_research_agents():
@@ -319,11 +370,19 @@ def test_provider_failure_mid_run_records_warning_instead_of_crashing():
     assert thesis.news_research is None
     assert thesis.financial_research is not None
     assert thesis.macro_research is not None
+    # Catalyst still runs over the streams that succeeded (macro), even
+    # though its news stream hit the same rate limit.
+    assert thesis.catalyst_research is not None
     assert thesis.investment_thesis.consensus == "bullish"
 
-    assert len(thesis.pipeline_warnings) == 1
-    assert thesis.pipeline_warnings[0].startswith("news_research:")
-    assert "rate limited" in thesis.pipeline_warnings[0].lower()
+    # Both agents that depend on the news provider report the failure: the
+    # news_research step and the catalyst_research news stream.
+    news_warnings = [w for w in thesis.pipeline_warnings if w.startswith("news_research:")]
+    catalyst_warnings = [w for w in thesis.pipeline_warnings if w.startswith("catalyst_research:")]
+    assert len(news_warnings) == 1
+    assert "rate limited" in news_warnings[0].lower()
+    assert len(catalyst_warnings) == 1
+    assert "news" in catalyst_warnings[0].lower()
 
 
 def test_research_agents_run_even_without_candidate():
@@ -333,11 +392,7 @@ def test_research_agents_run_even_without_candidate():
     llm = FakeLlmClient(
         {
             "portfolio manager": json.dumps({"thesis": "No position recommended.", "consensus": "neutral"}),
-            **{
-                k: v
-                for k, v in _ALL_RESPONSES_WITH_RESEARCH.items()
-                if k in ("financial research analyst", "news research analyst", "macroeconomic analyst")
-            },
+            **{k: v for k, v in _ALL_RESPONSES_WITH_RESEARCH.items() if k in _RESEARCH_KEYS},
         }
     )
     recommendation = Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="no candidates")
@@ -349,6 +404,7 @@ def test_research_agents_run_even_without_candidate():
         financial_provider=FakeFinancialProvider(),
         news_provider=FakeNewsProvider(),
         macro_provider=FakeMacroProvider(),
+        sec_provider=FakeSecProvider(),
     )
 
     assert thesis.risk_assessment is None
@@ -356,6 +412,7 @@ def test_research_agents_run_even_without_candidate():
     assert thesis.financial_research is not None
     assert thesis.news_research is not None
     assert thesis.macro_research is not None
+    assert thesis.catalyst_research is not None
 
 
 def test_no_candidate_short_circuit_skips_risk_and_strategy():

@@ -164,3 +164,10 @@ class SecEdgarProvider(AsyncHttpProviderBase, SECProvider):
 
     async def _health_probe(self) -> None:
         await self._load_ticker_map()
+
+
+def build_sec_provider() -> SecEdgarProvider:
+    """Factory mirroring build_<name>_provider() for the other interfaces.
+    SEC EDGAR is free and keyless, so this always succeeds — there is one
+    source and no failover router to compose (see specs/providers.yaml)."""
+    return SecEdgarProvider()

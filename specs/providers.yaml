@@ -29,11 +29,14 @@ phase_2b_scope: >
   provider's outage, rate limit, or quota exhaustion no longer skips the
   whole research agent; the router falls over to the next configured
   implementation instead.
-deferred:
+shipped:
   - name: catalyst_agent
-    reason: >
-      Depends on NewsProvider + SECProvider + MacroProvider all being
-      wired up; deferred until those three have shipped and proven out.
+    note: >
+      The catalyst_research agent (specs/agents.yaml, phase_2b) combines
+      NewsProvider + SECProvider + MacroProvider into a structured list of
+      dateable catalysts; SECProvider was async-ified onto data.async_http
+      and wired into the pipeline for it.
+deferred:
   - name: additional_market_data_providers
     reason: >
       Alpha Vantage, Twelve Data remain unimplemented alternates to the
@@ -454,8 +457,8 @@ interfaces:
       response cache, health probe). One keyless source and no failover
       router (EDGAR is the sole free provider of the full filings index),
       so this stays a single adapter module rather than a package. The
-      sync thesis pipeline will bridge with asyncio.run() when the
-      Catalyst agent is wired.
+      sync thesis pipeline bridges with asyncio.run() at the
+      catalyst_research step (thesis/orchestrator._fetch_catalyst_inputs).
     methods:
       get_recent_filings(ticker: str, limit: int = 10) -> list[SecFiling]
       get_10k(ticker: str) -> SecFiling | null
@@ -477,5 +480,6 @@ interfaces:
           SECProviderRouter or catalyst fan-out can treat SEC failures
           generically.
     note: >
-      Not yet wired into an agent (reserved for the Catalyst agent); only
-      one implementation exists.
+      Wired into the catalyst_research agent (specs/agents.yaml) as the
+      filings stream; SEC EDGAR is the only implementation. Keyless, so it
+      is always available — the catalyst agent always has at least filings.

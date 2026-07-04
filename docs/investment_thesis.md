@@ -23,11 +23,12 @@ agent in `specs/agents.yaml` for what it is and isn't allowed to author.
 
 Phase 1 only reasoned over data the quant engine already produced for a
 persisted run — no external data sources (news, macro, filings) were
-wired up. Phase 2a (below) adds three optional research agents backed by
-real external providers; see `specs/providers.yaml` for the provider
-interfaces and `specs/agents.yaml: deferred` for what's still out of
-scope (a Catalyst agent, and having Risk/Strategy incorporate the new
-research findings).
+wired up. Phase 2a added three optional research agents (Financial, News,
+Macro) backed by real external providers, and phase 2b adds a **Catalyst
+Research** agent that combines news + SEC filings + macro into a
+structured list of dateable catalysts. See `specs/providers.yaml` for the
+provider interfaces and `specs/agents.yaml: deferred` for what's still
+out of scope (having Risk/Strategy incorporate the research findings).
 
 ## The pipeline
 
@@ -41,6 +42,7 @@ Quant Interpreter    -- narrates the score breakdown; authors no numbers
 Financial Research   -- optional; skipped (null) if no FinancialProvider configured
 News Research        -- optional; skipped (null) if no NewsProvider configured
 Macro Research        -- optional; skipped (null) if no MacroProvider configured
+Catalyst Research    -- optional; combines news + SEC filings + macro into dateable catalysts
         |
         v
 Risk Challenger      -- argues against the trade; risk_level is its judgment call
@@ -56,9 +58,9 @@ If the run's recommendation has no candidate contract (`AVOID`, or an
 empty candidate list), Risk Challenger and Options Strategy are skipped
 entirely — there's nothing for them to assess or size — and Investment
 Thesis produces a short explanation of why no position is recommended.
-The three research agents are ticker/market-wide rather than
-contract-specific, so they still run in that case (as long as their
-provider is configured).
+The research agents (Financial, News, Macro, Catalyst) are
+ticker/market-wide rather than contract-specific, so they still run in
+that case (as long as their provider is configured).
 
 ## Research agents
 
@@ -72,11 +74,25 @@ agent, and the resulting `AgentThesisResult` field is `null` — mirrored
 in the Agents tab as a muted "Skipped — no ... provider configured"
 message rather than an error.
 
+**Catalyst Research** is the exception to the one-agent-one-provider
+shape: it combines *three* streams — recent news (`NewsProvider`), recent
+SEC filings (`SECProvider`, backed by the keyless SEC EDGAR API), and
+macro indicators (`MacroProvider`) — into a structured list of discrete,
+dateable catalysts (earnings, filings, corporate actions, macro releases)
+each classified by category, timing horizon, and directional impact, plus
+a net bias. It runs if *any* of the three streams is configured (each is
+fetched under its own guard, so one failing only drops that stream, as a
+`pipeline_warning`); because SEC EDGAR is keyless, in practice it always
+has at least the filings stream. Distinct from News Research, which
+authors an overall sentiment summary — Catalyst Research enumerates
+individual events.
+
 | agent | provider interface | implementations | env var(s) |
 |---|---|---|---|
 | Financial Research | `FinancialProvider` | Financial Modeling Prep, Finnhub, Alpha Vantage | `FMP_API_KEY`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY` |
 | News Research | `NewsProvider` | Finnhub, NewsData.io, The Guardian, GNews, Alpha Vantage, NewsAPI, Hacker News (keyless) | `FINNHUB_API_KEY`, `NEWSDATA_API_KEY`, `GUARDIAN_API_KEY`, `GNEWS_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `NEWSAPI_API_KEY` |
 | Macro Research | `MacroProvider` | FRED, BLS, BEA, IMF (keyless), World Bank (keyless) | `FRED_API_KEY`, `BLS_API_KEY`, `BEA_API_KEY` |
+| Catalyst Research | `NewsProvider` + `SECProvider` + `MacroProvider` | (the above) + SEC EDGAR (keyless) | (the above) + `SEC_EDGAR_USER_AGENT` (optional) |
 
 ### Automatic failover across data providers
 
@@ -168,11 +184,10 @@ split used for `QuantInterpretation.overall_score`. `company_health`,
 `growth`, `profitability`, and `cash_flow` are legitimate LLM judgment
 calls over the given facts, analogous to `risk_level`.
 
-An async `SECProvider` interface (`SecEdgarProvider`, backed by the free,
+The async `SECProvider` interface (`SecEdgarProvider`, backed by the free,
 keyless SEC EDGAR API, on the same `data/async_http.py` base as the other
-three) also exists in `data/sec_provider.py` for a future Catalyst agent,
-but isn't wired into the pipeline yet (see `specs/providers.yaml:
-SECProvider`).
+three) in `data/sec_provider.py` feeds the Catalyst Research agent's
+filings stream (see `specs/providers.yaml: SECProvider`).
 
 ## Execution model
 

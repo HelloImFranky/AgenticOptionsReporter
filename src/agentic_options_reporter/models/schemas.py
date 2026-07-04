@@ -285,6 +285,14 @@ ProfitabilityLevel = Literal["high", "moderate", "low"]
 CashFlowState = Literal["positive", "neutral", "negative"]
 NewsSentiment = Literal["bullish", "bearish", "neutral"]
 MacroRegime = Literal["risk_on", "risk_off", "neutral"]
+CatalystCategory = Literal[
+    "earnings", "filing", "news", "macro", "corporate_action", "other"
+]
+# When a catalyst sits relative to now: recent = already occurred,
+# near_term = expected within weeks, long_term = months out, unknown =
+# no datable timing in the source material.
+CatalystHorizon = Literal["recent", "near_term", "long_term", "unknown"]
+CatalystDirection = Literal["bullish", "bearish", "uncertain"]
 
 
 class QuantInterpretation(BaseModel):
@@ -316,6 +324,25 @@ class MacroResearchFinding(BaseModel):
     summary: str
 
 
+class CatalystItem(BaseModel):
+    """One discrete, dateable event that could move the stock, extracted
+    from provider material (news article, SEC filing, or macro release).
+    All fields are the catalyst agent's qualitative reading of the given
+    material — it never invents an event not grounded in an input."""
+
+    title: str
+    category: CatalystCategory
+    horizon: CatalystHorizon
+    direction: CatalystDirection
+    detail: str = ""
+
+
+class CatalystFinding(BaseModel):
+    catalysts: list[CatalystItem]
+    summary: str
+    net_bias: Consensus
+
+
 class RiskAssessment(BaseModel):
     risk_level: RiskLevel
     concerns: list[str]
@@ -339,6 +366,7 @@ class AgentThesisResult(BaseModel):
     financial_research: FinancialResearchFinding | None = None
     news_research: NewsResearchFinding | None = None
     macro_research: MacroResearchFinding | None = None
+    catalyst_research: CatalystFinding | None = None
     risk_assessment: RiskAssessment | None
     strategy_suggestion: StrategySuggestion | None
     investment_thesis: InvestmentThesis

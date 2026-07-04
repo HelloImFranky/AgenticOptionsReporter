@@ -125,8 +125,8 @@ treat a `*ProviderError` (zero providers configured) as "not configured"
 for how the Financial/News/Macro Research agents consume these providers.
 `SECProvider` is async (on the shared `data/async_http.py` base, like the
 other three) but has only one implementation and no failover router — SEC
-EDGAR is the sole free provider of the full filings index — and isn't
-wired into any agent yet (reserved for a future Catalyst agent).
+EDGAR is the sole free provider of the full filings index. It feeds the
+Catalyst Research agent's filings stream (see `docs/investment_thesis.md`).
 
 ## Claude Code instructions
 

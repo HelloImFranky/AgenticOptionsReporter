@@ -84,6 +84,36 @@ def _bullet_list(items: list[str]) -> ft.Column:
     )
 
 
+_CATALYST_DIRECTION_TONES = {"bullish": "success", "bearish": "danger", "uncertain": "neutral"}
+
+
+def _catalyst_entry(item: dict) -> ft.Column:
+    """One catalyst row: a direction-toned badge, the title, a muted
+    category · horizon label, and the detail."""
+    direction = item.get("direction", "uncertain")
+    tone = _CATALYST_DIRECTION_TONES.get(direction, "neutral")
+    badge = ft.Container(
+        content=ft.Text(direction.upper(), size=9, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+        bgcolor=_tone_colors(tone)[0],
+        border_radius=12,
+        padding=ft.padding.symmetric(vertical=2, horizontal=8),
+    )
+    header = ft.Row(
+        [badge, ft.Text(item.get("title", ""), size=12, weight=ft.FontWeight.W_600, expand=True)],
+        spacing=6,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+    meta = ft.Text(
+        f"{item.get('category', '—')} · {item.get('horizon', '—')}".replace("_", " "),
+        size=10,
+        color=ft.Colors.ON_SURFACE_VARIANT,
+    )
+    controls = [header, meta]
+    if item.get("detail"):
+        controls.append(ft.Text(item["detail"], size=11, selectable=True))
+    return ft.Column(controls, spacing=2, tight=True)
+
+
 def _agent_message(name: str, icon: str, color: str, *body: ft.Control) -> ft.Row:
     avatar = ft.Container(
         content=ft.Icon(icon, size=16, color=ft.Colors.WHITE),
@@ -575,6 +605,13 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         [macro_regime_badge, macro_summary_text, macro_outlook_text], spacing=6, tight=True
     )
 
+    catalyst_bias_badge = ft.Container(visible=False)
+    catalyst_summary_text = ft.Text("", size=13, selectable=True)
+    catalyst_items_column = ft.Column([], spacing=8, tight=True)
+    catalyst_message_body = ft.Column(
+        [catalyst_bias_badge, catalyst_summary_text, catalyst_items_column], spacing=8, tight=True
+    )
+
     risk_badge = ft.Container(visible=False)
     risk_concerns_column = ft.Column([], spacing=4, tight=True)
     risk_sizing_text = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, italic=True)
@@ -605,6 +642,10 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
                 _agent_message("News Research", ft.Icons.NEWSPAPER, ft.Colors.BLUE_700, news_message_body),
                 ft.Divider(),
                 _agent_message("Macro Research", ft.Icons.PUBLIC, ft.Colors.AMBER_800, macro_message_body),
+                ft.Divider(),
+                _agent_message(
+                    "Catalyst Research", ft.Icons.EVENT_NOTE_OUTLINED, ft.Colors.CYAN_800, catalyst_message_body
+                ),
                 ft.Divider(),
                 _agent_message("Risk Challenger", ft.Icons.SHIELD_OUTLINED, ft.Colors.DEEP_ORANGE, risk_message_body),
                 ft.Divider(),
@@ -656,6 +697,7 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
         financial = result.get("financial_research")
         news = result.get("news_research")
         macro = result.get("macro_research")
+        catalyst = result.get("catalyst_research")
         risk = result.get("risk_assessment")
         strategy = result.get("strategy_suggestion")
         investment_thesis = result["investment_thesis"]
@@ -774,6 +816,36 @@ def build_view(page: ft.Page, client: ApiClient) -> None:
             macro_outlook_text.value = ""
             macro_message_body.controls = [
                 _skipped_message(_skip_reason("macro_research", "Skipped — no macro data provider configured."))
+            ]
+
+        if catalyst is not None:
+            net_bias = catalyst.get("net_bias", "—")
+            catalyst_bias_badge.content = ft.Text(
+                f"NET: {net_bias.upper()}", size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+            )
+            catalyst_bias_badge.bgcolor = _tone_colors(consensus_tone(net_bias))[0]
+            catalyst_bias_badge.border_radius = 20
+            catalyst_bias_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+            catalyst_bias_badge.visible = True
+            catalyst_summary_text.value = catalyst.get("summary", "")
+            catalyst_items_column.controls = [
+                _catalyst_entry(item) for item in catalyst.get("catalysts", [])
+            ] or [ft.Text("No discrete catalysts identified.", size=12, italic=True,
+                          color=ft.Colors.ON_SURFACE_VARIANT)]
+            catalyst_message_body.controls = [
+                catalyst_bias_badge, catalyst_summary_text, catalyst_items_column
+            ]
+        else:
+            catalyst_bias_badge.visible = False
+            catalyst_summary_text.value = ""
+            catalyst_items_column.controls = []
+            catalyst_message_body.controls = [
+                _skipped_message(
+                    _skip_reason(
+                        "catalyst_research",
+                        "Skipped — no news, SEC, or macro provider configured.",
+                    )
+                )
             ]
 
         if risk is not None:
