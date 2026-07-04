@@ -1,130 +1,133 @@
+import asyncio
+from datetime import date, datetime, timezone
+
+import httpx
 import pytest
 
-from agentic_options_reporter.data.macro_provider import (
+from agentic_options_reporter.data.async_http import AsyncHttpProviderBase
+from agentic_options_reporter.data.macro import (
     BeaMacroProvider,
     BlsMacroProvider,
     FredMacroProvider,
+    ImfMacroProvider,
     MacroProvider,
     MacroProviderError,
     MacroProviderRateLimited,
     MacroProviderRouter,
     MacroProviderUnsupported,
+    WorldBankMacroProvider,
     build_macro_provider,
 )
+from agentic_options_reporter.models.schemas import CpiSnapshot
 
-from conftest import FakeHttpResponse, FakeRequestsGet
+
+@pytest.fixture(autouse=True)
+def _reset_provider_cache():
+    AsyncHttpProviderBase.clear_shared_cache()
+    yield
+    AsyncHttpProviderBase.clear_shared_cache()
 
 
-def test_requires_api_key(monkeypatch):
-    monkeypatch.delenv("FRED_API_KEY", raising=False)
+@pytest.fixture(autouse=True)
+def _clear_key_env_vars(monkeypatch):
+    for var in ("FRED_API_KEY", "BLS_API_KEY", "BEA_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("AOR_MACRO_PROVIDER_FALLBACK_ORDER", raising=False)
+
+
+class RecordingTransport:
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if not self._responses:
+            raise AssertionError("No more fake HTTP responses queued")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        status_code, payload = item
+        return httpx.Response(status_code, json=payload)
+
+
+def _client(transport: RecordingTransport) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(transport))
+
+
+_KEYED_PROVIDERS = [FredMacroProvider, BlsMacroProvider, BeaMacroProvider]
+
+
+@pytest.mark.parametrize("provider_cls", _KEYED_PROVIDERS)
+def test_keyed_provider_requires_api_key(provider_cls):
     with pytest.raises(MacroProviderError):
-        FredMacroProvider()
+        provider_cls()
 
 
-def test_accepts_explicit_api_key(monkeypatch):
-    monkeypatch.delenv("FRED_API_KEY", raising=False)
-    provider = FredMacroProvider(api_key="test-key")
-    assert isinstance(provider, MacroProvider)
+@pytest.mark.parametrize("provider_cls", [ImfMacroProvider, WorldBankMacroProvider])
+def test_keyless_provider_needs_no_api_key(provider_cls):
+    assert isinstance(provider_cls(), MacroProvider)
 
 
-def _observations(*values_and_dates):
+# -- FRED --
+
+
+def _fred_observations(*values_and_dates):
     return {"observations": [{"value": v, "date": d} for v, d in values_and_dates]}
 
 
-def test_get_interest_rates(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(_observations(("5.25", "2026-06-01"))),  # FEDFUNDS
-        FakeHttpResponse(_observations(("4.30", "2026-06-01"))),  # DGS10
-        FakeHttpResponse(_observations(("4.10", "2026-06-01"))),  # DGS2
+def test_fred_get_interest_rates():
+    transport = RecordingTransport(
+        (200, _fred_observations(("5.25", "2026-06-01"))),  # FEDFUNDS
+        (200, _fred_observations(("4.30", "2026-06-01"))),  # DGS10
+        (200, _fred_observations(("4.10", "2026-06-01"))),  # DGS2
     )
-    provider = FredMacroProvider(api_key="test-key")
-    rates = provider.get_interest_rates()
+    provider = FredMacroProvider(api_key="test-key", client=_client(transport))
+
+    rates = asyncio.run(provider.get_interest_rates())
+
     assert rates.fed_funds_rate == 5.25
     assert rates.ten_year_yield == 4.30
     assert rates.two_year_yield == 4.10
+    # All three series fetched concurrently in one bridge.
+    assert len(transport.requests) == 3
 
 
-def test_get_interest_rates_handles_missing_series(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(_observations()),
-        FakeHttpResponse(_observations()),
-        FakeHttpResponse(_observations()),
-    )
-    provider = FredMacroProvider(api_key="test-key")
-    rates = provider.get_interest_rates()
-    assert rates.fed_funds_rate is None
-    assert rates.ten_year_yield is None
+def test_fred_get_cpi_computes_yoy_change():
+    observations = [("310.0", "2026-06-01")] + [("300.0", "2025-06-01")] * 12
+    transport = RecordingTransport((200, _fred_observations(*observations)))
+    provider = FredMacroProvider(api_key="test-key", client=_client(transport))
 
+    cpi = asyncio.run(provider.get_cpi())
 
-def test_get_cpi_computes_yoy_change(fake_requests_module):
-    observations = [("310.0", "2026-06-01")] + [("300.0", f"2025-0{i}-01") for i in range(1, 10)]
-    # 13 observations requested (limit=periods_per_year+1=13); pad to 13.
-    while len(observations) < 13:
-        observations.append(("300.0", "2025-01-01"))
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_observations(*observations)))
-    provider = FredMacroProvider(api_key="test-key")
-    cpi = provider.get_cpi()
     assert cpi.value == 310.0
     assert cpi.yoy_change_pct == pytest.approx((310.0 - 300.0) / 300.0 * 100)
 
 
-def test_get_cpi_raises_when_no_observations(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_observations()))
-    provider = FredMacroProvider(api_key="test-key")
-    with pytest.raises(MacroProviderError):
-        provider.get_cpi()
-
-
-def test_get_gdp_computes_yoy_growth(fake_requests_module):
-    observations = [("23000.0", "2026-04-01"), ("22000.0", "2025-04-01")]
-    while len(observations) < 5:
-        observations.append(("22000.0", "2024-04-01"))
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_observations(*observations)))
-    provider = FredMacroProvider(api_key="test-key")
-    gdp = provider.get_gdp()
-    assert gdp.value == 23000.0
-    assert gdp.yoy_growth_pct == pytest.approx((23000.0 - 22000.0) / 22000.0 * 100)
-
-
-def test_get_gdp_raises_when_no_observations(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_observations()))
-    provider = FredMacroProvider(api_key="test-key")
-    with pytest.raises(MacroProviderError):
-        provider.get_gdp()
-
-
-def test_get_macro_calendar_returns_empty_list(fake_requests_module):
-    provider = FredMacroProvider(api_key="test-key")
-    assert provider.get_macro_calendar() == []
-
-
-def test_fred_drops_missing_value_marker(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(_observations((".", "2026-06-01"), ("5.25", "2026-05-01")))
+def test_fred_drops_missing_value_marker():
+    transport = RecordingTransport(
+        (200, _fred_observations((".", "2026-06-01"), ("310.0", "2026-05-01")))
     )
-    provider = FredMacroProvider(api_key="test-key")
-    rate = provider._latest_value("FEDFUNDS")
-    assert rate[0] == 5.25
+    provider = FredMacroProvider(api_key="test-key", client=_client(transport))
+
+    cpi = asyncio.run(provider.get_cpi())
+
+    assert cpi.value == 310.0
 
 
-def test_http_failure_raises_macro_provider_error(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(None, raise_exc=fake_requests_module.exceptions.RequestException("boom"))
-    )
-    provider = FredMacroProvider(api_key="test-key")
+def test_fred_get_cpi_raises_when_no_observations():
+    transport = RecordingTransport((200, _fred_observations()))
+    provider = FredMacroProvider(api_key="test-key", client=_client(transport))
     with pytest.raises(MacroProviderError):
-        provider.get_interest_rates()
+        asyncio.run(provider.get_cpi())
 
 
-def test_rate_limit_status_raises_macro_provider_rate_limited(fake_requests_module):
-    exc = fake_requests_module.exceptions.RequestException("too many requests")
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(None, status_code=429, raise_exc=exc))
+def test_fred_get_macro_calendar_returns_empty_list():
     provider = FredMacroProvider(api_key="test-key")
-    with pytest.raises(MacroProviderRateLimited):
-        provider.get_interest_rates()
+    assert asyncio.run(provider.get_macro_calendar()) == []
 
 
-# -- BlsMacroProvider --
+# -- BLS --
 
 
 def _bls_series(*values_and_periods):
@@ -144,58 +147,38 @@ def _bls_series(*values_and_periods):
     }
 
 
-def test_bls_requires_api_key(monkeypatch):
-    monkeypatch.delenv("BLS_API_KEY", raising=False)
-    with pytest.raises(MacroProviderError):
-        BlsMacroProvider()
-
-
-def test_bls_get_cpi_computes_yoy_change(fake_requests_module):
+def test_bls_get_cpi_computes_yoy_change():
     entries = [("310.0", "2026", "M06")] + [
-        ("300.0", "2025", f"M{i:02d}") for i in range(6, 0, -1)
-    ] + [("300.0", "2025", f"M{i:02d}") for i in range(12, 6, -1)]
-    # Ensure at least 13 entries, most-recent-first after sorting.
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_bls_series(*entries)))
-    provider = BlsMacroProvider(api_key="test-key")
-    cpi = provider.get_cpi()
+        ("300.0", "2025", f"M{i:02d}") for i in range(12, 0, -1)
+    ]
+    transport = RecordingTransport((200, _bls_series(*entries)))
+    provider = BlsMacroProvider(api_key="test-key", client=_client(transport))
+
+    cpi = asyncio.run(provider.get_cpi())
+
     assert cpi.value == 310.0
     assert cpi.yoy_change_pct == pytest.approx((310.0 - 300.0) / 300.0 * 100)
+    assert cpi.as_of == date(2026, 6, 1)
 
 
-def test_bls_get_cpi_raises_when_no_observations(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_bls_series()))
-    provider = BlsMacroProvider(api_key="test-key")
-    with pytest.raises(MacroProviderError):
-        provider.get_cpi()
-
-
-def test_bls_get_interest_rates_is_unsupported():
-    provider = BlsMacroProvider(api_key="test-key")
-    with pytest.raises(MacroProviderUnsupported):
-        provider.get_interest_rates()
-
-
-def test_bls_get_gdp_is_unsupported():
-    provider = BlsMacroProvider(api_key="test-key")
-    with pytest.raises(MacroProviderUnsupported):
-        provider.get_gdp()
-
-
-def test_bls_get_macro_calendar_returns_empty_list():
-    provider = BlsMacroProvider(api_key="test-key")
-    assert provider.get_macro_calendar() == []
-
-
-def test_bls_request_failure_raises_on_bad_status(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse({"status": "REQUEST_NOT_PROCESSED", "message": ["invalid key"]})
+def test_bls_bad_status_raises():
+    transport = RecordingTransport(
+        (200, {"status": "REQUEST_NOT_PROCESSED", "message": ["invalid key"]})
     )
-    provider = BlsMacroProvider(api_key="test-key")
+    provider = BlsMacroProvider(api_key="test-key", client=_client(transport))
     with pytest.raises(MacroProviderError):
-        provider.get_cpi()
+        asyncio.run(provider.get_cpi())
 
 
-# -- BeaMacroProvider --
+def test_bls_rates_and_gdp_are_unsupported():
+    provider = BlsMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderUnsupported):
+        asyncio.run(provider.get_interest_rates())
+    with pytest.raises(MacroProviderUnsupported):
+        asyncio.run(provider.get_gdp())
+
+
+# -- BEA --
 
 
 def _bea_data(*rows):
@@ -203,117 +186,264 @@ def _bea_data(*rows):
         "BEAAPI": {
             "Results": {
                 "Data": [
-                    {"TimePeriod": period, "LineNumber": "1", "DataValue": value} for value, period in rows
+                    {"TimePeriod": period, "LineNumber": "1", "DataValue": value}
+                    for value, period in rows
                 ]
             }
         }
     }
 
 
-def test_bea_requires_api_key(monkeypatch):
-    monkeypatch.delenv("BEA_API_KEY", raising=False)
-    with pytest.raises(MacroProviderError):
-        BeaMacroProvider()
-
-
-def test_bea_get_gdp_computes_yoy_growth(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(
-        FakeHttpResponse(
-            _bea_data(
-                ("23,000.0", "2026Q2"),
-                ("22,500.0", "2026Q1"),
-                ("22,300.0", "2025Q4"),
-                ("22,100.0", "2025Q3"),
-                ("22,000.0", "2025Q2"),
-            )
-        )
+def test_bea_get_gdp_computes_yoy_growth():
+    transport = RecordingTransport(
+        (200, _bea_data(
+            ("23,000.0", "2026Q2"),
+            ("22,500.0", "2026Q1"),
+            ("22,300.0", "2025Q4"),
+            ("22,100.0", "2025Q3"),
+            ("22,000.0", "2025Q2"),
+        ))
     )
-    provider = BeaMacroProvider(api_key="test-key")
-    gdp = provider.get_gdp()
+    provider = BeaMacroProvider(api_key="test-key", client=_client(transport))
+
+    gdp = asyncio.run(provider.get_gdp())
+
     assert gdp.value == 23000.0
     assert gdp.yoy_growth_pct == pytest.approx((23000.0 - 22000.0) / 22000.0 * 100)
-    assert gdp.as_of.year == 2026
-    assert gdp.as_of.month == 6
+    assert gdp.as_of == date(2026, 6, 1)
 
 
-def test_bea_get_gdp_raises_when_no_data(fake_requests_module):
-    fake_requests_module.get = FakeRequestsGet(FakeHttpResponse(_bea_data()))
+def test_bea_cpi_and_rates_are_unsupported():
     provider = BeaMacroProvider(api_key="test-key")
+    with pytest.raises(MacroProviderUnsupported):
+        asyncio.run(provider.get_cpi())
+    with pytest.raises(MacroProviderUnsupported):
+        asyncio.run(provider.get_interest_rates())
+
+
+# -- IMF --
+
+
+def _imf_series(*values_and_periods):
+    observations = [
+        {"@TIME_PERIOD": period, "@OBS_VALUE": value} for value, period in values_and_periods
+    ]
+    return {"CompactData": {"DataSet": {"Series": {"Obs": observations}}}}
+
+
+def test_imf_get_cpi_computes_yoy_change():
+    entries = [("310.0", "2026-06")] + [(f"300.0", f"2025-{m:02d}") for m in range(12, 0, -1)]
+    transport = RecordingTransport((200, _imf_series(*entries)))
+    provider = ImfMacroProvider(client=_client(transport))
+
+    cpi = asyncio.run(provider.get_cpi())
+
+    assert cpi.value == 310.0
+    assert cpi.yoy_change_pct == pytest.approx((310.0 - 300.0) / 300.0 * 100)
+    assert cpi.as_of == date(2026, 6, 1)
+
+
+def test_imf_get_gdp_parses_quarterly_periods():
+    entries = [
+        ("23000.0", "2026-Q2"),
+        ("22500.0", "2026-Q1"),
+        ("22300.0", "2025-Q4"),
+        ("22100.0", "2025-Q3"),
+        ("22000.0", "2025-Q2"),
+    ]
+    transport = RecordingTransport((200, _imf_series(*entries)))
+    provider = ImfMacroProvider(client=_client(transport))
+
+    gdp = asyncio.run(provider.get_gdp())
+
+    assert gdp.value == 23000.0
+    assert gdp.yoy_growth_pct == pytest.approx((23000.0 - 22000.0) / 22000.0 * 100)
+    assert gdp.as_of == date(2026, 6, 1)
+
+
+def test_imf_handles_single_observation_returned_as_bare_dict():
+    payload = {"CompactData": {"DataSet": {"Series": {"Obs": {"@TIME_PERIOD": "2026-06", "@OBS_VALUE": "310.0"}}}}}
+    transport = RecordingTransport((200, payload))
+    provider = ImfMacroProvider(client=_client(transport))
+
+    cpi = asyncio.run(provider.get_cpi())
+
+    assert cpi.value == 310.0
+    assert cpi.yoy_change_pct is None
+
+
+def test_imf_rates_are_unsupported():
+    provider = ImfMacroProvider()
+    with pytest.raises(MacroProviderUnsupported):
+        asyncio.run(provider.get_interest_rates())
+
+
+# -- World Bank --
+
+
+def _worldbank_rows(*values_and_years):
+    return [
+        {"page": 1},
+        [{"date": year, "value": value} for value, year in values_and_years],
+    ]
+
+
+def test_worldbank_get_gdp_computes_yoy_growth():
+    transport = RecordingTransport(
+        (200, _worldbank_rows((28_000_000_000_000, "2025"), (27_000_000_000_000, "2024")))
+    )
+    provider = WorldBankMacroProvider(client=_client(transport))
+
+    gdp = asyncio.run(provider.get_gdp())
+
+    assert gdp.value == 28_000_000_000_000
+    assert gdp.yoy_growth_pct == pytest.approx(
+        (28_000_000_000_000 - 27_000_000_000_000) / 27_000_000_000_000 * 100
+    )
+    assert gdp.as_of == date(2025, 12, 31)
+
+
+def test_worldbank_skips_unpublished_null_years():
+    transport = RecordingTransport(
+        (200, _worldbank_rows((None, "2026"), (310.0, "2025"), (300.0, "2024")))
+    )
+    provider = WorldBankMacroProvider(client=_client(transport))
+
+    cpi = asyncio.run(provider.get_cpi())
+
+    assert cpi.value == 310.0
+    assert cpi.as_of == date(2025, 12, 31)
+
+
+def test_worldbank_raises_when_no_observations():
+    transport = RecordingTransport((200, _worldbank_rows()))
+    provider = WorldBankMacroProvider(client=_client(transport))
     with pytest.raises(MacroProviderError):
-        provider.get_gdp()
+        asyncio.run(provider.get_gdp())
 
 
-def test_bea_get_cpi_is_unsupported():
-    provider = BeaMacroProvider(api_key="test-key")
+def test_worldbank_rates_are_unsupported():
+    provider = WorldBankMacroProvider()
     with pytest.raises(MacroProviderUnsupported):
-        provider.get_cpi()
+        asyncio.run(provider.get_interest_rates())
 
 
-def test_bea_get_interest_rates_is_unsupported():
-    provider = BeaMacroProvider(api_key="test-key")
-    with pytest.raises(MacroProviderUnsupported):
-        provider.get_interest_rates()
+# -- Shared adapter behavior --
 
 
-def test_bea_get_macro_calendar_returns_empty_list():
-    provider = BeaMacroProvider(api_key="test-key")
-    assert provider.get_macro_calendar() == []
+def test_http_429_raises_rate_limited():
+    transport = RecordingTransport((429, {}))
+    provider = WorldBankMacroProvider(client=_client(transport))
+    with pytest.raises(MacroProviderRateLimited):
+        asyncio.run(provider.get_gdp())
+
+
+def test_identical_requests_are_served_from_cache_across_instances():
+    transport = RecordingTransport(
+        (200, _worldbank_rows((28_000_000_000_000, "2025")))
+    )
+
+    first = WorldBankMacroProvider(client=_client(transport))
+    asyncio.run(first.get_gdp())
+    second = WorldBankMacroProvider(client=_client(transport))
+    asyncio.run(second.get_gdp())
+
+    assert len(transport.requests) == 1
+
+
+def test_health_reports_unhealthy_instead_of_raising():
+    transport = RecordingTransport((503, {}))
+    provider = WorldBankMacroProvider(client=_client(transport))
+
+    health = asyncio.run(provider.health())
+
+    assert health.healthy is False
+    assert health.provider == "World Bank"
 
 
 # -- MacroProviderRouter --
 
 
-class _FakeMacroClient(MacroProvider):
-    def __init__(self, cpi=None, error=None):
+class _StubMacroProvider(MacroProvider):
+    def __init__(self, cpi=None, error=None, name="stub"):
         self._cpi = cpi
         self._error = error
+        self._name = name
 
-    def get_interest_rates(self):
+    async def get_interest_rates(self):
         raise NotImplementedError
 
-    def get_cpi(self):
+    async def get_cpi(self):
         if self._error is not None:
             raise self._error
         return self._cpi
 
-    def get_gdp(self):
+    async def get_gdp(self):
         raise NotImplementedError
 
-    def get_macro_calendar(self):
+    async def get_macro_calendar(self):
         return []
 
+    async def health(self):
+        from agentic_options_reporter.data.macro import ProviderHealth
 
-def test_macro_provider_router_rejects_empty_client_list():
+        return ProviderHealth(
+            provider=self._name,
+            healthy=self._error is None,
+            detail="" if self._error is None else str(self._error),
+            checked_at=datetime.now(timezone.utc),
+        )
+
+
+def test_router_rejects_empty_client_list():
     with pytest.raises(MacroProviderError):
         MacroProviderRouter([])
 
 
-def test_macro_provider_router_falls_through_when_provider_lacks_series():
-    from datetime import date as date_cls
-
-    from agentic_options_reporter.models.schemas import CpiSnapshot
-
-    unsupported = _FakeMacroClient(error=MacroProviderUnsupported("no CPI"))
-    supported = _FakeMacroClient(cpi=CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date_cls(2026, 6, 1)))
+def test_router_falls_through_when_specialist_lacks_series():
+    unsupported = _StubMacroProvider(error=MacroProviderUnsupported("no CPI"))
+    supported = _StubMacroProvider(
+        cpi=CpiSnapshot(value=310.0, yoy_change_pct=3.3, as_of=date(2026, 6, 1))
+    )
     router = MacroProviderRouter([("first", unsupported), ("second", supported)])
 
-    result = router.get_cpi()
+    cpi = asyncio.run(router.get_cpi())
 
-    assert result.value == 310.0
+    assert cpi.value == 310.0
 
 
-def test_build_macro_provider_raises_when_unconfigured(monkeypatch):
-    for var in ("FRED_API_KEY", "BLS_API_KEY", "BEA_API_KEY"):
-        monkeypatch.delenv(var, raising=False)
-    with pytest.raises(MacroProviderError):
-        build_macro_provider()
+def test_router_health_aggregates():
+    healthy = _StubMacroProvider(name="up")
+    unhealthy = _StubMacroProvider(error=MacroProviderUnsupported("down"), name="down")
+    router = MacroProviderRouter([("up", healthy), ("down", unhealthy)])
+
+    health = asyncio.run(router.health())
+
+    assert health.healthy is True
+    assert "up: ok" in health.detail
+
+
+# -- build_macro_provider --
+
+
+def test_build_macro_provider_always_includes_keyless_sources():
+    provider = build_macro_provider()
+    assert provider.provider_names == ["imf", "worldbank"]
+
+
+def test_build_macro_provider_orders_configured_providers(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "test-key")
+    monkeypatch.setenv("BLS_API_KEY", "test-key")
+
+    provider = build_macro_provider()
+
+    assert provider.provider_names == ["fred", "bls", "imf", "worldbank"]
 
 
 def test_build_macro_provider_respects_fallback_order_env_var(monkeypatch):
     monkeypatch.setenv("FRED_API_KEY", "test-key")
-    monkeypatch.setenv("BLS_API_KEY", "test-key")
-    monkeypatch.setenv("AOR_MACRO_PROVIDER_FALLBACK_ORDER", "bls,fred")
+    monkeypatch.setenv("AOR_MACRO_PROVIDER_FALLBACK_ORDER", "worldbank,fred")
 
     provider = build_macro_provider()
 
-    assert provider.provider_names == ["bls", "fred"]
+    assert provider.provider_names == ["worldbank", "fred"]

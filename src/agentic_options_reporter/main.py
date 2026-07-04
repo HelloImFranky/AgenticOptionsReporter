@@ -10,7 +10,7 @@ from agentic_options_reporter.data.financial import (
     FinancialProviderError,
     build_financial_provider,
 )
-from agentic_options_reporter.data.macro_provider import (
+from agentic_options_reporter.data.macro import (
     MacroProvider,
     MacroProviderError,
     build_macro_provider,

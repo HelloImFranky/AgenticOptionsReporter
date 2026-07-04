@@ -13,7 +13,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from agentic_options_reporter.data.financial import FinancialProvider, FinancialProviderError
-from agentic_options_reporter.data.macro_provider import MacroProvider, MacroProviderError
+from agentic_options_reporter.data.macro import MacroProvider, MacroProviderError
 from agentic_options_reporter.data.news import NewsProvider, NewsProviderError
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
@@ -38,6 +38,15 @@ async def _fetch_financial_inputs(provider: FinancialProvider, ticker: str) -> t
         provider.get_financial_statements(ticker),
         provider.get_ratios(ticker),
         provider.get_analyst_estimates(ticker),
+    )
+
+
+async def _fetch_macro_inputs(provider: MacroProvider) -> tuple:
+    return await asyncio.gather(
+        provider.get_interest_rates(),
+        provider.get_cpi(),
+        provider.get_gdp(),
+        provider.get_macro_calendar(),
     )
 
 
@@ -115,13 +124,11 @@ def run_thesis_pipeline(
     macro_finding = None
     if macro_provider is not None:
         try:
-            macro_finding = macro_research.run(
-                llm_client,
-                macro_provider.get_interest_rates(),
-                macro_provider.get_cpi(),
-                macro_provider.get_gdp(),
-                macro_provider.get_macro_calendar(),
-            )
+            # MacroProvider is async (specs/providers.yaml); this pipeline
+            # is sync, so bridge with a private event loop and fetch the
+            # four datasets concurrently.
+            rates, cpi, gdp, calendar = asyncio.run(_fetch_macro_inputs(macro_provider))
+            macro_finding = macro_research.run(llm_client, rates, cpi, gdp, calendar)
         except MacroProviderError as exc:
             pipeline_warnings.append(f"macro_research: provider failed during the run — {exc}")
 

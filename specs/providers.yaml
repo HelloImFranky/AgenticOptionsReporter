@@ -96,13 +96,15 @@ provider_router:
       contract as phase_2a.
     news: build_news_provider() — AOR_NEWS_PROVIDER_FALLBACK_ORDER, default "finnhub,newsdata,guardian,gnews,alphavantage,newsapi,hackernews"
     financial: build_financial_provider() — AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER, default "fmp,finnhub,alphavantage"
-    macro: build_macro_provider() — AOR_MACRO_PROVIDER_FALLBACK_ORDER, default "fred,bls,bea"
-  keyless_news_is_always_available: >
-    HackerNewsProvider needs no API key, so build_news_provider() never
-    returns an empty router — News Research effectively always runs, at
-    minimum against Hacker News alone. This is intentional, not a
-    contract change: an agent still only runs when its provider
-    constructed successfully.
+    macro: build_macro_provider() — AOR_MACRO_PROVIDER_FALLBACK_ORDER, default "fred,bls,bea,imf,worldbank"
+  keyless_sources_are_always_available: >
+    HackerNewsProvider (news) and ImfMacroProvider/WorldBankMacroProvider
+    (macro) need no API key, so build_news_provider() and
+    build_macro_provider() never return an empty router — News and Macro
+    Research effectively always run, at minimum against the keyless
+    sources alone. This is intentional, not a contract change: an agent
+    still only runs when its provider constructed successfully. Only
+    Financial Research still requires at least one configured key.
 
 interfaces:
   NewsProvider:
@@ -319,47 +321,84 @@ interfaces:
           OpenInsider) has no owning interface yet.
 
   MacroProvider:
-    module: agentic_options_reporter.data.macro_provider
+    module: agentic_options_reporter.data.macro   # one adapter per source (base.py, router.py, <source>.py)
+    interface_style: >
+      ASYNC, like data.news and data.financial — adapters share the
+      async-HTTP infrastructure in data.async_http. The sync thesis
+      pipeline bridges with asyncio.run() at the macro_research step,
+      fetching rates/CPI/GDP/calendar CONCURRENTLY via asyncio.gather
+      (thesis/orchestrator.py). Most macro sources are SPECIALISTS:
+      they raise MacroProviderUnsupported (retryable) for series they
+      don't publish, so the router composes full coverage out of
+      partial providers.
     methods:
       get_interest_rates() -> InterestRates
       get_cpi() -> CpiSnapshot
       get_gdp() -> GdpSnapshot
       get_macro_calendar() -> list[MacroEvent]
+      health() -> ProviderHealth   # each adapter probes a series it actually publishes
     implementations:
       - name: FredMacroProvider
         api_key_env_var: FRED_API_KEY
+        free_tier: generous; the broadest single source and freshest data (leads the default order)
         base_url: https://api.stlouisfed.org/fred
         endpoints:
-          get_interest_rates: GET /series/observations?series_id=FEDFUNDS|DGS10|DGS2
-          get_cpi: GET /series/observations?series_id=CPIAUCSL
-          get_gdp: GET /series/observations?series_id=GDP
+          get_interest_rates: GET /series/observations?series_id=FEDFUNDS|DGS10|DGS2 (three series fetched concurrently)
+          get_cpi: GET /series/observations?series_id=CPIAUCSL (monthly)
+          get_gdp: GET /series/observations?series_id=GDP (quarterly)
           get_macro_calendar: >
             Not available from FRED (a historical-series API, not a
-            forward calendar). Returns an empty list; a real forward
-            calendar would need a different provider (e.g. Econoday) —
-            left as a documented gap, not silently faked.
+            forward calendar). Returns an empty list — a documented
+            gap, not silently faked.
       - name: BlsMacroProvider
         api_key_env_var: BLS_API_KEY
+        role: The primary source for the CPI series FRED mirrors — real redundancy on get_cpi.
         base_url: https://api.bls.gov/publicAPI/v2/timeseries/data
-        role: >
-          The primary source for the CPI series FRED mirrors — real
-          redundancy on get_cpi, not just an alternate.
         endpoints:
           get_cpi: GET /{series_id} (series_id=CUUR0000SA0, registrationkey={key})
-          get_interest_rates: Not published by BLS (a labor-statistics agency) — always raises MacroProviderUnsupported.
-          get_gdp: Not published by BLS — always raises MacroProviderUnsupported.
+          get_interest_rates: Not published by BLS — raises MacroProviderUnsupported.
+          get_gdp: Not published by BLS — raises MacroProviderUnsupported.
           get_macro_calendar: Same documented gap as FRED; returns [].
+        quirk: Errors arrive as HTTP-200 bodies with a non-success "status" field; treated as MacroProviderError.
       - name: BeaMacroProvider
         api_key_env_var: BEA_API_KEY
+        role: The primary source for the (nominal) GDP series FRED mirrors — real redundancy on get_gdp.
         base_url: https://apps.bea.gov/api/data
-        role: >
-          The primary source for the (nominal) GDP series FRED mirrors —
-          real redundancy on get_gdp, not just an alternate.
         endpoints:
           get_gdp: GET ?method=GetData&datasetname=NIPA&TableName=T10101&Frequency=Q (line 1: Gross domestic product)
-          get_cpi: Not published by BEA — always raises MacroProviderUnsupported (BEA's PCE price index is a related but distinct metric from CPI).
-          get_interest_rates: Not published by BEA — always raises MacroProviderUnsupported.
+          get_cpi: Not published by BEA (its PCE price index is a related but distinct metric) — raises MacroProviderUnsupported.
+          get_interest_rates: Not published by BEA — raises MacroProviderUnsupported.
           get_macro_calendar: Same documented gap as FRED; returns [].
+      - name: ImfMacroProvider
+        api_key_env_var: null   # keyless SDMX-JSON service
+        role: >
+          International fallback for CPI/GDP; lags the primary US
+          agencies, so it sits behind FRED/BLS/BEA in the default order.
+        base_url: https://dataservices.imf.org/REST/SDMX_JSON.svc/CompactData/IFS
+        endpoints:
+          get_cpi: GET /M.US.PCPI_IX?startPeriod={year-2} (monthly CPI index)
+          get_gdp: GET /Q.US.NGDP_SA_XDC?startPeriod={year-2} (quarterly nominal GDP, seasonally adjusted)
+          get_interest_rates: US policy rates aren't cleanly exposed through IFS — raises MacroProviderUnsupported.
+          get_macro_calendar: Same documented gap as FRED; returns [].
+        quirk: SDMX-JSON returns a bare dict (not a one-item list) for a single observation; handled.
+      - name: WorldBankMacroProvider
+        api_key_env_var: null   # keyless
+        role: >
+          ANNUAL data lagging the US agencies by a year or more — the
+          last-resort fallback for when every fresher source is down.
+        base_url: https://api.worldbank.org/v2/country/USA/indicator
+        endpoints:
+          get_cpi: GET /FP.CPI.TOTL?format=json (annual CPI index, 2010=100)
+          get_gdp: GET /NY.GDP.MKTP.CD?format=json (annual nominal GDP, current US$)
+          get_interest_rates: The Bank's real-interest-rate indicator is a different metric from US policy rates — raises MacroProviderUnsupported.
+          get_macro_calendar: Same documented gap as FRED; returns [].
+        quirk: Years not yet published carry null values; filtered out rather than treated as zeros.
+    yoy_derivations: >
+      All adapters compute yoy_change_pct/yoy_growth_pct as the
+      arithmetic change between two provider-supplied observations
+      (data.macro.base.yoy_change_pct) — a derivation of real data, not
+      fabrication; it stays null when the lookback observation isn't
+      available.
 
   SECProvider:
     module: agentic_options_reporter.data.sec_provider
