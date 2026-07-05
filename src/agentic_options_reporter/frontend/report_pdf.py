@@ -203,6 +203,8 @@ def score_breakdown_flowables(
     rows: list[list[Any]] = []
     body_style = styles.get("body", styles.get("cell", getSampleStyleSheet()["BodyText"]))
     cell_style = styles.get("cell", body_style)
+    track_width = 1.2 * inch
+    bar_height = 7
     for label, value in items:
         ratio = max(0.0, min(1.0, float(value)))
         if ratio >= 0.75:
@@ -212,9 +214,31 @@ def score_breakdown_flowables(
         else:
             color = _TONE_COLORS["danger"]
 
-        bar_width = 1.2 * inch * ratio
-        bar = Table([[Paragraph("", body_style)]], colWidths=[bar_width], hAlign="LEFT")
-        bar.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), color)]))
+        # A fixed-height meter drawn as a two-column track (filled portion +
+        # remainder). The cells are empty strings, not Paragraphs, with zero
+        # padding — so a 0% (or tiny) fill leaves a zero-width column with no
+        # flowable to wrap, instead of a Paragraph handed a negative
+        # available width (the reportlab crash this replaces).
+        filled_width = track_width * ratio
+        bar = Table(
+            [["", ""]],
+            colWidths=[filled_width, track_width - filled_width],
+            rowHeights=[bar_height],
+            hAlign="LEFT",
+        )
+        bar.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (0, 0), color),
+                    ("BACKGROUND", (1, 0), (1, 0), _TABLE_HEADER_BG),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ]
+            )
+        )
         rows.append([Paragraph(escape(label), cell_style), bar, Paragraph(f"{value:.2f}", cell_style)])
 
     table = Table(rows, colWidths=[1.8 * inch, 1.35 * inch, 0.45 * inch], hAlign="LEFT")
