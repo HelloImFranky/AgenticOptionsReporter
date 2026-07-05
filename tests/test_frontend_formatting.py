@@ -18,6 +18,7 @@ from agentic_options_reporter.frontend.formatting import (
     recommended_candidate,
     risk_level_tone,
     score_breakdown_items,
+    score_breakdown_summary,
     runs_to_rows,
     technical_snapshot_facts,
     trend_tone,
@@ -100,6 +101,27 @@ def test_score_breakdown_items_formats_factor_names_and_values():
         }
     )
     assert items == [("Trend Alignment", 1.0), ("Support Resistance Proximity", 0.2)]
+
+
+def test_score_breakdown_summary_names_leader_and_laggard():
+    summary = score_breakdown_summary(
+        {"trend_alignment": 1.0, "volume_confirmation": 0.55, "liquidity": 0.0}
+    )
+    assert summary == "Score is led by trend alignment (1.00) and held back by liquidity (0.00)."
+
+
+def test_score_breakdown_summary_balanced_when_factors_are_close():
+    summary = score_breakdown_summary({"a": 0.70, "b": 0.72, "c": 0.68})
+    assert "balanced across 3 factors" in summary
+
+
+def test_score_breakdown_summary_single_factor():
+    assert score_breakdown_summary({"liquidity": 0.4}) == "Score reflects liquidity (0.40)."
+
+
+def test_score_breakdown_summary_empty_is_blank():
+    assert score_breakdown_summary({}) == ""
+    assert score_breakdown_summary(None) == ""
 
 
 def test_recommendation_facts_omits_absent_candidate_fields():

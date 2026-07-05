@@ -39,6 +39,7 @@ from agentic_options_reporter.frontend.formatting import (
     recommendation_tone,
     risk_level_tone,
     score_breakdown_items,
+    score_breakdown_summary,
     technical_snapshot_facts,
     trend_tone,
 )
@@ -292,8 +293,16 @@ def _recommendation_block(
     if breakdown:
         block.append(Spacer(1, 6))
         block.extend(score_breakdown_flowables(breakdown, styles))
-
-    if rationale:
+        # Caption the chart with a plain-language read of it, and drop the
+        # deterministic rationale — that's just the same factors restated as
+        # text ("... scored 82/100 (trend_alignment=1.00, ...)"), now
+        # redundant with the visualization above.
+        summary = score_breakdown_summary(breakdown)
+        if summary:
+            block.append(Paragraph(escape(summary), styles["muted"]))
+    elif rationale:
+        # No breakdown to visualize (e.g. AVOID / no candidate) — the
+        # rationale is the only explanation, so keep it.
         block.append(Spacer(1, 6))
         block.append(Paragraph(escape(rationale), styles["body"]))
     return block
