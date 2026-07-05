@@ -38,6 +38,7 @@ from agentic_options_reporter.frontend.formatting import (
     recommendation_facts,
     recommendation_tone,
     risk_level_tone,
+    score_breakdown_items,
     technical_snapshot_facts,
     trend_tone,
 )
@@ -188,6 +189,50 @@ def _bullets(items: list[str], styles: dict[str, ParagraphStyle]) -> list[Any]:
     ]
 
 
+def score_breakdown_flowables(
+    score_breakdown: dict[str, Any] | None, styles: dict[str, ParagraphStyle]
+) -> list[Any]:
+    payload = score_breakdown or {}
+    if isinstance(payload.get("score_breakdown"), dict):
+        payload = payload["score_breakdown"]
+
+    items = score_breakdown_items(payload or {})
+    if not items:
+        return []
+
+    rows: list[list[Any]] = []
+    body_style = styles.get("body", styles.get("cell", getSampleStyleSheet()["BodyText"]))
+    cell_style = styles.get("cell", body_style)
+    for label, value in items:
+        ratio = max(0.0, min(1.0, float(value)))
+        if ratio >= 0.75:
+            color = _TONE_COLORS["success"]
+        elif ratio >= 0.4:
+            color = _TONE_COLORS["warning"]
+        else:
+            color = _TONE_COLORS["danger"]
+
+        bar_width = 1.2 * inch * ratio
+        bar = Table([[Paragraph("", body_style)]], colWidths=[bar_width], hAlign="LEFT")
+        bar.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), color)]))
+        rows.append([Paragraph(escape(label), cell_style), bar, Paragraph(f"{value:.2f}", cell_style)])
+
+    table = Table(rows, colWidths=[1.8 * inch, 1.35 * inch, 0.45 * inch], hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    heading_style = styles.get("cellhead", cell_style)
+    return [Paragraph("Score breakdown", heading_style), Spacer(1, 3), table, Spacer(1, 4)]
+
+
 def _recommendation_block(
     rec: dict[str, Any], candidates: list[dict[str, Any]] | None, styles: dict[str, ParagraphStyle]
 ) -> list[Any]:
@@ -212,6 +257,18 @@ def _recommendation_block(
     )
     block: list[Any] = [row, Spacer(1, 6)]
     block.extend(_facts_table(recommendation_facts(rec, candidates), styles))
+
+    matching_candidate = None
+    if candidates:
+        for candidate in candidates:
+            if candidate.get("contract_symbol") == rec.get("contract_symbol"):
+                matching_candidate = candidate
+                break
+    breakdown = matching_candidate.get("score_breakdown") if matching_candidate else None
+    if breakdown:
+        block.append(Spacer(1, 6))
+        block.extend(score_breakdown_flowables(breakdown, styles))
+
     if rationale:
         block.append(Spacer(1, 6))
         block.append(Paragraph(escape(rationale), styles["body"]))

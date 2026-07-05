@@ -35,6 +35,7 @@ from agentic_options_reporter.frontend.formatting import (
     recommendation_tone,
     risk_level_tone,
     runs_to_rows,
+    score_breakdown_items,
     trend_tone,
 )
 from agentic_options_reporter.frontend.report_pdf import build_report_pdf
@@ -184,6 +185,58 @@ def _card(*controls: ft.Control, padding: int = 20, spacing: int = 12) -> ft.Car
     )
 
 
+def _score_breakdown_panel(score_breakdown: dict[str, float] | None) -> ft.Container:
+    items = score_breakdown_items(score_breakdown or {})
+    if not items:
+        return ft.Container(
+            content=ft.Text("No breakdown available", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border_radius=10,
+            padding=12,
+        )
+
+    controls: list[ft.Control] = []
+    for label, value in items:
+        ratio = max(0.0, min(1.0, float(value)))
+        if ratio >= 0.75:
+            color = ft.Colors.GREEN_600
+        elif ratio >= 0.4:
+            color = ft.Colors.AMBER_700
+        else:
+            color = ft.Colors.RED_600
+
+        controls.append(
+            ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Text(label, size=11, weight=ft.FontWeight.W_600, expand=True),
+                            ft.Text(f"{value:.2f}", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                        ],
+                        spacing=8,
+                    ),
+                    ft.ProgressBar(value=ratio, width=220, color=color, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST),
+                ],
+                spacing=4,
+                tight=True,
+            )
+        )
+
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Text("Score breakdown", size=12, weight=ft.FontWeight.W_600),
+                ft.Column(controls, spacing=8, tight=True),
+            ],
+            spacing=8,
+            tight=True,
+        ),
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        border_radius=10,
+        padding=12,
+    )
+
+
 def _fact_box(label: str, value: str) -> ft.Container:
     """A small labelled box (muted caption over a bold value) for laying out
     recommendation/technical key facts as a tidy grid instead of a run-on
@@ -301,7 +354,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
     )
     confidence_bar = ft.ProgressBar(value=0, width=160, border_radius=6, bgcolor=ft.Colors.GREY_200)
     confidence_text = ft.Text("0%", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
-    rationale_text = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True)
+    score_breakdown_panel = ft.Container()
     rec_facts_grid = ft.ResponsiveRow([], spacing=10, run_spacing=10)
 
     recommendation_card = _card(
@@ -312,7 +365,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
         rec_facts_grid,
-        rationale_text,
+        score_breakdown_panel,
     )
 
     # ---- results: stat cards -----------------------------------------
@@ -473,7 +526,24 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             _fact_box(label, value)
             for label, value in recommendation_facts(recommendation, result.get("candidates"))
         ]
-        rationale_text.value = recommendation.get("rationale", "")
+        candidate = None
+        for item in result.get("candidates", []) or []:
+            if item.get("contract_symbol") == recommendation.get("contract_symbol"):
+                candidate = item
+                break
+        if candidate:
+            score_breakdown_panel.content = _score_breakdown_panel(candidate.get("score_breakdown") or {})
+            score_breakdown_panel.bgcolor = ft.Colors.TRANSPARENT
+            score_breakdown_panel.padding = 0
+            score_breakdown_panel.border_radius = 0
+        else:
+            score_breakdown_panel.content = ft.Container(
+                content=ft.Text("No breakdown available", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                bgcolor=ft.Colors.TRANSPARENT,
+            )
+            score_breakdown_panel.bgcolor = ft.Colors.TRANSPARENT
+            score_breakdown_panel.padding = 0
+            score_breakdown_panel.border_radius = 0
 
         trend = result["trend"]
         trend_tone_name = trend_tone(trend.get("direction", ""))

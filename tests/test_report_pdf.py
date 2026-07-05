@@ -5,7 +5,9 @@ and degrades gracefully when the thesis or individual agents are missing —
 without needing a Flet runtime or a real PDF viewer.
 """
 
-from agentic_options_reporter.frontend.report_pdf import build_report_pdf
+from reportlab.lib.styles import getSampleStyleSheet
+
+from agentic_options_reporter.frontend.report_pdf import build_report_pdf, score_breakdown_flowables
 
 _FULL_REPORT = {
     "symbol": "AAPL",
@@ -28,6 +30,13 @@ _FULL_REPORT = {
             "score": 82.4,
             "delta": 0.612,
             "probability_of_profit": 0.58,
+            "score_breakdown": {
+                "trend_alignment": 0.82,
+                "volume_confirmation": 0.76,
+                "support_resistance_proximity": 0.61,
+                "liquidity": 0.74,
+                "risk_reward": 0.69,
+            },
         }
     ],
     "thesis": {
@@ -132,3 +141,11 @@ def test_build_report_escapes_markup_in_text():
     }
     data = build_report_pdf(payload)
     assert _is_pdf(data)
+
+
+def test_score_breakdown_flowables_render_for_candidate_payload():
+    flowables = score_breakdown_flowables(
+        {"score_breakdown": {"trend_alignment": 0.82, "liquidity": 0.74}},
+        styles={"body": getSampleStyleSheet()["BodyText"]},
+    )
+    assert len(flowables) > 0

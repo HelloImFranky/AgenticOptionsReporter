@@ -162,6 +162,21 @@ def recommended_candidate(
     return None
 
 
+def score_breakdown_items(score_breakdown: dict[str, float] | None) -> list[tuple[str, float]]:
+    """Convert raw score factor names into display labels and numeric values."""
+    if not score_breakdown:
+        return []
+
+    labels = {
+        "trend_alignment": "Trend Alignment",
+        "volume_confirmation": "Volume Confirmation",
+        "support_resistance_proximity": "Support Resistance Proximity",
+        "liquidity": "Liquidity",
+        "risk_reward": "Risk Reward",
+    }
+    return [(labels.get(key, key.replace("_", " ").title()), float(value)) for key, value in score_breakdown.items()]
+
+
 def recommendation_facts(
     recommendation: dict[str, Any], candidates: list[dict[str, Any]] | None = None
 ) -> list[tuple[str, str]]:

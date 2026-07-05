@@ -17,6 +17,7 @@ from agentic_options_reporter.frontend.formatting import (
     recommendation_tone,
     recommended_candidate,
     risk_level_tone,
+    score_breakdown_items,
     runs_to_rows,
     technical_snapshot_facts,
     trend_tone,
@@ -89,6 +90,16 @@ def test_recommendation_facts_pulls_candidate_metrics():
 def test_recommendation_facts_avoid_shows_only_contract_dash():
     facts = recommendation_facts({"action": "AVOID", "contract_symbol": None}, [])
     assert facts == [("Contract", "—")]
+
+
+def test_score_breakdown_items_formats_factor_names_and_values():
+    items = score_breakdown_items(
+        {
+            "trend_alignment": 1.0,
+            "support_resistance_proximity": 0.2,
+        }
+    )
+    assert items == [("Trend Alignment", 1.0), ("Support Resistance Proximity", 0.2)]
 
 
 def test_recommendation_facts_omits_absent_candidate_fields():

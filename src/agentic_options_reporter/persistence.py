@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -21,7 +22,26 @@ def run_migrations(database_url: str) -> None:
     cfg = Config()
     cfg.set_main_option("script_location", str(_ALEMBIC_DIR))
     cfg.set_main_option("sqlalchemy.url", database_url)
-    command.upgrade(cfg, "head")
+
+    try:
+        command.upgrade(cfg, "head")
+    except OperationalError as exc:
+        message = str(exc).lower()
+        if database_url.startswith("sqlite") and (
+            "already exists" in message or "table" in message and "exists" in message
+        ):
+            # Under uvicorn --reload, multiple worker processes can race to apply
+            # the same initial migration. If that happens, repair any missing
+            # tables from the current ORM model and then stamp the revision so
+            # subsequent starts use the same schema state.
+            engine = create_engine(database_url, connect_args={"check_same_thread": False})
+            try:
+                Base.metadata.create_all(engine)
+            finally:
+                engine.dispose()
+            command.stamp(cfg, "head")
+            return
+        raise
 
 from agentic_options_reporter.models.db import (
     AgentThesisRow,
