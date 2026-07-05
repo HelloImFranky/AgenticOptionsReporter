@@ -37,6 +37,7 @@ from agentic_options_reporter.thesis import (
     risk_challenger,
 )
 from agentic_options_reporter.thesis.llm_client import LlmClient
+from agentic_options_reporter.thesis.parsing import ThesisGenerationError
 
 
 async def _fetch_financial_inputs(provider: FinancialProvider, ticker: str) -> tuple:
@@ -171,6 +172,8 @@ def run_thesis_pipeline(
             )
         except FinancialProviderError as exc:
             pipeline_warnings.append(f"financial_research: provider failed during the run — {exc}")
+        except ThesisGenerationError as exc:
+            pipeline_warnings.append(f"financial_research: unusable model response — {exc}")
 
     news_finding = None
     if news_provider is not None:
@@ -182,6 +185,8 @@ def run_thesis_pipeline(
             news_finding = news_research.run(llm_client, articles)
         except NewsProviderError as exc:
             pipeline_warnings.append(f"news_research: provider failed during the run — {exc}")
+        except ThesisGenerationError as exc:
+            pipeline_warnings.append(f"news_research: unusable model response — {exc}")
 
     macro_finding = None
     if macro_provider is not None:
@@ -197,12 +202,15 @@ def run_thesis_pipeline(
             # leave the finding null (nothing to report), no warning.
         except MacroProviderError as exc:
             pipeline_warnings.append(f"macro_research: provider failed during the run — {exc}")
+        except ThesisGenerationError as exc:
+            pipeline_warnings.append(f"macro_research: unusable model response — {exc}")
 
     # Catalyst research combines all three research streams (news + SEC
     # filings + macro). It runs if ANY of them is configured, reasoning
     # over whatever subset is present; each stream is fetched under its own
     # guard so one failing only drops that stream (recorded as a warning),
-    # not the whole finding. LLM/parse failures still propagate (502).
+    # not the whole finding. An unusable model response is likewise
+    # non-fatal — the finding stays null and a warning is recorded.
     catalyst_finding = None
     if news_provider is not None or sec_provider is not None or macro_provider is not None:
         ticker = analysis_result.symbol
@@ -212,7 +220,10 @@ def run_thesis_pipeline(
         for err in catalyst_errors:
             pipeline_warnings.append(f"catalyst_research: provider failed during the run — {err}")
         if articles or filings or observations:
-            catalyst_finding = catalyst_research.run(llm_client, articles, filings, observations)
+            try:
+                catalyst_finding = catalyst_research.run(llm_client, articles, filings, observations)
+            except ThesisGenerationError as exc:
+                pipeline_warnings.append(f"catalyst_research: unusable model response — {exc}")
 
     thesis = investment_thesis.run(
         llm_client,

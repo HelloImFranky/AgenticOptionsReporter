@@ -83,10 +83,28 @@ provider_failure_mid_run: >
   failure in AgentThesisResult.pipeline_warnings (each entry prefixed
   with the agent it affected, e.g. "news_research: ..."), reported at
   the end of the run instead of crashing mid-pipeline and throwing away
-  the quant/risk/strategy work already done. Only failures that make the
-  final synthesis impossible remain fatal (LlmError from the thesis
-  LLM itself, ThesisGenerationError from unparseable responses) — those
-  still surface as a 502 (specs/api.yaml).
+  the quant/risk/strategy work already done.
+
+llm_output_resilience: >
+  Two layers keep a flaky LLM response from failing the whole thesis.
+  (1) COERCION: every LLM-authored enum field (news sentiment, macro
+  regime, catalyst category/horizon/direction, net_bias, financial
+  health/growth/profitability/cash_flow, risk_level, consensus) is a
+  lenient Annotated Literal (models/schemas.py _lenient_enum) — an
+  off-vocabulary value, or a whole sentence the model mis-slotted into an
+  enum, coerces to a safe neutral default instead of failing validation.
+  A single malformed catalyst item (e.g. missing title) is dropped rather
+  than failing the whole CatalystFinding
+  (CatalystFinding._drop_invalid_catalysts). (2) NON-FATAL PARSE: if a
+  response STILL can't be parsed/validated, the orchestrator catches the
+  ThesisGenerationError around each OPTIONAL research agent
+  (financial/news/macro/catalyst) exactly like a provider failure —
+  finding null, "<agent>: unusable model response — ..." recorded in
+  pipeline_warnings — so one agent's bad output never 502s the run. Only
+  failures that make the FINAL synthesis impossible remain fatal (LlmError
+  from the thesis LLM itself, or a ThesisGenerationError from
+  quant_interpreter / risk_challenger / options_strategy /
+  investment_thesis) — those still surface as a 502 (specs/api.yaml).
 
 agents:
   - name: quant_interpreter
