@@ -6,8 +6,20 @@ without needing a Flet runtime or a real PDF viewer.
 """
 
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Paragraph
 
-from agentic_options_reporter.frontend.report_pdf import build_report_pdf, score_breakdown_flowables
+from agentic_options_reporter.frontend.report_pdf import (
+    _recommendation_block,
+    _styles,
+    build_report_pdf,
+    score_breakdown_flowables,
+)
+
+
+def _paragraph_texts(flowables) -> str:
+    """Concatenate the raw text of every Paragraph in a flowable list, for
+    asserting on what the block renders."""
+    return " ".join(f.getPlainText() for f in flowables if isinstance(f, Paragraph))
 
 _FULL_REPORT = {
     "symbol": "AAPL",
@@ -149,6 +161,30 @@ def test_score_breakdown_flowables_render_for_candidate_payload():
         styles={"body": getSampleStyleSheet()["BodyText"]},
     )
     assert len(flowables) > 0
+
+
+def test_recommendation_block_replaces_factor_dump_with_summary():
+    """When a score breakdown is present, the block captions the chart with a
+    plain-language summary and drops the deterministic factor-dump rationale
+    (now redundant with the visualization)."""
+    rec = {
+        "action": "BUY", "confidence": 0.82, "contract_symbol": "AAPL_C",
+        "rationale": "AAPL_C scored 82.4/100 (trend_alignment=1.00, liquidity=0.00).",
+    }
+    candidates = [{"contract_symbol": "AAPL_C", "score_breakdown": {"trend_alignment": 1.0, "liquidity": 0.0}}]
+    text = _paragraph_texts(_recommendation_block(rec, candidates, _styles()))
+
+    assert "led by trend alignment" in text          # the summary caption
+    assert "scored 82.4/100" not in text             # the raw factor-dump is gone
+    assert "trend_alignment=1.00" not in text
+
+
+def test_recommendation_block_keeps_rationale_without_breakdown():
+    """AVOID / no-candidate: nothing to visualize, so the rationale stays."""
+    rec = {"action": "AVOID", "confidence": 0.0, "contract_symbol": None,
+           "rationale": "No liquid, scoreable candidates were found in the option chain."}
+    text = _paragraph_texts(_recommendation_block(rec, [], _styles()))
+    assert "No liquid, scoreable candidates" in text
 
 
 def test_build_report_with_zero_and_tiny_score_breakdown_factors():

@@ -177,6 +177,30 @@ def score_breakdown_items(score_breakdown: dict[str, float] | None) -> list[tupl
     return [(labels.get(key, key.replace("_", " ").title()), float(value)) for key, value in score_breakdown.items()]
 
 
+def score_breakdown_summary(score_breakdown: dict[str, float] | None) -> str:
+    """A one-line, plain-language read of the score breakdown — what carried
+    the score and what dragged on it — to caption the breakdown chart
+    instead of restating every factor as raw text. Deterministic (no LLM);
+    derived straight from the factor values."""
+    items = score_breakdown_items(score_breakdown)
+    if not items:
+        return ""
+    ordered = sorted(items, key=lambda kv: kv[1], reverse=True)
+    if len(ordered) == 1:
+        label, value = ordered[0]
+        return f"Score reflects {label.lower()} ({value:.2f})."
+    (top_label, top_value) = ordered[0]
+    (bottom_label, bottom_value) = ordered[-1]
+    # When every factor sits in a tight band, "strongest vs weakest" is
+    # misleading — call it balanced instead.
+    if top_value - bottom_value < 0.15:
+        return f"Score is balanced across {len(ordered)} factors, all near {top_value:.2f}."
+    return (
+        f"Score is led by {top_label.lower()} ({top_value:.2f}) and held back by "
+        f"{bottom_label.lower()} ({bottom_value:.2f})."
+    )
+
+
 def recommendation_facts(
     recommendation: dict[str, Any], candidates: list[dict[str, Any]] | None = None
 ) -> list[tuple[str, str]]:
