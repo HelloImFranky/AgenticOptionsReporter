@@ -30,19 +30,15 @@ from reportlab.platypus import (
 )
 
 from agentic_options_reporter.frontend.formatting import (
-    cash_flow_tone,
     company_health_tone,
     consensus_tone,
-    format_indicator_summary,
     format_timestamp,
-    format_trend_summary,
-    format_volume_summary,
-    growth_tone,
     macro_regime_tone,
-    profitability_tone,
     quant_score_tone,
+    recommendation_facts,
     recommendation_tone,
     risk_level_tone,
+    technical_snapshot_facts,
     trend_tone,
 )
 
@@ -104,7 +100,48 @@ def _styles() -> dict[str, ParagraphStyle]:
             "AorCellHead", parent=base, fontName="Helvetica-Bold", fontSize=8,
             leading=10, textColor=_INK,
         ),
+        "cellmuted": ParagraphStyle(
+            "AorCellMuted", parent=base, fontName="Helvetica", fontSize=7.5,
+            leading=10, textColor=_MUTED,
+        ),
     }
+
+
+def _facts_table(
+    facts: list[tuple[str, str]], styles: dict[str, ParagraphStyle], cols: int = 2
+) -> list[Any]:
+    """Lay (label, value) facts out as a light key/value grid, `cols` pairs
+    per row — the print counterpart of the UI's fact boxes, so the data
+    reads as a scannable table instead of a run-on sentence."""
+    if not facts:
+        return []
+    rows: list[list[Any]] = []
+    for i in range(0, len(facts), cols):
+        chunk = facts[i : i + cols]
+        cells: list[Any] = []
+        for label, value in chunk:
+            cells.append(Paragraph(escape(label.upper()), styles["cellmuted"]))
+            cells.append(Paragraph(f"<b>{escape(str(value))}</b>", styles["cell"]))
+        while len(cells) < cols * 2:
+            cells.append(Paragraph("", styles["cell"]))
+        rows.append(cells)
+    col_widths: list[float] = []
+    for _ in range(cols):
+        col_widths += [0.95 * inch, 1.55 * inch]
+    table = Table(rows, colWidths=col_widths, hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.25, _HAIRLINE),
+            ]
+        )
+    )
+    return [table]
 
 
 def _badge(text: str, tone: str, styles: dict[str, ParagraphStyle]) -> Table:
@@ -151,14 +188,15 @@ def _bullets(items: list[str], styles: dict[str, ParagraphStyle]) -> list[Any]:
     ]
 
 
-def _recommendation_block(rec: dict[str, Any], styles: dict[str, ParagraphStyle]) -> list[Any]:
+def _recommendation_block(
+    rec: dict[str, Any], candidates: list[dict[str, Any]] | None, styles: dict[str, ParagraphStyle]
+) -> list[Any]:
     action = rec.get("action", "—")
     confidence = rec.get("confidence") or 0.0
-    contract = rec.get("contract_symbol") or "—"
     rationale = rec.get("rationale") or ""
     row = Table(
         [[_badge(action, recommendation_tone(action), styles),
-          Paragraph(f"<b>{confidence:.0%}</b> confidence &nbsp;·&nbsp; {escape(contract)}", styles["body"])]],
+          Paragraph(f"<b>{confidence:.0%}</b> confidence", styles["body"])]],
         colWidths=[1.6 * inch, None],
         hAlign="LEFT",
     )
@@ -172,9 +210,10 @@ def _recommendation_block(rec: dict[str, Any], styles: dict[str, ParagraphStyle]
             ]
         )
     )
-    block: list[Any] = [row]
+    block: list[Any] = [row, Spacer(1, 6)]
+    block.extend(_facts_table(recommendation_facts(rec, candidates), styles))
     if rationale:
-        block.append(Spacer(1, 4))
+        block.append(Spacer(1, 6))
         block.append(Paragraph(escape(rationale), styles["body"]))
     return block
 
@@ -422,19 +461,14 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
     recommendation = report.get("recommendation")
     if recommendation:
         story.extend(_section_header("Recommendation", styles))
-        story.extend(_recommendation_block(recommendation, styles))
+        story.extend(_recommendation_block(recommendation, report.get("candidates"), styles))
 
     trend = report.get("trend")
     volume = report.get("volume")
     indicators = report.get("indicators")
     if trend or volume or indicators:
         story.extend(_section_header("Technical snapshot", styles))
-        if trend:
-            story.append(Paragraph(escape(format_trend_summary(trend)), styles["body"]))
-        if volume:
-            story.append(Paragraph(escape(format_volume_summary(volume)), styles["body"]))
-        if indicators:
-            story.append(Paragraph("Indicators: " + escape(format_indicator_summary(indicators)), styles["body"]))
+        story.extend(_facts_table(technical_snapshot_facts(trend, volume, indicators), styles))
 
     if report.get("candidates") is not None:
         story.extend(_section_header("Scored candidates", styles))

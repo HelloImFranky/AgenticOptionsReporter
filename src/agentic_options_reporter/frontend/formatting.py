@@ -148,6 +148,74 @@ def format_timestamp(value: str) -> str:
     return str(value).replace("T", " ")[:16]
 
 
+def recommended_candidate(
+    recommendation: dict[str, Any], candidates: list[dict[str, Any]] | None
+) -> dict[str, Any] | None:
+    """The scored candidate the recommendation points at (matched by
+    contract_symbol), or None for an AVOID / no-contract recommendation."""
+    symbol = recommendation.get("contract_symbol")
+    if not symbol:
+        return None
+    for candidate in candidates or []:
+        if candidate.get("contract_symbol") == symbol:
+            return candidate
+    return None
+
+
+def recommendation_facts(
+    recommendation: dict[str, Any], candidates: list[dict[str, Any]] | None = None
+) -> list[tuple[str, str]]:
+    """Key facts for the recommendation as (label, value) pairs, ready to
+    lay out as boxes or a table in either the UI or the PDF. Contract-level
+    metrics are pulled from the matching scored candidate; a field absent
+    from the candidate payload is simply omitted rather than shown as 0."""
+    facts: list[tuple[str, str]] = [("Contract", recommendation.get("contract_symbol") or "—")]
+    candidate = recommended_candidate(recommendation, candidates)
+    if candidate is None:
+        return facts
+
+    def add(label: str, key: str, fmt) -> None:
+        value = candidate.get(key)
+        if key in candidate and value is not None:
+            facts.append((label, fmt(value)))
+
+    add("Type", "option_type", lambda v: str(v).upper())
+    add("Strike", "strike", lambda v: f"{v:.2f}")
+    add("Expiration", "expiration", lambda v: str(v))
+    add("Score", "score", lambda v: f"{v:.1f}")
+    add("Delta", "delta", lambda v: f"{v:.3f}")
+    add("Breakeven", "breakeven", lambda v: f"{v:.2f}")
+    add("Max loss", "max_loss", lambda v: f"{v:.2f}")
+    if "max_gain" in candidate:
+        max_gain = candidate.get("max_gain")
+        facts.append(("Max gain", "unlimited" if max_gain is None else f"{max_gain:.2f}"))
+    add("PoP", "probability_of_profit", lambda v: f"{v:.0%}")
+    return facts
+
+
+def technical_snapshot_facts(
+    trend: dict[str, Any] | None,
+    volume: dict[str, Any] | None,
+    indicators: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    """Technical snapshot as (label, value) pairs, for a boxed/table layout
+    instead of run-on sentences."""
+    facts: list[tuple[str, str]] = []
+    if trend:
+        direction = str(trend.get("direction", "?")).capitalize()
+        facts.append(("Trend", f"{direction} · {trend.get('strength', '?')}"))
+        facts.append(("ADX", f"{(trend.get('adx') or 0.0):.1f}"))
+    if volume:
+        facts.append(("Rel. volume", f"{(volume.get('relative_volume') or 0.0):.2f}x avg"))
+        facts.append(("Volume flags", ", ".join(volume.get("flags") or []) or "none"))
+    if indicators:
+        facts.append(("SMA 20", f"{(indicators.get('sma_20') or 0.0):.2f}"))
+        facts.append(("SMA 50", f"{(indicators.get('sma_50') or 0.0):.2f}"))
+        facts.append(("RSI 14", f"{(indicators.get('rsi_14') or 0.0):.1f}"))
+        facts.append(("ATR 14", f"{(indicators.get('atr_14') or 0.0):.2f}"))
+    return facts
+
+
 def format_trend_summary(trend: dict[str, Any]) -> str:
     direction = str(trend.get("direction", "?")).capitalize()
     strength = trend.get("strength", "?")

@@ -25,13 +25,13 @@ from agentic_options_reporter.frontend.formatting import (
     company_health_tone,
     consensus_tone,
     format_indicator_summary,
-    format_recommendation,
     format_trend_summary,
     format_volume_summary,
     growth_tone,
     macro_regime_tone,
     profitability_tone,
     quant_score_tone,
+    recommendation_facts,
     recommendation_tone,
     risk_level_tone,
     runs_to_rows,
@@ -184,6 +184,26 @@ def _card(*controls: ft.Control, padding: int = 20, spacing: int = 12) -> ft.Car
     )
 
 
+def _fact_box(label: str, value: str) -> ft.Container:
+    """A small labelled box (muted caption over a bold value) for laying out
+    recommendation/technical key facts as a tidy grid instead of a run-on
+    sentence."""
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Text(label.upper(), size=10, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Text(value, size=14, weight=ft.FontWeight.W_600, selectable=True),
+            ],
+            spacing=3,
+            tight=True,
+        ),
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        border_radius=10,
+        padding=ft.padding.symmetric(vertical=10, horizontal=12),
+        col={"xs": 6, "sm": 4, "md": 3},
+    )
+
+
 def _section_title(text: str, icon: str | None = None) -> ft.Row:
     controls: list[ft.Control] = []
     if icon:
@@ -282,15 +302,20 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
     confidence_bar = ft.ProgressBar(value=0, width=160, border_radius=6, bgcolor=ft.Colors.GREY_200)
     confidence_text = ft.Text("0%", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
     rationale_text = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True)
+    rec_facts_grid = ft.ResponsiveRow([], spacing=10, run_spacing=10)
 
     recommendation_card = _card(
         _section_title("Recommendation", ft.Icons.INSIGHTS_OUTLINED),
-        ft.Row([action_badge, ft.Column([confidence_bar, confidence_text], spacing=2)], spacing=16),
+        ft.Row(
+            [action_badge, ft.Column([confidence_bar, confidence_text], spacing=2)],
+            spacing=16,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        rec_facts_grid,
         rationale_text,
     )
 
     # ---- results: stat cards -----------------------------------------
-    trend_icon = ft.Icon(ft.Icons.TRENDING_FLAT, size=22, color=ft.Colors.GREY_700)
     trend_value = ft.Text("Run an analysis", size=13, weight=ft.FontWeight.W_600)
     volume_value = ft.Text("—", size=13, weight=ft.FontWeight.W_600)
     indicators_value = ft.Text("—", size=13, weight=ft.FontWeight.W_600)
@@ -444,7 +469,11 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         confidence_bar.value = confidence
         confidence_bar.color = color
         confidence_text.value = f"{confidence:.0%} confidence"
-        rationale_text.value = format_recommendation(recommendation)
+        rec_facts_grid.controls = [
+            _fact_box(label, value)
+            for label, value in recommendation_facts(recommendation, result.get("candidates"))
+        ]
+        rationale_text.value = recommendation.get("rationale", "")
 
         trend = result["trend"]
         trend_tone_name = trend_tone(trend.get("direction", ""))

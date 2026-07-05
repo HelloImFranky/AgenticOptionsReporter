@@ -13,9 +13,12 @@ from agentic_options_reporter.frontend.formatting import (
     format_trend_summary,
     format_volume_summary,
     macro_regime_tone,
+    recommendation_facts,
     recommendation_tone,
+    recommended_candidate,
     risk_level_tone,
     runs_to_rows,
+    technical_snapshot_facts,
     trend_tone,
 )
 
@@ -44,6 +47,77 @@ def test_format_recommendation_without_contract():
 def test_format_recommendation_without_rationale():
     text = format_recommendation({"action": "AVOID", "contract_symbol": None, "rationale": ""})
     assert text == "—"
+
+
+_CANDIDATE = {
+    "contract_symbol": "AAPL260116C00150000",
+    "option_type": "call",
+    "strike": 150.0,
+    "expiration": "2026-01-16",
+    "score": 82.4,
+    "delta": 0.612,
+    "breakeven": 152.3,
+    "max_loss": 210.0,
+    "max_gain": None,
+    "probability_of_profit": 0.58,
+}
+
+
+def test_recommended_candidate_matches_by_contract_symbol():
+    rec = {"contract_symbol": "AAPL260116C00150000"}
+    assert recommended_candidate(rec, [_CANDIDATE]) is _CANDIDATE
+
+
+def test_recommended_candidate_none_for_avoid():
+    assert recommended_candidate({"contract_symbol": None}, [_CANDIDATE]) is None
+    assert recommended_candidate({"contract_symbol": "MISSING"}, [_CANDIDATE]) is None
+
+
+def test_recommendation_facts_pulls_candidate_metrics():
+    rec = {"action": "BUY", "contract_symbol": "AAPL260116C00150000", "confidence": 0.73}
+    facts = dict(recommendation_facts(rec, [_CANDIDATE]))
+    assert facts["Contract"] == "AAPL260116C00150000"
+    assert facts["Type"] == "CALL"
+    assert facts["Strike"] == "150.00"
+    assert facts["Expiration"] == "2026-01-16"
+    assert facts["Score"] == "82.4"
+    assert facts["Breakeven"] == "152.30"
+    assert facts["Max gain"] == "unlimited"   # None -> unlimited
+    assert facts["PoP"] == "58%"
+
+
+def test_recommendation_facts_avoid_shows_only_contract_dash():
+    facts = recommendation_facts({"action": "AVOID", "contract_symbol": None}, [])
+    assert facts == [("Contract", "—")]
+
+
+def test_recommendation_facts_omits_absent_candidate_fields():
+    partial = {"contract_symbol": "X", "option_type": "put", "strike": 10.0}
+    facts = dict(recommendation_facts({"contract_symbol": "X"}, [partial]))
+    assert facts["Type"] == "PUT"
+    assert facts["Strike"] == "10.00"
+    assert "Breakeven" not in facts   # not in payload -> omitted, not shown as 0
+    assert "PoP" not in facts
+
+
+def test_technical_snapshot_facts_labels_and_values():
+    facts = dict(
+        technical_snapshot_facts(
+            {"direction": "bullish", "strength": "strong", "adx": 31.2},
+            {"relative_volume": 1.8, "flags": ["above_average"]},
+            {"sma_20": 195.1, "sma_50": 188.4, "rsi_14": 61.2, "atr_14": 3.4},
+        )
+    )
+    assert facts["Trend"] == "Bullish · strong"
+    assert facts["ADX"] == "31.2"
+    assert facts["Rel. volume"] == "1.80x avg"
+    assert facts["Volume flags"] == "above_average"
+    assert facts["SMA 20"] == "195.10"
+    assert facts["RSI 14"] == "61.2"
+
+
+def test_technical_snapshot_facts_empty_when_no_inputs():
+    assert technical_snapshot_facts(None, None, None) == []
 
 
 def test_recommendation_tone_mapping():
