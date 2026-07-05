@@ -149,3 +149,50 @@ def test_score_breakdown_flowables_render_for_candidate_payload():
         styles={"body": getSampleStyleSheet()["BodyText"]},
     )
     assert len(flowables) > 0
+
+
+def test_build_report_with_zero_and_tiny_score_breakdown_factors():
+    """Regression: a factor at 0.0 (or a sliver like 0.05) made the meter
+    bar a zero/sub-padding-width cell, and reportlab raised 'negative
+    availWidth' at build time. The report must build for any ratio in
+    [0, 1]."""
+    payload = {
+        "symbol": "AAPL",
+        "recommendation": {
+            "action": "BUY", "confidence": 0.7,
+            "contract_symbol": "AAPL260116C00150000", "rationale": "x",
+        },
+        "candidates": [
+            {
+                "contract_symbol": "AAPL260116C00150000",
+                "option_type": "call", "strike": 150.0, "expiration": "2026-01-16",
+                "score": 80.0, "delta": 0.6, "probability_of_profit": 0.55,
+                "score_breakdown": {
+                    "trend_alignment": 1.0,        # full bar
+                    "volume_confirmation": 0.5,    # half
+                    "liquidity": 0.0,              # empty — the crash case
+                    "support_resistance_proximity": 0.05,  # tiny sliver
+                },
+            }
+        ],
+    }
+    data = build_report_pdf(payload)
+    assert _is_pdf(data)
+
+
+def test_score_breakdown_flowables_handle_extreme_ratios():
+    styles = {
+        "body": getSampleStyleSheet()["BodyText"],
+        "cell": getSampleStyleSheet()["BodyText"],
+        "cellhead": getSampleStyleSheet()["BodyText"],
+    }
+    # Building the whole doc is what actually wraps the flowables (and would
+    # have raised); do it with only-zero and only-full breakdowns.
+    for breakdown in ({"a": 0.0, "b": 0.0}, {"a": 1.0, "b": 1.0}):
+        assert score_breakdown_flowables({"score_breakdown": breakdown}, styles)
+        payload = {
+            "symbol": "T",
+            "recommendation": {"action": "BUY", "confidence": 0.5, "contract_symbol": "C", "rationale": ""},
+            "candidates": [{"contract_symbol": "C", "score_breakdown": breakdown}],
+        }
+        assert _is_pdf(build_report_pdf(payload))
