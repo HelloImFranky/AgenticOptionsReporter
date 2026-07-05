@@ -69,6 +69,38 @@ endpoints:
       for this one request. It is never logged, echoed in the response,
       or persisted alongside the generated thesis.
 
+  - path: /runs/{run_id}/thesis/stream
+    method: POST
+    summary: >
+      Streaming variant of POST /runs/{run_id}/thesis: runs the same agent
+      pipeline but reports progress live as Server-Sent Events
+      (Content-Type text/event-stream), so a client can show each agent's
+      status and its raw prompt/response ("under the hood") as the run
+      happens instead of blocking for the whole pipeline. The terminal
+      `result` frame carries the full AgentThesisResult, which is persisted
+      exactly as the blocking endpoint does. Same request body and the same
+      pre-stream guards (404/409/422/502) — those are raised before the
+      stream opens, so they still surface as ordinary HTTP errors. Once the
+      stream is open, a required-agent failure is reported as an `error`
+      frame rather than an HTTP status (headers are already sent).
+    path_params:
+      run_id: int
+    body: ThesisGenerationRequest
+    produces: text/event-stream
+    sse_events:
+      agent: >
+        AgentEvent — one per agent phase transition (started / completed /
+        skipped / failed). A completed/failed event for an LLM-backed agent
+        also carries the raw prompt/response `exchange` and, on completion,
+        the parsed `output`.
+      result: AgentThesisResult   # terminal on success; also persisted server-side
+      error: "{ detail: str }"    # terminal when a required agent failed mid-run
+    errors:
+      404: run not found
+      409: a thesis already exists for this run and regenerate=false
+      422: body.provider is "auto" and body.api_key is set
+      502: unsupported provider or no configured LLM provider available (pre-stream only)
+
   - path: /runs/{run_id}/thesis
     method: GET
     summary: Fetch a previously generated thesis for a run.
@@ -165,3 +197,18 @@ models:
     provider: str = "auto"            # "auto" fails over across every configured provider; see specs/llm_providers.yaml
     api_key: str | null = null        # overrides the server's configured key for this request only; not valid with provider="auto"
     regenerate: bool = false
+
+  # Emitted only by POST /runs/{run_id}/thesis/stream, one per `agent` SSE
+  # frame, so a live view can track the pipeline agent-by-agent.
+  AgentExchange:
+    system_prompt: str    # the exact system prompt sent to the model
+    user_prompt: str      # the exact user prompt sent to the model
+    raw_response: str      # the model's raw text response, before parsing
+
+  AgentEvent:
+    agent: str            # quant_interpreter | financial_research | news_research | macro_research | catalyst_research | risk_challenger | options_strategy | investment_thesis
+    phase: str            # started | completed | skipped | failed
+    at: datetime
+    exchange: AgentExchange | null   # the raw prompt/response for an LLM-backed agent; null for deterministic or non-run phases
+    output: dict | null              # the agent's parsed finding on `completed`; null otherwise
+    detail: str | null               # human-readable reason on `skipped`/`failed`

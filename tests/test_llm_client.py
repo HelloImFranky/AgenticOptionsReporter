@@ -19,8 +19,35 @@ from agentic_options_reporter.thesis.llm_client import (
     LlmUnavailable,
     OpenAiLlmClient,
     OpenRouterLlmClient,
+    RecordingLlmClient,
     build_llm_client,
 )
+
+
+def test_recording_client_records_last_exchange_and_forwards():
+    # _StubLlmClient (defined later in this module) counts calls and returns
+    # a canned response; the recorder must forward to it and remember the
+    # full exchange.
+    inner = _StubLlmClient(response="model text")
+    recorder = RecordingLlmClient(inner)
+
+    result = recorder.complete("sys prompt", "user prompt")
+
+    assert result == "model text"
+    assert inner.calls == 1
+    assert recorder.last_exchange == ("sys prompt", "user prompt", "model text")
+
+
+def test_recording_client_overwrites_and_clears_exchange():
+    recorder = RecordingLlmClient(_StubLlmClient(response="first"))
+    recorder.complete("s1", "u1")
+    assert recorder.last_exchange == ("s1", "u1", "first")
+
+    # A caller resets between agents so each event carries only its own call.
+    recorder.last_exchange = None
+    assert recorder.last_exchange is None
+    recorder.complete("s2", "u2")
+    assert recorder.last_exchange == ("s2", "u2", "first")
 
 _ALL_PROVIDER_ENV_VARS = (
     "ANTHROPIC_API_KEY",

@@ -209,6 +209,52 @@ This keeps `/analyze` fast, cheap, and deterministic-only; a client (the
 CLI's `thesis` subcommand, or the Flet UI's Agents tab) calls the thesis
 endpoint afterward, once it has a `run_id`.
 
+### Live streaming (`POST /runs/{run_id}/thesis/stream`)
+
+The blocking `POST /runs/{run_id}/thesis` only returns once the whole
+pipeline finishes — for a full run that can be tens of seconds of model
+latency with no feedback. The `/thesis/stream` variant runs the *same*
+pipeline but reports progress live as **Server-Sent Events**
+(`text/event-stream`), so a client can show each agent's status — and its
+raw prompt/response — as it happens:
+
+```
+POST /runs/{run_id}/thesis/stream   body: ThesisGenerationRequest
+  event: agent   data: AgentEvent          # one per agent phase transition
+  event: agent   data: AgentEvent
+  ...
+  event: result  data: AgentThesisResult   # terminal; persisted server-side
+```
+
+An `AgentEvent` carries the agent id, a `phase`
+(`started`/`completed`/`skipped`/`failed`), and — for an LLM-backed agent —
+an `exchange` with the exact `system_prompt`, `user_prompt`, and
+`raw_response` the model saw and returned (the "under the hood" view),
+plus the parsed `output` on completion. Nothing about the stream is
+persisted except the final `AgentThesisResult`, which is written exactly
+as the blocking endpoint writes it (the design choice was "live only" — no
+new schema or migration for the per-agent log).
+
+How it's wired: `run_thesis_pipeline` takes an optional `on_event`
+callback and emits one event per agent as it runs (a no-op, and the client
+is left unwrapped, when `on_event is None`, so the blocking path is
+byte-for-byte unchanged). To capture the raw exchange, the orchestrator
+wraps the `LlmClient` in a `RecordingLlmClient` that remembers the last
+`(system_prompt, user_prompt, response)` and clears it between agents so
+each event carries only its own call. Because the pipeline is synchronous
+and blocking, `thesis/streaming.py:run_thesis_streaming` runs it on a
+worker thread that pushes events onto a queue, and the SSE endpoint drains
+that queue into `text/event-stream` frames. The 404/409/422/502 guards run
+*before* the stream opens (you can't raise an HTTP status once headers are
+sent); a required-agent failure after that surfaces as a terminal `error`
+frame instead.
+
+Clients: `ApiClient.stream_thesis(run_id, ...)` yields
+`{"event": ..., "data": ...}` dicts by parsing the SSE frames; the CLI's
+`thesis --stream` prints each agent's phase to stderr as it runs and the
+final result to stdout; the Flet Agents tab consumes it to update each
+agent live (see below).
+
 ## Agents tab (Flet UI)
 
 `frontend/app.py`'s Agents tab presents `AgentThesisResult` as two
@@ -219,11 +265,23 @@ sections rather than one undifferentiated blob:
   recommendation's confidence. This is the "read this and decide" part.
 - **Agent conversation** — each agent shown as a labeled message in
   pipeline order (Quant Interpreter, Financial Research, News Research,
-  Macro Research, Risk Challenger, Options Strategist, Investment
-  Thesis), so the reasoning that produced the final output is inspectable
-  rather than opaque. An agent skipped by the no-candidate short-circuit,
-  or a research agent whose provider isn't configured, renders as a muted
-  "Skipped — ..." message in its slot instead of being silently omitted.
+  Macro Research, Catalyst Research, Risk Challenger, Options Strategist,
+  Investment Thesis), so the reasoning that produced the final output is
+  inspectable rather than opaque. An agent skipped by the no-candidate
+  short-circuit, or a research agent whose provider isn't configured,
+  renders as a muted "Skipped — ..." message in its slot instead of being
+  silently omitted.
+
+  The tab renders **live**: it consumes `/thesis/stream` via
+  `ApiClient.stream_thesis` on a background thread (`page.run_thread`), so
+  each agent updates the moment its event arrives instead of the whole
+  panel appearing at once after the run. Every agent carries a small status
+  pill — Queued → Running… → Done / Skipped / Failed — and a collapsible
+  **"Under the hood"** panel that reveals the exact system prompt, user
+  prompt, and raw model response for that agent (from the event's
+  `exchange`), for tracking and debugging what each agent actually said.
+  The panel is hidden for agents with no LLM exchange (a skipped agent, or
+  the deterministic no-candidate quant path).
 
 Above both sections, a **Provider** dropdown (Auto, plus every named
 provider) and a password-masked **API key** field let a user override

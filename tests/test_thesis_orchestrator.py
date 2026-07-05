@@ -477,6 +477,128 @@ def test_research_agents_run_even_without_candidate():
     assert thesis.catalyst_research is not None
 
 
+def test_on_event_emits_started_completed_with_exchange_for_all_agents():
+    """With an on_event callback, every agent emits started→completed, and
+    each LLM-backed completed event carries the raw prompt/response exchange
+    so the live view can show what happened under the hood."""
+    llm = FakeLlmClient(_ALL_RESPONSES_WITH_RESEARCH)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    events = []
+    thesis = run_thesis_pipeline(
+        result,
+        llm,
+        financial_provider=FakeFinancialProvider(),
+        news_provider=FakeNewsProvider(),
+        macro_provider=FakeMacroProvider(),
+        sec_provider=FakeSecProvider(),
+        on_event=events.append,
+    )
+
+    assert thesis.investment_thesis.consensus == "bullish"
+
+    # Every agent that ran should show a started then a completed phase.
+    by_agent: dict[str, list[str]] = {}
+    for event in events:
+        by_agent.setdefault(event.agent, []).append(event.phase)
+
+    for agent in (
+        "quant_interpreter", "risk_challenger", "options_strategy",
+        "financial_research", "news_research", "macro_research",
+        "catalyst_research", "investment_thesis",
+    ):
+        assert by_agent[agent] == ["started", "completed"], agent
+
+    # The LLM-backed agents attach the exchange on completion; the
+    # deterministic quant path has no exchange.
+    completed = {e.agent: e for e in events if e.phase == "completed"}
+    thesis_exchange = completed["investment_thesis"].exchange
+    assert thesis_exchange is not None
+    assert "portfolio manager" in thesis_exchange.system_prompt
+    assert thesis_exchange.raw_response  # the raw model text
+    assert completed["quant_interpreter"].exchange is not None
+    # Each event carries the parsed output dict too.
+    assert completed["risk_challenger"].output["risk_level"] == "medium"
+
+
+def test_on_event_emits_skipped_for_unconfigured_and_no_candidate():
+    """Agents with no provider or no candidate emit a single skipped event
+    (with a human-readable reason), not started/completed."""
+    llm = FakeLlmClient(
+        {"portfolio manager": json.dumps({"thesis": "No position.", "consensus": "neutral"})}
+    )
+    recommendation = Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="no candidates")
+    result = _analysis_result([], recommendation)
+
+    events = []
+    run_thesis_pipeline(result, llm, on_event=events.append)
+
+    phases = {e.agent: e.phase for e in events}
+    assert phases["risk_challenger"] == "skipped"
+    assert phases["options_strategy"] == "skipped"
+    assert phases["financial_research"] == "skipped"
+    assert phases["news_research"] == "skipped"
+    assert phases["macro_research"] == "skipped"
+    assert phases["catalyst_research"] == "skipped"
+    # The quant + thesis agents still run to completion.
+    assert phases["quant_interpreter"] == "completed"
+    assert phases["investment_thesis"] == "completed"
+    # Skipped events explain why.
+    skipped = {e.agent: e for e in events if e.phase == "skipped"}
+    assert skipped["financial_research"].detail
+    assert skipped["risk_challenger"].detail
+
+
+def test_on_event_emits_failed_then_reraises_for_fatal_agent():
+    """A required agent that fails emits started→failed before the run
+    aborts, so the live view can mark it failed even though the pipeline
+    still raises."""
+    from agentic_options_reporter.thesis.llm_client import LlmUnavailable
+
+    class ExplodingLlmClient(FakeLlmClient):
+        def complete(self, system_prompt: str, user_prompt: str) -> str:
+            if "quantitative markets analyst" in system_prompt:
+                raise LlmUnavailable("provider down")
+            return super().complete(system_prompt, user_prompt)
+
+    llm = ExplodingLlmClient(_ALL_RESPONSES)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    events = []
+    import pytest
+
+    with pytest.raises(LlmUnavailable):
+        run_thesis_pipeline(result, llm, on_event=events.append)
+
+    assert [e.phase for e in events if e.agent == "quant_interpreter"] == ["started", "failed"]
+    failed = next(e for e in events if e.phase == "failed")
+    assert "provider down" in (failed.detail or "")
+
+
+def test_on_event_none_leaves_behavior_unchanged():
+    """The default (no callback) path must be byte-for-byte the old
+    pipeline: the client isn't wrapped and nothing is emitted."""
+    llm = FakeLlmClient(_ALL_RESPONSES)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(result, llm)
+
+    assert thesis.investment_thesis.consensus == "bullish"
+    assert len(llm.calls) == 4
+
+
 def test_no_candidate_short_circuit_skips_risk_and_strategy():
     llm = FakeLlmClient(
         {"portfolio manager": json.dumps({"thesis": "No position recommended.", "consensus": "neutral"})}

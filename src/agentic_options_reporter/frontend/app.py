@@ -174,6 +174,89 @@ def _skipped_message(reason: str) -> ft.Text:
     return ft.Text(reason, size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT)
 
 
+def _hood_block(label: str):
+    """One labelled block (System prompt / User prompt / Raw response) inside
+    the under-the-hood panel. Returns (column, set_value)."""
+    body = ft.Text("", size=11, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
+    container = ft.Container(
+        content=body,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        border_radius=8,
+        padding=10,
+    )
+    column = ft.Column(
+        [ft.Text(label, size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT), container],
+        spacing=4,
+        tight=True,
+    )
+
+    def set_value(text: str) -> None:
+        body.value = text
+
+    return column, set_value
+
+
+_STATUS_STYLE = {
+    "queued": (ft.Colors.ON_SURFACE_VARIANT, ft.Colors.SURFACE_CONTAINER_HIGHEST, "Queued"),
+    "running": (ft.Colors.BLUE_700, ft.Colors.BLUE_50, "Running…"),
+    "done": (ft.Colors.GREEN_700, ft.Colors.GREEN_50, "Done"),
+    "skipped": (ft.Colors.ON_SURFACE_VARIANT, ft.Colors.SURFACE_CONTAINER_HIGHEST, "Skipped"),
+    "failed": (ft.Colors.RED_700, ft.Colors.RED_50, "Failed"),
+}
+
+
+def _status_pill():
+    """A small status chip for one agent. Returns a Container; use
+    `_set_status(pill, phase)` to update it live. Hidden until set."""
+    return ft.Container(
+        content=ft.Text("", size=10, weight=ft.FontWeight.BOLD),
+        padding=ft.padding.symmetric(horizontal=8, vertical=2),
+        border_radius=100,
+        visible=False,
+    )
+
+
+def _set_status(pill: ft.Container, status: str) -> None:
+    color, bgcolor, label = _STATUS_STYLE[status]
+    pill.content.value = label
+    pill.content.color = color
+    pill.bgcolor = bgcolor
+    pill.visible = True
+
+
+def _hood():
+    """A collapsible "Under the hood" panel showing the raw system prompt,
+    user prompt, and model response for an agent. Returns (tile, fill) where
+    `fill(exchange)` populates it from an AgentExchange dict (or hides the
+    tile when the agent had no LLM exchange)."""
+    system_block, set_system = _hood_block("System prompt")
+    user_block, set_user = _hood_block("User prompt")
+    response_block, set_response = _hood_block("Raw response")
+    tile = ft.ExpansionTile(
+        title=ft.Text("Under the hood", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+        controls=[
+            ft.Container(
+                content=ft.Column([system_block, user_block, response_block], spacing=10, tight=True),
+                padding=ft.padding.only(left=8, right=8, bottom=8),
+            )
+        ],
+        visible=False,
+        dense=True,
+        controls_padding=0,
+    )
+
+    def fill(exchange: dict | None) -> None:
+        if not exchange:
+            tile.visible = False
+            return
+        set_system(exchange.get("system_prompt", "") or "")
+        set_user(exchange.get("user_prompt", "") or "")
+        set_response(exchange.get("raw_response", "") or "")
+        tile.visible = True
+
+    return tile, fill
+
+
 def _card(*controls: ft.Control, padding: int = 20, spacing: int = 12) -> ft.Card:
     return ft.Card(
         elevation=1,
@@ -861,32 +944,67 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
     thesis_text = ft.Text("", size=13, selectable=True)
     thesis_message_body = ft.Column([thesis_consensus_badge, thesis_text], spacing=8, tight=True)
 
+    # -- per-agent status pills + under-the-hood (raw prompt/response) panels --
+    quant_status = _status_pill()
+    financial_status = _status_pill()
+    news_status = _status_pill()
+    macro_status = _status_pill()
+    catalyst_status = _status_pill()
+    risk_status = _status_pill()
+    strategy_status = _status_pill()
+    thesis_status = _status_pill()
+
+    quant_hood, quant_hood_fill = _hood()
+    financial_hood, financial_hood_fill = _hood()
+    news_hood, news_hood_fill = _hood()
+    macro_hood, macro_hood_fill = _hood()
+    catalyst_hood, catalyst_hood_fill = _hood()
+    risk_hood, risk_hood_fill = _hood()
+    strategy_hood, strategy_hood_fill = _hood()
+    thesis_hood, thesis_hood_fill = _hood()
+
     conversation_card = ft.Column(
         [
             _card(
                 _section_title("Agent conversation", ft.Icons.FORUM_OUTLINED),
-                _agent_message("Quant Interpreter", ft.Icons.QUERY_STATS_ROUNDED, ft.Colors.INDIGO, quant_message_body),
-                ft.Divider(),
                 _agent_message(
-                    "Financial Research", ft.Icons.ACCOUNT_BALANCE_OUTLINED, ft.Colors.GREEN_700, financial_message_body
-                ),
-                ft.Divider(),
-                _agent_message("News Research", ft.Icons.NEWSPAPER, ft.Colors.BLUE_700, news_message_body),
-                ft.Divider(),
-                _agent_message("Macro Research", ft.Icons.PUBLIC, ft.Colors.AMBER_800, macro_message_body),
-                ft.Divider(),
-                _agent_message(
-                    "Catalyst Research", ft.Icons.EVENT_NOTE_OUTLINED, ft.Colors.CYAN_800, catalyst_message_body
-                ),
-                ft.Divider(),
-                _agent_message("Risk Challenger", ft.Icons.SHIELD_OUTLINED, ft.Colors.DEEP_ORANGE, risk_message_body),
-                ft.Divider(),
-                _agent_message(
-                    "Options Strategist", ft.Icons.LIGHTBULB_OUTLINE, ft.Colors.TEAL, strategy_message_body
+                    "Quant Interpreter", ft.Icons.QUERY_STATS_ROUNDED, ft.Colors.INDIGO,
+                    quant_status, quant_message_body, quant_hood,
                 ),
                 ft.Divider(),
                 _agent_message(
-                    "Investment Thesis", ft.Icons.AUTO_AWESOME_OUTLINED, ft.Colors.PURPLE, thesis_message_body
+                    "Financial Research", ft.Icons.ACCOUNT_BALANCE_OUTLINED, ft.Colors.GREEN_700,
+                    financial_status, financial_message_body, financial_hood,
+                ),
+                ft.Divider(),
+                _agent_message(
+                    "News Research", ft.Icons.NEWSPAPER, ft.Colors.BLUE_700,
+                    news_status, news_message_body, news_hood,
+                ),
+                ft.Divider(),
+                _agent_message(
+                    "Macro Research", ft.Icons.PUBLIC, ft.Colors.AMBER_800,
+                    macro_status, macro_message_body, macro_hood,
+                ),
+                ft.Divider(),
+                _agent_message(
+                    "Catalyst Research", ft.Icons.EVENT_NOTE_OUTLINED, ft.Colors.CYAN_800,
+                    catalyst_status, catalyst_message_body, catalyst_hood,
+                ),
+                ft.Divider(),
+                _agent_message(
+                    "Risk Challenger", ft.Icons.SHIELD_OUTLINED, ft.Colors.DEEP_ORANGE,
+                    risk_status, risk_message_body, risk_hood,
+                ),
+                ft.Divider(),
+                _agent_message(
+                    "Options Strategist", ft.Icons.LIGHTBULB_OUTLINE, ft.Colors.TEAL,
+                    strategy_status, strategy_message_body, strategy_hood,
+                ),
+                ft.Divider(),
+                _agent_message(
+                    "Investment Thesis", ft.Icons.AUTO_AWESOME_OUTLINED, ft.Colors.PURPLE,
+                    thesis_status, thesis_message_body, thesis_hood,
                 ),
                 spacing=16,
             ),
@@ -906,40 +1024,173 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         download_status.visible = False
         download_pdf_link.visible = False
 
-    def generate_thesis(_: ft.ControlEvent) -> None:
-        if current_run_id["value"] is None:
-            return
-        thesis_error_banner.visible = False
-        pipeline_warnings_banner.visible = False
-        download_status.visible = False
-        download_pdf_link.visible = False
-        thesis_progress.visible = True
-        thesis_button.disabled = True
-        page.update()
+    # -- per-agent renderers: populate a message body from one agent's output --
+    def _apply_quant(quant: dict) -> None:
+        quant_score = quant.get("overall_score") or 0.0
+        _fill_pill(quant_score_badge, f"SCORE {quant_score:.0f}/100", quant_score_tone(quant_score))
+        quant_narrative_text.value = quant.get("narrative", "")
+        quant_factors_row.controls = [_chip(factor) for factor in quant.get("key_factors", [])]
+        quant_message_body.controls = [quant_score_badge, quant_narrative_text, quant_factors_row]
 
-        try:
-            result = client.generate_thesis(
-                current_run_id["value"],
-                regenerate=True,
-                provider=provider_dropdown.value or "auto",
-                api_key=(api_key_field.value or "").strip() or None,
-            )
-        except ApiError as exc:
-            thesis_progress.visible = False
-            thesis_button.disabled = False
-            thesis_error_banner.content.controls[1].value = str(exc)
-            thesis_error_banner.visible = True
-            page.update()
-            return
+    def _apply_financial(financial: dict) -> None:
+        _fill_pill(
+            financial_health_badge,
+            f"HEALTH: {financial.get('company_health', '—').upper()}",
+            company_health_tone(financial.get("company_health", "")),
+        )
+        financial_chips_row.controls = [
+            _toned_chip(f"Growth: {financial.get('growth', '—')}", growth_tone(financial.get("growth", ""))),
+            _toned_chip(
+                f"Profitability: {financial.get('profitability', '—')}",
+                profitability_tone(financial.get("profitability", "")),
+            ),
+            _toned_chip(
+                f"Cash flow: {financial.get('cash_flow', '—')}", cash_flow_tone(financial.get("cash_flow", ""))
+            ),
+        ]
+        financial_analyst_text.value = f"Analyst consensus: {financial.get('analyst_consensus', '—')}"
+        financial_narrative_text.value = financial.get("narrative", "")
+        financial_message_body.controls = [
+            financial_health_badge, financial_chips_row, financial_analyst_text, financial_narrative_text
+        ]
 
-        quant = result["quant_interpretation"]
-        financial = result.get("financial_research")
-        news = result.get("news_research")
-        macro = result.get("macro_research")
-        catalyst = result.get("catalyst_research")
-        risk = result.get("risk_assessment")
-        strategy = result.get("strategy_suggestion")
-        investment_thesis = result["investment_thesis"]
+    def _apply_news(news: dict) -> None:
+        news_tone = trend_tone(news.get("sentiment", ""))
+        news_sentiment_badge.content = ft.Text(
+            news.get("sentiment", "—").upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+        )
+        news_sentiment_badge.bgcolor = _tone_colors(news_tone)[0]
+        news_sentiment_badge.border_radius = 20
+        news_sentiment_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+        news_sentiment_badge.visible = True
+        news_summary_text.value = news.get("summary", "")
+        catalysts = news.get("catalysts", [])
+        news_catalysts_column.controls = (
+            [ft.Text("Catalysts", size=11, weight=ft.FontWeight.BOLD), _bullet_list(catalysts)]
+            if catalysts
+            else []
+        )
+        risks = news.get("risks", [])
+        news_risks_column.controls = (
+            [ft.Text("Risks", size=11, weight=ft.FontWeight.BOLD), _bullet_list(risks)] if risks else []
+        )
+        news_message_body.controls = [
+            news_sentiment_badge, news_summary_text, news_catalysts_column, news_risks_column
+        ]
+
+    def _apply_macro(macro: dict) -> None:
+        macro_tone = macro_regime_tone(macro.get("regime", ""))
+        macro_regime_badge.content = ft.Text(
+            macro.get("regime", "—").upper().replace("_", " "),
+            size=11,
+            weight=ft.FontWeight.BOLD,
+            color=ft.Colors.WHITE,
+        )
+        macro_regime_badge.bgcolor = _tone_colors(macro_tone)[0]
+        macro_regime_badge.border_radius = 20
+        macro_regime_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+        macro_regime_badge.visible = True
+        macro_summary_text.value = macro.get("summary", "")
+        macro_outlook_text.value = macro.get("outlook", "")
+        macro_message_body.controls = [macro_regime_badge, macro_summary_text, macro_outlook_text]
+
+    def _apply_catalyst(catalyst: dict) -> None:
+        net_bias = catalyst.get("net_bias", "—")
+        catalyst_bias_badge.content = ft.Text(
+            f"NET: {net_bias.upper()}", size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+        )
+        catalyst_bias_badge.bgcolor = _tone_colors(consensus_tone(net_bias))[0]
+        catalyst_bias_badge.border_radius = 20
+        catalyst_bias_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+        catalyst_bias_badge.visible = True
+        catalyst_summary_text.value = catalyst.get("summary", "")
+        catalyst_items_column.controls = [
+            _catalyst_entry(item) for item in catalyst.get("catalysts", [])
+        ] or [ft.Text("No discrete catalysts identified.", size=12, italic=True,
+                      color=ft.Colors.ON_SURFACE_VARIANT)]
+        catalyst_message_body.controls = [
+            catalyst_bias_badge, catalyst_summary_text, catalyst_items_column
+        ]
+
+    def _apply_risk(risk: dict) -> None:
+        risk_tone = risk_level_tone(risk.get("risk_level", ""))
+        risk_badge.content = ft.Text(
+            risk.get("risk_level", "—").upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+        )
+        risk_badge.bgcolor = _tone_colors(risk_tone)[0]
+        risk_badge.border_radius = 20
+        risk_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+        risk_badge.visible = True
+        risk_concerns_column.controls = [_bullet_list(risk.get("concerns", []))]
+        risk_sizing_text.value = risk.get("position_sizing_note", "")
+        risk_message_body.controls = [risk_badge, risk_concerns_column, risk_sizing_text]
+
+    def _apply_strategy(strategy: dict) -> None:
+        strategy_name_text.value = strategy.get("strategy", "")
+        strategy_rationale_text.value = strategy.get("rationale", "")
+        strategy_message_body.controls = [strategy_name_text, strategy_rationale_text]
+
+    def _apply_thesis(investment_thesis: dict) -> None:
+        consensus = investment_thesis.get("consensus", "—")
+        thesis_consensus_badge.content = ft.Text(
+            consensus.upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
+        )
+        thesis_consensus_badge.bgcolor = _tone_colors(consensus_tone(consensus))[0]
+        thesis_consensus_badge.border_radius = 20
+        thesis_consensus_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
+        thesis_consensus_badge.visible = True
+        thesis_text.value = investment_thesis.get("thesis", "")
+        thesis_message_body.controls = [thesis_consensus_badge, thesis_text]
+
+    # Agent id (as emitted by the orchestrator) → (status pill, message body,
+    # apply-output fn, under-the-hood fill fn).
+    _AGENTS: dict[str, tuple] = {
+        "quant_interpreter": (quant_status, quant_message_body, _apply_quant, quant_hood_fill),
+        "financial_research": (financial_status, financial_message_body, _apply_financial, financial_hood_fill),
+        "news_research": (news_status, news_message_body, _apply_news, news_hood_fill),
+        "macro_research": (macro_status, macro_message_body, _apply_macro, macro_hood_fill),
+        "catalyst_research": (catalyst_status, catalyst_message_body, _apply_catalyst, catalyst_hood_fill),
+        "risk_challenger": (risk_status, risk_message_body, _apply_risk, risk_hood_fill),
+        "options_strategy": (strategy_status, strategy_message_body, _apply_strategy, strategy_hood_fill),
+        "investment_thesis": (thesis_status, thesis_message_body, _apply_thesis, thesis_hood_fill),
+    }
+
+    def _reset_agent(agent_id: str) -> None:
+        status, body, _apply, hood_fill = _AGENTS[agent_id]
+        _set_status(status, "queued")
+        body.controls = [
+            ft.Text("Waiting to run…", size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT)
+        ]
+        hood_fill(None)
+
+    def _handle_agent_event(data: dict) -> None:
+        agent_id = data.get("agent", "")
+        if agent_id not in _AGENTS:
+            return
+        status, body, apply, hood_fill = _AGENTS[agent_id]
+        phase = data.get("phase")
+        if phase == "started":
+            _set_status(status, "running")
+            body.controls = [
+                ft.Text("Running…", size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT)
+            ]
+        elif phase == "completed":
+            _set_status(status, "done")
+            apply(data.get("output") or {})
+            hood_fill(data.get("exchange"))
+        elif phase == "skipped":
+            _set_status(status, "skipped")
+            body.controls = [_skipped_message(data.get("detail") or "Skipped.")]
+            hood_fill(None)
+        elif phase == "failed":
+            _set_status(status, "failed")
+            body.controls = [
+                _skipped_message(f"Failed — {data.get('detail') or 'agent error'}.")
+            ]
+            hood_fill(data.get("exchange"))
+
+    def _render_final(result: dict) -> None:
+        investment_thesis = result.get("investment_thesis") or {}
         warnings = result.get("pipeline_warnings") or []
 
         if warnings:
@@ -948,11 +1199,6 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
                 for warning in warnings
             ]
             pipeline_warnings_banner.visible = True
-
-        def _skip_reason(agent_name: str, not_configured_text: str) -> str:
-            if any(warning.startswith(f"{agent_name}:") for warning in warnings):
-                return "Skipped — provider failed during the run (see warning above)."
-            return not_configured_text
 
         # -- final output verdict --
         final_action_badge.content = ft.Text(
@@ -964,11 +1210,10 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         final_action_badge.visible = True
 
         consensus = investment_thesis.get("consensus", "—")
-        consensus_color = _tone_colors(consensus_tone(consensus))[0]
         final_consensus_badge.content = ft.Text(
             f"AGENTS: {consensus.upper()}", size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
         )
-        final_consensus_badge.bgcolor = consensus_color
+        final_consensus_badge.bgcolor = _tone_colors(consensus_tone(consensus))[0]
         final_consensus_badge.border_radius = 20
         final_consensus_badge.padding = ft.padding.symmetric(vertical=6, horizontal=14)
         final_consensus_badge.visible = True
@@ -976,173 +1221,59 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         final_confidence_text.value = f"{last_recommendation['confidence']:.0%} confidence"
         final_output_card.visible = True
 
-        # -- conversation transcript --
-        quant_score = quant.get("overall_score") or 0.0
-        _fill_pill(quant_score_badge, f"SCORE {quant_score:.0f}/100", quant_score_tone(quant_score))
-        quant_narrative_text.value = quant.get("narrative", "")
-        quant_factors_row.controls = [_chip(factor) for factor in quant.get("key_factors", [])]
-
-        if financial is not None:
-            _fill_pill(
-                financial_health_badge,
-                f"HEALTH: {financial.get('company_health', '—').upper()}",
-                company_health_tone(financial.get("company_health", "")),
-            )
-            financial_chips_row.controls = [
-                _toned_chip(f"Growth: {financial.get('growth', '—')}", growth_tone(financial.get("growth", ""))),
-                _toned_chip(
-                    f"Profitability: {financial.get('profitability', '—')}",
-                    profitability_tone(financial.get("profitability", "")),
-                ),
-                _toned_chip(
-                    f"Cash flow: {financial.get('cash_flow', '—')}", cash_flow_tone(financial.get("cash_flow", ""))
-                ),
-            ]
-            financial_analyst_text.value = f"Analyst consensus: {financial.get('analyst_consensus', '—')}"
-            financial_narrative_text.value = financial.get("narrative", "")
-            financial_message_body.controls = [
-                financial_health_badge, financial_chips_row, financial_analyst_text, financial_narrative_text
-            ]
-        else:
-            financial_health_badge.visible = False
-            financial_chips_row.controls = []
-            financial_analyst_text.value = ""
-            financial_narrative_text.value = ""
-            financial_message_body.controls = [
-                _skipped_message(
-                    _skip_reason("financial_research", "Skipped — no financial data provider configured.")
-                )
-            ]
-
-        if news is not None:
-            news_tone = trend_tone(news.get("sentiment", ""))
-            news_sentiment_badge.content = ft.Text(
-                news.get("sentiment", "—").upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
-            )
-            news_sentiment_badge.bgcolor = _tone_colors(news_tone)[0]
-            news_sentiment_badge.border_radius = 20
-            news_sentiment_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
-            news_sentiment_badge.visible = True
-            news_summary_text.value = news.get("summary", "")
-            catalysts = news.get("catalysts", [])
-            news_catalysts_column.controls = (
-                [ft.Text("Catalysts", size=11, weight=ft.FontWeight.BOLD), _bullet_list(catalysts)]
-                if catalysts
-                else []
-            )
-            risks = news.get("risks", [])
-            news_risks_column.controls = (
-                [ft.Text("Risks", size=11, weight=ft.FontWeight.BOLD), _bullet_list(risks)] if risks else []
-            )
-            news_message_body.controls = [
-                news_sentiment_badge, news_summary_text, news_catalysts_column, news_risks_column
-            ]
-        else:
-            news_sentiment_badge.visible = False
-            news_summary_text.value = ""
-            news_catalysts_column.controls = []
-            news_risks_column.controls = []
-            news_message_body.controls = [
-                _skipped_message(_skip_reason("news_research", "Skipped — no news data provider configured."))
-            ]
-
-        if macro is not None:
-            macro_tone = macro_regime_tone(macro.get("regime", ""))
-            macro_regime_badge.content = ft.Text(
-                macro.get("regime", "—").upper().replace("_", " "),
-                size=11,
-                weight=ft.FontWeight.BOLD,
-                color=ft.Colors.WHITE,
-            )
-            macro_regime_badge.bgcolor = _tone_colors(macro_tone)[0]
-            macro_regime_badge.border_radius = 20
-            macro_regime_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
-            macro_regime_badge.visible = True
-            macro_summary_text.value = macro.get("summary", "")
-            macro_outlook_text.value = macro.get("outlook", "")
-            macro_message_body.controls = [macro_regime_badge, macro_summary_text, macro_outlook_text]
-        else:
-            macro_regime_badge.visible = False
-            macro_summary_text.value = ""
-            macro_outlook_text.value = ""
-            macro_message_body.controls = [
-                _skipped_message(_skip_reason("macro_research", "Skipped — no macro data provider configured."))
-            ]
-
-        if catalyst is not None:
-            net_bias = catalyst.get("net_bias", "—")
-            catalyst_bias_badge.content = ft.Text(
-                f"NET: {net_bias.upper()}", size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
-            )
-            catalyst_bias_badge.bgcolor = _tone_colors(consensus_tone(net_bias))[0]
-            catalyst_bias_badge.border_radius = 20
-            catalyst_bias_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
-            catalyst_bias_badge.visible = True
-            catalyst_summary_text.value = catalyst.get("summary", "")
-            catalyst_items_column.controls = [
-                _catalyst_entry(item) for item in catalyst.get("catalysts", [])
-            ] or [ft.Text("No discrete catalysts identified.", size=12, italic=True,
-                          color=ft.Colors.ON_SURFACE_VARIANT)]
-            catalyst_message_body.controls = [
-                catalyst_bias_badge, catalyst_summary_text, catalyst_items_column
-            ]
-        else:
-            catalyst_bias_badge.visible = False
-            catalyst_summary_text.value = ""
-            catalyst_items_column.controls = []
-            catalyst_message_body.controls = [
-                _skipped_message(
-                    _skip_reason(
-                        "catalyst_research",
-                        "Skipped — no news, SEC, or macro provider configured.",
-                    )
-                )
-            ]
-
-        if risk is not None:
-            risk_tone = risk_level_tone(risk.get("risk_level", ""))
-            risk_badge.content = ft.Text(
-                risk.get("risk_level", "—").upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
-            )
-            risk_badge.bgcolor = _tone_colors(risk_tone)[0]
-            risk_badge.border_radius = 20
-            risk_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
-            risk_badge.visible = True
-            risk_concerns_column.controls = [_bullet_list(risk.get("concerns", []))]
-            risk_sizing_text.value = risk.get("position_sizing_note", "")
-        else:
-            risk_badge.visible = False
-            risk_concerns_column.controls = [_skipped_message("Skipped — no candidate contract to assess.")]
-            risk_sizing_text.value = ""
-
-        if strategy is not None:
-            strategy_name_text.value = strategy.get("strategy", "")
-            strategy_rationale_text.value = strategy.get("rationale", "")
-            strategy_message_body.controls = [strategy_name_text, strategy_rationale_text]
-        else:
-            strategy_message_body.controls = [
-                _skipped_message("Skipped — no candidate contract to build a strategy around.")
-            ]
-
-        thesis_consensus_badge.content = ft.Text(
-            consensus.upper(), size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE
-        )
-        thesis_consensus_badge.bgcolor = consensus_color
-        thesis_consensus_badge.border_radius = 20
-        thesis_consensus_badge.padding = ft.padding.symmetric(vertical=3, horizontal=10)
-        thesis_consensus_badge.visible = True
-        thesis_text.value = investment_thesis.get("thesis", "")
-
-        conversation_card.visible = True
-
         # Retain the payload and unlock the PDF export now that a full run exists.
         report_state["thesis"] = result
         download_pdf_button.disabled = False
-
-        thesis_progress.visible = False
-        thesis_button.disabled = False
         thesis_button.text = "Regenerate investment thesis"
+
+    def _show_stream_error(message: str) -> None:
+        thesis_error_banner.content.controls[1].value = message
+        thesis_error_banner.visible = True
+
+    def _stream_worker() -> None:
+        got_result = False
+        try:
+            for item in client.stream_thesis(
+                current_run_id["value"],
+                regenerate=True,
+                provider=provider_dropdown.value or "auto",
+                api_key=(api_key_field.value or "").strip() or None,
+            ):
+                event, data = item["event"], item["data"]
+                if event == "agent":
+                    _handle_agent_event(data)
+                elif event == "result":
+                    got_result = True
+                    _render_final(data)
+                elif event == "error":
+                    _show_stream_error(data.get("detail", "thesis generation failed"))
+                page.update()
+        except ApiError as exc:
+            _show_stream_error(str(exc))
+        finally:
+            if not got_result and not thesis_error_banner.visible:
+                _show_stream_error("Thesis stream ended without a result.")
+            thesis_progress.visible = False
+            thesis_button.disabled = False
+            page.update()
+
+    def generate_thesis(_: ft.ControlEvent) -> None:
+        if current_run_id["value"] is None:
+            return
+        thesis_error_banner.visible = False
+        pipeline_warnings_banner.visible = False
+        final_output_card.visible = False
+        download_status.visible = False
+        download_pdf_link.visible = False
+        thesis_progress.visible = True
+        thesis_button.disabled = True
+        # Reset every agent to a queued state and reveal the live transcript.
+        for agent_id in _AGENTS:
+            _reset_agent(agent_id)
+        conversation_card.visible = True
         page.update()
+
+        page.run_thread(_stream_worker)
 
     thesis_button.on_click = generate_thesis
 

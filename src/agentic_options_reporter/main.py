@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from agentic_options_reporter.config import get_settings
 from agentic_options_reporter.data.financial import (
@@ -53,9 +56,10 @@ from agentic_options_reporter.persistence import (
     make_session_factory,
     persist_thesis,
 )
-from agentic_options_reporter.thesis.llm_client import LlmError, build_llm_client
+from agentic_options_reporter.thesis.llm_client import LlmClient, LlmError, build_llm_client
 from agentic_options_reporter.thesis.orchestrator import run_thesis_pipeline
 from agentic_options_reporter.thesis.parsing import ThesisGenerationError
+from agentic_options_reporter.thesis.streaming import run_thesis_streaming
 from agentic_options_reporter.workflow import run_analysis
 
 app = FastAPI(title="AgenticOptionsReporter", version="0.1.0")
@@ -245,62 +249,126 @@ def list_runs(symbol: str | None = None, limit: int = 20) -> list[AnalysisRunSum
         ]
 
 
+def _load_run_for_thesis(session, run_id: int, request: ThesisGenerationRequest) -> AnalysisResult:
+    """Shared guards for thesis generation (blocking + streaming): 404 if
+    the run is missing, 409 if a thesis already exists without regenerate,
+    422 if provider='auto' is combined with a custom key. Returns the
+    AnalysisResult to run the pipeline over."""
+    run = session.get(AnalysisRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if run.agent_thesis is not None and not request.regenerate:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run {run_id} already has a thesis; pass regenerate=true to replace it",
+        )
+    if request.provider.strip().lower() == "auto" and request.api_key:
+        raise HTTPException(
+            status_code=422,
+            detail="api_key cannot be combined with provider='auto'; choose a specific "
+            "provider to use a custom key.",
+        )
+    return _to_analysis_result(run)
+
+
+def _build_thesis_llm_client(request: ThesisGenerationRequest) -> LlmClient:
+    # settings.llm_model is only meaningful for the default (anthropic)
+    # provider; other providers use their own built-in default model.
+    model = _settings.llm_model if request.provider == "anthropic" else None
+    return build_llm_client(
+        request.provider, api_key=request.api_key, model=model, max_tokens=_settings.llm_max_tokens
+    )
+
+
+def _persist_generated_thesis(run_id: int, thesis_result: AgentThesisResult) -> None:
+    with _session_factory() as session:
+        run = session.get(AnalysisRun, run_id)
+        if run is not None and run.agent_thesis is not None:
+            delete_thesis(session, run_id)
+        persist_thesis(session, thesis_result)
+
+
 @app.post("/runs/{run_id}/thesis", response_model=AgentThesisResult)
 def generate_thesis(
     run_id: int, request: ThesisGenerationRequest = ThesisGenerationRequest()
 ) -> AgentThesisResult:
     with _session_factory() as session:
-        run = session.get(AnalysisRun, run_id)
-        if run is None:
-            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        analysis_result = _load_run_for_thesis(session, run_id, request)
 
-        if run.agent_thesis is not None and not request.regenerate:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Run {run_id} already has a thesis; pass regenerate=true to replace it",
-            )
+    try:
+        thesis_result = run_thesis_pipeline(
+            analysis_result,
+            _build_thesis_llm_client(request),
+            financial_provider=_optional_financial_provider(),
+            news_provider=_optional_news_provider(),
+            macro_provider=_optional_macro_provider(),
+            sec_provider=_optional_sec_provider(),
+        )
+    except (
+        LlmError,
+        ThesisGenerationError,
+        FinancialProviderError,
+        NewsProviderError,
+        MacroProviderError,
+        SecProviderError,
+    ) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        if request.provider.strip().lower() == "auto" and request.api_key:
-            raise HTTPException(
-                status_code=422,
-                detail="api_key cannot be combined with provider='auto'; choose a specific "
-                "provider to use a custom key.",
-            )
+    _persist_generated_thesis(run_id, thesis_result)
+    return thesis_result
 
-        analysis_result = _to_analysis_result(run)
 
-        # settings.llm_model is only meaningful for the default (anthropic)
-        # provider; other providers use their own built-in default model.
-        model = _settings.llm_model if request.provider == "anthropic" else None
-        try:
-            llm_client = build_llm_client(
-                request.provider,
-                api_key=request.api_key,
-                model=model,
-                max_tokens=_settings.llm_max_tokens,
-            )
-            thesis_result = run_thesis_pipeline(
-                analysis_result,
-                llm_client,
-                financial_provider=_optional_financial_provider(),
-                news_provider=_optional_news_provider(),
-                macro_provider=_optional_macro_provider(),
-                sec_provider=_optional_sec_provider(),
-            )
-        except (
-            LlmError,
-            ThesisGenerationError,
-            FinancialProviderError,
-            NewsProviderError,
-            MacroProviderError,
-            SecProviderError,
-        ) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+def _sse_frame(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
-        if run.agent_thesis is not None:
-            delete_thesis(session, run_id)
-        persist_thesis(session, thesis_result)
-        return thesis_result
+
+@app.post("/runs/{run_id}/thesis/stream")
+def generate_thesis_stream(
+    run_id: int, request: ThesisGenerationRequest = ThesisGenerationRequest()
+) -> StreamingResponse:
+    """Server-Sent Events variant of generate_thesis: emits one `agent`
+    frame per agent as the pipeline runs (with its raw prompt/response and
+    parsed output — the live 'under the hood' view), then a terminal
+    `result` frame carrying the full AgentThesisResult (persisted, same as
+    the blocking endpoint) or an `error` frame if a required agent failed.
+    The 404/409/422 guards run before streaming starts, so they still
+    surface as normal HTTP errors."""
+    with _session_factory() as session:
+        analysis_result = _load_run_for_thesis(session, run_id, request)
+
+    # Build the client + providers up front so a bad provider/key fails as a
+    # clean HTTP error rather than mid-stream.
+    try:
+        llm_client = _build_thesis_llm_client(request)
+    except LlmError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    financial_provider = _optional_financial_provider()
+    news_provider = _optional_news_provider()
+    macro_provider = _optional_macro_provider()
+    sec_provider = _optional_sec_provider()
+
+    def _run_pipeline(on_event):
+        return run_thesis_pipeline(
+            analysis_result,
+            llm_client,
+            financial_provider=financial_provider,
+            news_provider=news_provider,
+            macro_provider=macro_provider,
+            sec_provider=sec_provider,
+            on_event=on_event,
+        )
+
+    def event_stream():
+        for kind, payload in run_thesis_streaming(_run_pipeline):
+            if kind == "event":
+                yield _sse_frame("agent", payload.model_dump(mode="json"))
+            elif kind == "result":
+                _persist_generated_thesis(run_id, payload)
+                yield _sse_frame("result", payload.model_dump(mode="json"))
+            else:  # "error" — a required agent failed (LlmError/ThesisGenerationError)
+                yield _sse_frame("error", {"detail": str(payload)})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/runs/{run_id}/thesis", response_model=AgentThesisResult)
