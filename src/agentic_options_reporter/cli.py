@@ -34,9 +34,33 @@ def cmd_run(client: ApiClient, args: argparse.Namespace) -> Any:
 def cmd_thesis(client: ApiClient, args: argparse.Namespace) -> Any:
     if args.fetch_only:
         return client.get_thesis(args.run_id)
+    if args.stream:
+        return _stream_thesis(client, args)
     return client.generate_thesis(
         args.run_id, regenerate=args.regenerate, provider=args.provider, api_key=args.api_key
     )
+
+
+def _stream_thesis(client: ApiClient, args: argparse.Namespace) -> Any:
+    """Consume the live SSE stream, printing each agent's progress to stderr
+    as it runs, and return the final result (printed to stdout by main)."""
+    final: Any = None
+    for item in client.stream_thesis(
+        args.run_id, regenerate=args.regenerate, provider=args.provider, api_key=args.api_key
+    ):
+        event, data = item["event"], item["data"]
+        if event == "agent":
+            line = f"[{data.get('phase', '?'):>9}] {data.get('agent', '?')}"
+            if data.get("detail"):
+                line += f" — {data['detail']}"
+            print(line, file=sys.stderr)
+        elif event == "result":
+            final = data
+        elif event == "error":
+            raise ApiError(data.get("detail", "thesis generation failed"))
+    if final is None:
+        raise ApiError("thesis stream ended without a result")
+    return final
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--fetch-only",
         action="store_true",
         help="Only fetch a previously generated thesis; never generate a new one",
+    )
+    thesis_parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Stream each agent's progress live (to stderr) as the pipeline runs",
     )
     thesis_parser.add_argument(
         "--provider",

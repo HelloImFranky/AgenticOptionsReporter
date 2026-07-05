@@ -10,6 +10,7 @@ options_strategy, then investment_thesis, and assembles the result.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from agentic_options_reporter.data import financial as financial_data
@@ -22,6 +23,8 @@ from agentic_options_reporter.data.macro import (
 from agentic_options_reporter.data.news import NewsProvider, NewsProviderError
 from agentic_options_reporter.data.sec_provider import SECProvider, SecProviderError
 from agentic_options_reporter.models.schemas import (
+    AgentEvent,
+    AgentExchange,
     AgentThesisResult,
     AnalysisResult,
     QuantInterpretation,
@@ -36,8 +39,13 @@ from agentic_options_reporter.thesis import (
     quant_interpreter,
     risk_challenger,
 )
-from agentic_options_reporter.thesis.llm_client import LlmClient
+from agentic_options_reporter.thesis.llm_client import LlmClient, LlmError, RecordingLlmClient
 from agentic_options_reporter.thesis.parsing import ThesisGenerationError
+
+# Callback invoked with a per-agent AgentEvent as the pipeline runs, for a
+# live view (thesis.streaming / the SSE endpoint). None = run silently, the
+# original non-streaming behavior.
+OnEvent = Callable[[AgentEvent], None]
 
 
 async def _fetch_financial_inputs(provider: FinancialProvider, ticker: str) -> tuple:
@@ -112,6 +120,22 @@ async def _fetch_catalyst_inputs(
     return a, f, o, errors
 
 
+def _run_fatal_agent(emit, reset_exchange, agent: str, run):
+    """Run a required agent (quant / risk / strategy / investment_thesis)
+    whose failure is fatal to the whole run: emit started → completed, or
+    emit failed and re-raise so the caller surfaces the 502 (unchanged
+    behavior — the emit is a no-op when no live view is attached)."""
+    emit(agent, "started")
+    reset_exchange()
+    try:
+        result = run()
+    except (LlmError, ThesisGenerationError) as exc:
+        emit(agent, "failed", detail=str(exc))
+        raise
+    emit(agent, "completed", output=result.model_dump(), with_exchange=True)
+    return result
+
+
 def run_thesis_pipeline(
     analysis_result: AnalysisResult,
     llm_client: LlmClient,
@@ -119,7 +143,44 @@ def run_thesis_pipeline(
     news_provider: NewsProvider | None = None,
     macro_provider: MacroProvider | None = None,
     sec_provider: SECProvider | None = None,
+    on_event: OnEvent | None = None,
 ) -> AgentThesisResult:
+    # When a live view is requested, wrap the client so each agent's raw
+    # prompt/response is captured for its event; otherwise run untouched.
+    recorder = RecordingLlmClient(llm_client) if on_event is not None else None
+    client: LlmClient = recorder if recorder is not None else llm_client
+
+    def _emit(
+        agent: str,
+        phase: str,
+        *,
+        output: dict | None = None,
+        detail: str | None = None,
+        with_exchange: bool = False,
+    ) -> None:
+        if on_event is None:
+            return
+        exchange = None
+        if with_exchange and recorder is not None and recorder.last_exchange is not None:
+            system_prompt, user_prompt, raw_response = recorder.last_exchange
+            exchange = AgentExchange(
+                system_prompt=system_prompt, user_prompt=user_prompt, raw_response=raw_response
+            )
+        on_event(
+            AgentEvent(
+                agent=agent,
+                phase=phase,
+                at=datetime.now(timezone.utc).replace(tzinfo=None),
+                output=output,
+                detail=detail,
+                exchange=exchange,
+            )
+        )
+
+    def _reset_exchange() -> None:
+        if recorder is not None:
+            recorder.last_exchange = None
+
     recommendation = analysis_result.recommendation
     top_candidate = next(
         (c for c in analysis_result.candidates if c.contract_symbol == recommendation.contract_symbol),
@@ -136,20 +197,29 @@ def run_thesis_pipeline(
             score_breakdown={},
             overall_score=0.0,
         )
+        _emit("quant_interpreter", "completed", output=quant.model_dump())  # deterministic, no LLM call
         risk = None
         strategy = None
+        _emit("risk_challenger", "skipped", detail="No candidate contract to assess.")
+        _emit("options_strategy", "skipped", detail="No candidate contract to build a strategy around.")
     else:
-        quant = quant_interpreter.run(
-            llm_client,
-            analysis_result.indicators,
-            analysis_result.trend,
-            analysis_result.volume,
-            top_candidate,
+        quant = _run_fatal_agent(
+            _emit, _reset_exchange, "quant_interpreter",
+            lambda: quant_interpreter.run(
+                client, analysis_result.indicators, analysis_result.trend,
+                analysis_result.volume, top_candidate,
+            ),
         )
-        risk = risk_challenger.run(
-            llm_client, top_candidate, analysis_result.trend, analysis_result.support_resistance
+        risk = _run_fatal_agent(
+            _emit, _reset_exchange, "risk_challenger",
+            lambda: risk_challenger.run(
+                client, top_candidate, analysis_result.trend, analysis_result.support_resistance
+            ),
         )
-        strategy = options_strategy.run(llm_client, analysis_result.trend, top_candidate, risk)
+        strategy = _run_fatal_agent(
+            _emit, _reset_exchange, "options_strategy",
+            lambda: options_strategy.run(client, analysis_result.trend, top_candidate, risk),
+        )
 
     # A configured provider failing mid-run (rate limited, network down,
     # bad ticker) must not throw away the work above: the affected finding
@@ -159,6 +229,7 @@ def run_thesis_pipeline(
 
     financial_finding = None
     if financial_provider is not None:
+        _emit("financial_research", "started")
         ticker = analysis_result.symbol
         try:
             # FinancialProvider is async (specs/providers.yaml); this
@@ -167,29 +238,45 @@ def run_thesis_pipeline(
             profile, statements, ratios, estimates = asyncio.run(
                 _fetch_financial_inputs(financial_provider, ticker)
             )
+            _reset_exchange()
             financial_finding = financial_research.run(
-                llm_client, profile, statements, ratios, estimates
+                client, profile, statements, ratios, estimates
             )
         except FinancialProviderError as exc:
             pipeline_warnings.append(f"financial_research: provider failed during the run — {exc}")
+            _emit("financial_research", "failed", detail=str(exc))
         except ThesisGenerationError as exc:
             pipeline_warnings.append(f"financial_research: unusable model response — {exc}")
+            _emit("financial_research", "failed", detail=str(exc))
+        else:
+            _emit("financial_research", "completed", output=financial_finding.model_dump(), with_exchange=True)
+    else:
+        _emit("financial_research", "skipped", detail="No financial data provider configured.")
 
     news_finding = None
     if news_provider is not None:
+        _emit("news_research", "started")
         ticker = analysis_result.symbol
         try:
             # NewsProvider is async (specs/providers.yaml); this pipeline is
             # sync, so bridge with a private event loop for the fetch.
             articles = asyncio.run(news_provider.search(ticker))
-            news_finding = news_research.run(llm_client, articles)
+            _reset_exchange()
+            news_finding = news_research.run(client, articles)
         except NewsProviderError as exc:
             pipeline_warnings.append(f"news_research: provider failed during the run — {exc}")
+            _emit("news_research", "failed", detail=str(exc))
         except ThesisGenerationError as exc:
             pipeline_warnings.append(f"news_research: unusable model response — {exc}")
+            _emit("news_research", "failed", detail=str(exc))
+        else:
+            _emit("news_research", "completed", output=news_finding.model_dump(), with_exchange=True)
+    else:
+        _emit("news_research", "skipped", detail="No news data provider configured.")
 
     macro_finding = None
     if macro_provider is not None:
+        _emit("macro_research", "started")
         try:
             # MacroProvider is async and capability-based
             # (specs/providers.yaml); this pipeline is sync, so bridge
@@ -197,13 +284,21 @@ def run_thesis_pipeline(
             # concurrently.
             observations = asyncio.run(_fetch_macro_observations(macro_provider))
             if observations:
-                macro_finding = macro_research.run(llm_client, observations)
-            # else: no configured provider serves any requested metric —
-            # leave the finding null (nothing to report), no warning.
+                _reset_exchange()
+                macro_finding = macro_research.run(client, observations)
+                _emit("macro_research", "completed", output=macro_finding.model_dump(), with_exchange=True)
+            else:
+                # No configured provider serves any requested metric — leave
+                # the finding null (nothing to report), no warning.
+                _emit("macro_research", "skipped", detail="No configured provider serves any requested metric.")
         except MacroProviderError as exc:
             pipeline_warnings.append(f"macro_research: provider failed during the run — {exc}")
+            _emit("macro_research", "failed", detail=str(exc))
         except ThesisGenerationError as exc:
             pipeline_warnings.append(f"macro_research: unusable model response — {exc}")
+            _emit("macro_research", "failed", detail=str(exc))
+    else:
+        _emit("macro_research", "skipped", detail="No macro data provider configured.")
 
     # Catalyst research combines all three research streams (news + SEC
     # filings + macro). It runs if ANY of them is configured, reasoning
@@ -213,6 +308,7 @@ def run_thesis_pipeline(
     # non-fatal — the finding stays null and a warning is recorded.
     catalyst_finding = None
     if news_provider is not None or sec_provider is not None or macro_provider is not None:
+        _emit("catalyst_research", "started")
         ticker = analysis_result.symbol
         articles, filings, observations, catalyst_errors = asyncio.run(
             _fetch_catalyst_inputs(news_provider, sec_provider, macro_provider, ticker)
@@ -221,9 +317,11 @@ def run_thesis_pipeline(
             pipeline_warnings.append(f"catalyst_research: provider failed during the run — {err}")
         if articles or filings or observations:
             try:
-                catalyst_finding = catalyst_research.run(llm_client, articles, filings, observations)
+                _reset_exchange()
+                catalyst_finding = catalyst_research.run(client, articles, filings, observations)
             except ThesisGenerationError as exc:
                 pipeline_warnings.append(f"catalyst_research: unusable model response — {exc}")
+                _emit("catalyst_research", "failed", detail=str(exc))
             else:
                 # A malformed individual catalyst is dropped rather than failing
                 # the whole finding (models/schemas.py) — surface that it
@@ -233,19 +331,18 @@ def run_thesis_pipeline(
                         f"catalyst_research: dropped {catalyst_finding.dropped_count} malformed "
                         f"catalyst item(s) from the model response"
                     )
+                _emit("catalyst_research", "completed", output=catalyst_finding.model_dump(), with_exchange=True)
+        else:
+            _emit("catalyst_research", "skipped", detail="No news, SEC, or macro data available for this ticker.")
+    else:
+        _emit("catalyst_research", "skipped", detail="No news, SEC, or macro provider configured.")
 
-    thesis = investment_thesis.run(
-        llm_client,
-        quant,
-        financial_finding,
-        news_finding,
-        macro_finding,
-        catalyst_finding,
-        risk,
-        strategy,
-        recommendation,
-        analysis_result.trend,
-        analysis_result.volume,
+    thesis = _run_fatal_agent(
+        _emit, _reset_exchange, "investment_thesis",
+        lambda: investment_thesis.run(
+            client, quant, financial_finding, news_finding, macro_finding, catalyst_finding,
+            risk, strategy, recommendation, analysis_result.trend, analysis_result.volume,
+        ),
     )
 
     return AgentThesisResult(

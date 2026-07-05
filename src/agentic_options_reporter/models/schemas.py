@@ -456,6 +456,31 @@ class AgentThesisResult(BaseModel):
     pipeline_warnings: list[str] = []
 
 
+AgentPhase = Literal["started", "completed", "skipped", "failed"]
+
+
+class AgentExchange(BaseModel):
+    """The raw LLM call an agent made — the 'under the hood' view: exactly
+    what was sent to the model and what came back, before parsing."""
+
+    system_prompt: str
+    user_prompt: str
+    raw_response: str
+
+
+class AgentEvent(BaseModel):
+    """One live event emitted as the thesis pipeline runs a single agent
+    (see thesis/orchestrator.py: on_event). Streamed to the client for a
+    live per-agent view; transient — not persisted with the run."""
+
+    agent: str          # the agent's stable id, e.g. "news_research"
+    phase: AgentPhase
+    at: datetime
+    exchange: AgentExchange | None = None      # the raw prompt/response, when the agent called the LLM
+    output: dict[str, Any] | None = None       # the parsed finding (model_dump), on `completed`
+    detail: str | None = None                  # skip reason or failure message
+
+
 class ThesisGenerationRequest(BaseModel):
     """Request body for POST /runs/{run_id}/thesis.
 

@@ -82,6 +82,9 @@ def test_thesis_parser_flags():
     args = parser.parse_args(["thesis", "42", "--fetch-only"])
     assert args.fetch_only is True
 
+    args = parser.parse_args(["thesis", "42", "--stream"])
+    assert args.stream is True
+
     args = parser.parse_args(["thesis", "42", "--provider", "openai", "--api-key", "sk-custom"])
     assert args.provider == "openai"
     assert args.api_key == "sk-custom"
@@ -179,3 +182,45 @@ def test_main_thesis_fetch_only_uses_get(monkeypatch):
     assert exit_code == 0
     assert captured["method"] == "GET"
     assert captured["url"] == "http://localhost:8000/runs/42/thesis"
+
+
+def test_main_thesis_stream_prints_progress_and_final(monkeypatch, capsys):
+    """--stream consumes the SSE feed: agent phases go to stderr, and the
+    final result is printed to stdout (as normal JSON) by main()."""
+    events = [
+        {"event": "agent", "data": {"agent": "quant_interpreter", "phase": "started"}},
+        {"event": "agent", "data": {"agent": "quant_interpreter", "phase": "completed"}},
+        {"event": "result", "data": {"run_id": 42, "investment_thesis": {"consensus": "bullish"}}},
+    ]
+    captured = {}
+
+    def fake_stream_thesis(self, run_id, regenerate=True, provider="auto", api_key=None, **kwargs):
+        captured["run_id"] = run_id
+        captured["provider"] = provider
+        yield from events
+
+    monkeypatch.setattr(cli.ApiClient, "stream_thesis", fake_stream_thesis)
+
+    exit_code = cli.main(["thesis", "42", "--stream", "--provider", "openai"])
+
+    assert exit_code == 0
+    assert captured["run_id"] == 42
+    assert captured["provider"] == "openai"
+    out = capsys.readouterr()
+    # Final result on stdout.
+    assert json.loads(out.out)["investment_thesis"]["consensus"] == "bullish"
+    # Per-agent progress on stderr.
+    assert "quant_interpreter" in out.err
+    assert "started" in out.err and "completed" in out.err
+
+
+def test_main_thesis_stream_error_event_returns_one(monkeypatch, capsys):
+    def fake_stream_thesis(self, run_id, **kwargs):
+        yield {"event": "error", "data": {"detail": "quant agent failed"}}
+
+    monkeypatch.setattr(cli.ApiClient, "stream_thesis", fake_stream_thesis)
+
+    exit_code = cli.main(["thesis", "42", "--stream"])
+
+    assert exit_code == 1
+    assert "quant agent failed" in capsys.readouterr().err

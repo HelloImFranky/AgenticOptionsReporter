@@ -122,6 +122,7 @@ failures trigger a retry vs. propagate immediately.
 poetry run agentic-options-reporter thesis <run_id>                                     # generate, auto-failover across configured providers
 poetry run agentic-options-reporter thesis <run_id> --regenerate                        # discard and regenerate
 poetry run agentic-options-reporter thesis <run_id> --fetch-only                        # fetch without generating
+poetry run agentic-options-reporter thesis <run_id> --stream                            # stream each agent's progress live (to stderr) as the pipeline runs
 poetry run agentic-options-reporter thesis <run_id> --provider openai --api-key sk-...  # force one provider + your own key, this call only
 ```
 
@@ -132,11 +133,15 @@ request and only enabled once a specific provider is chosen), then click
 "Generate investment thesis"
 to see a **Final output** verdict (the recommendation action + the
 agents' consensus) and, below it, an **Agent conversation** — Quant
-Interpreter, Financial Research, News Research, Macro Research, Risk
-Challenger, Options Strategist, and Investment Thesis shown in sequence
-as each agent's contribution, with a "skipped" message where an agent had
-no candidate contract to work with (Risk/Strategy) or its provider wasn't
-configured (the three research agents).
+Interpreter, Financial Research, News Research, Macro Research, Catalyst
+Research, Risk Challenger, Options Strategist, and Investment Thesis shown
+in sequence as each agent's contribution, with a "skipped" message where
+an agent had no candidate contract to work with (Risk/Strategy) or its
+provider wasn't configured (the research agents). The conversation renders
+**live** — each agent updates the moment it runs, with a status pill
+(Queued → Running → Done/Skipped/Failed) and a collapsible "Under the
+hood" panel exposing the exact prompt sent and raw response received, so
+you can track and debug what each agent is doing.
 
 ## Testing
 

@@ -190,3 +190,94 @@ def test_request_raises_api_error_on_connection_failure(monkeypatch):
 
     with pytest.raises(ApiError):
         ApiClient().health()
+
+
+class _FakeStreamResponse:
+    """Stand-in for a streaming requests.Response: yields SSE lines and
+    supports the `with response:` context-manager protocol."""
+
+    def __init__(self, lines, status_code: int = 200, text: str = ""):
+        self._lines = lines
+        self.status_code = status_code
+        self.ok = 200 <= status_code < 300
+        self.text = text
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_lines(self, decode_unicode=False):
+        yield from self._lines
+
+
+def test_stream_thesis_parses_sse_frames(monkeypatch):
+    lines = [
+        "event: agent",
+        'data: {"agent": "quant_interpreter", "phase": "started"}',
+        "",
+        "event: agent",
+        'data: {"agent": "quant_interpreter", "phase": "completed", "output": {"x": 1}}',
+        "",
+        "event: result",
+        'data: {"investment_thesis": {"consensus": "bullish"}}',
+        "",
+    ]
+    captured = {}
+
+    def fake_post(url, json=None, stream=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["stream"] = stream
+        return _FakeStreamResponse(lines)
+
+    monkeypatch.setattr(requests_module, "post", fake_post)
+
+    events = list(ApiClient().stream_thesis(7, provider="openai", api_key="sk-x"))
+
+    assert captured["url"].endswith("/runs/7/thesis/stream")
+    assert captured["stream"] is True
+    assert captured["json"] == {"provider": "openai", "api_key": "sk-x", "regenerate": True}
+    assert [e["event"] for e in events] == ["agent", "agent", "result"]
+    assert events[0]["data"]["phase"] == "started"
+    assert events[-1]["data"]["investment_thesis"]["consensus"] == "bullish"
+
+
+def test_stream_thesis_multiline_data_frame(monkeypatch):
+    """SSE allows a single frame's data to span multiple `data:` lines; they
+    must be rejoined with newlines before JSON parsing."""
+    lines = [
+        "event: agent",
+        'data: {"agent": "quant_interpreter",',
+        'data: "phase": "started"}',
+        "",
+    ]
+
+    def fake_post(url, json=None, stream=None, timeout=None):
+        return _FakeStreamResponse(lines)
+
+    monkeypatch.setattr(requests_module, "post", fake_post)
+
+    events = list(ApiClient().stream_thesis(1))
+    assert events == [{"event": "agent", "data": {"agent": "quant_interpreter", "phase": "started"}}]
+
+
+def test_stream_thesis_raises_api_error_on_non_ok(monkeypatch):
+    def fake_post(url, json=None, stream=None, timeout=None):
+        return _FakeStreamResponse([], status_code=404, text="Run 9 not found")
+
+    monkeypatch.setattr(requests_module, "post", fake_post)
+
+    with pytest.raises(ApiError):
+        list(ApiClient().stream_thesis(9))
+
+
+def test_stream_thesis_raises_api_error_on_connection_failure(monkeypatch):
+    def fake_post(url, json=None, stream=None, timeout=None):
+        raise requests_module.exceptions.ConnectionError("boom")
+
+    monkeypatch.setattr(requests_module, "post", fake_post)
+
+    with pytest.raises(ApiError):
+        list(ApiClient().stream_thesis(1))

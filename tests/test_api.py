@@ -197,6 +197,104 @@ def test_generate_thesis_success(client):
     assert body["strategy_suggestion"]["strategy"] == "Bull Call Spread"
 
 
+def _parse_sse(text: str) -> list[tuple[str, dict]]:
+    """Parse a text/event-stream body into (event, data) tuples."""
+    import json
+
+    frames = []
+    event = None
+    data_lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("event:"):
+            event = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:"):].lstrip())
+        elif not line and event is not None and data_lines:
+            frames.append((event, json.loads("\n".join(data_lines))))
+            event, data_lines = None, []
+    return frames
+
+
+def test_generate_thesis_stream_emits_agent_events_then_result(client):
+    from agentic_options_reporter.models.schemas import AgentEvent, AgentExchange
+
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+    fake_result = _fake_thesis_result(run_id)
+
+    def fake_pipeline(analysis_result, llm_client, on_event=None, **_kwargs):
+        on_event(AgentEvent(
+            agent="quant_interpreter", phase="started",
+            at=datetime.now(timezone.utc).replace(tzinfo=None),
+        ))
+        on_event(AgentEvent(
+            agent="quant_interpreter", phase="completed",
+            at=datetime.now(timezone.utc).replace(tzinfo=None),
+            output={"narrative": "Strong."},
+            exchange=AgentExchange(
+                system_prompt="sys", user_prompt="usr", raw_response="{...}"
+            ),
+        ))
+        return fake_result
+
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", side_effect=fake_pipeline
+    ):
+        response = test_client.post(f"/runs/{run_id}/thesis/stream")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    frames = _parse_sse(response.text)
+    kinds = [event for event, _ in frames]
+    assert kinds == ["agent", "agent", "result"]
+    # The under-the-hood exchange rides along on the completed agent frame.
+    completed = frames[1][1]
+    assert completed["phase"] == "completed"
+    assert completed["exchange"]["system_prompt"] == "sys"
+    # The terminal result carries the full thesis and is persisted.
+    assert frames[-1][1]["investment_thesis"]["consensus"] == "bullish"
+    persisted = test_client.get(f"/runs/{run_id}/thesis")
+    assert persisted.status_code == 200
+
+
+def test_generate_thesis_stream_emits_error_frame_on_fatal_failure(client):
+    from agentic_options_reporter.thesis.llm_client import LlmError
+
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    def failing_pipeline(analysis_result, llm_client, on_event=None, **_kwargs):
+        raise LlmError("provider exploded")
+
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", side_effect=failing_pipeline
+    ):
+        response = test_client.post(f"/runs/{run_id}/thesis/stream")
+
+    assert response.status_code == 200
+    frames = _parse_sse(response.text)
+    assert frames[-1][0] == "error"
+    assert "provider exploded" in frames[-1][1]["detail"]
+
+
+def test_generate_thesis_stream_not_found_before_streaming(client):
+    test_client, _ = client
+    response = test_client.post("/runs/999/thesis/stream")
+    assert response.status_code == 404
+
+
+def test_generate_thesis_stream_llm_build_error_returns_502(client):
+    from agentic_options_reporter.thesis.llm_client import LlmError
+
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    with patch("agentic_options_reporter.main.build_llm_client", side_effect=LlmError("no key")):
+        response = test_client.post(f"/runs/{run_id}/thesis/stream")
+
+    assert response.status_code == 502
+
+
 def test_generate_thesis_conflicts_without_regenerate(client):
     test_client, session_factory = client
     run_id = _persist_full_run(session_factory)

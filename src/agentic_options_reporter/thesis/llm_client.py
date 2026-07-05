@@ -74,6 +74,24 @@ class LlmClient(ABC):
         raise NotImplementedError
 
 
+class RecordingLlmClient(LlmClient):
+    """Wraps another LlmClient and remembers the most recent
+    (system_prompt, user_prompt, response) exchange, so the orchestrator
+    can surface the raw prompt/response an agent sent and received for a
+    live "under the hood" view. `last_exchange` is None until the wrapped
+    client is called; the orchestrator clears it between agents so each
+    agent's event carries only its own exchange."""
+
+    def __init__(self, inner: LlmClient) -> None:
+        self._inner = inner
+        self.last_exchange: tuple[str, str, str] | None = None
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        response = self._inner.complete(system_prompt, user_prompt)
+        self.last_exchange = (system_prompt, user_prompt, response)
+        return response
+
+
 def _classify_openai_style_error(exc: Exception, sdk: object, provider_label: str) -> LlmError:
     """Normalize an OpenAI-SDK-shaped exception (openai and anthropic both
     expose this same set of exception class names) into the LlmError

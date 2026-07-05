@@ -8,12 +8,18 @@ with the contract in specs/api.yaml.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
 from typing import Any
 
 import requests
 
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_TIMEOUT_SECONDS = 30
+# The streaming thesis endpoint stays open for the whole pipeline; between
+# agents there can be tens of seconds of model latency, so allow a long
+# per-read gap before giving up.
+DEFAULT_STREAM_TIMEOUT_SECONDS = 300
 
 
 class ApiError(RuntimeError):
@@ -78,3 +84,42 @@ class ApiClient:
 
     def get_thesis(self, run_id: int) -> dict[str, Any]:
         return self._request("GET", f"/runs/{run_id}/thesis")
+
+    def stream_thesis(
+        self,
+        run_id: int,
+        regenerate: bool = True,
+        provider: str = "auto",
+        api_key: str | None = None,
+        stream_timeout: int = DEFAULT_STREAM_TIMEOUT_SECONDS,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield live events from the Server-Sent Events thesis stream as
+        each agent runs. Each yielded item is `{"event": name, "data": ...}`:
+          - "agent"  → an AgentEvent (agent, phase, exchange, output, ...)
+          - "result" → the final AgentThesisResult (also persisted server-side)
+          - "error"  → {"detail": ...} when a required agent failed
+        The pre-stream guards (404/409/422) surface as an ApiError, same as
+        the blocking `generate_thesis`."""
+        url = f"{self.base_url}/runs/{run_id}/thesis/stream"
+        body = {"provider": provider, "api_key": api_key, "regenerate": regenerate}
+        try:
+            response = requests.post(url, json=body, stream=True, timeout=stream_timeout)
+        except requests.exceptions.RequestException as exc:
+            raise ApiError(f"Request to {url} failed: {exc}") from exc
+
+        with response:
+            if not response.ok:
+                raise ApiError(f"POST {url} returned {response.status_code}: {response.text}")
+            event_name: str | None = None
+            data_lines: list[str] = []
+            for line in response.iter_lines(decode_unicode=True):
+                if line:
+                    if line.startswith("event:"):
+                        event_name = line[len("event:") :].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:") :].lstrip())
+                    continue
+                # blank line terminates one SSE frame
+                if event_name is not None and data_lines:
+                    yield {"event": event_name, "data": json.loads("\n".join(data_lines))}
+                event_name, data_lines = None, []
