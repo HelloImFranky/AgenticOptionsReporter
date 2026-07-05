@@ -224,6 +224,15 @@ def run_thesis_pipeline(
                 catalyst_finding = catalyst_research.run(llm_client, articles, filings, observations)
             except ThesisGenerationError as exc:
                 pipeline_warnings.append(f"catalyst_research: unusable model response — {exc}")
+            else:
+                # A malformed individual catalyst is dropped rather than failing
+                # the whole finding (models/schemas.py) — surface that it
+                # happened so a silent drop is still visible at the end of the run.
+                if catalyst_finding.dropped_count:
+                    pipeline_warnings.append(
+                        f"catalyst_research: dropped {catalyst_finding.dropped_count} malformed "
+                        f"catalyst item(s) from the model response"
+                    )
 
     thesis = investment_thesis.run(
         llm_client,

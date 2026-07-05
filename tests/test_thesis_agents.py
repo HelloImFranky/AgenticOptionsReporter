@@ -556,3 +556,4 @@ def test_catalyst_research_drops_a_catalyst_missing_its_title():
     result = catalyst_research.run(llm, _articles(), _filings(), _observations())
     assert len(result.catalysts) == 1
     assert result.catalysts[0].title == "Good one"
+    assert result.dropped_count == 1   # the count is carried for a pipeline warning

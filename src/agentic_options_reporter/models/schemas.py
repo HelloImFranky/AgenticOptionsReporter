@@ -10,7 +10,7 @@ from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
 import pandas as pd
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
 OptionType = Literal["call", "put"]
 TrendDirection = Literal["bullish", "bearish", "neutral"]
@@ -393,23 +393,33 @@ class CatalystFinding(BaseModel):
     catalysts: list[CatalystItem]
     summary: str
     net_bias: Consensus
+    # How many individual catalysts were skipped because they couldn't be
+    # validated even after lenient coercion (e.g. a missing title). Transient
+    # run metadata, not part of the finding's data — excluded from
+    # serialization/persistence; the orchestrator turns a non-zero count into
+    # a pipeline_warning so a silent drop is still surfaced at the end of the
+    # run (see specs/agents.yaml llm_output_resilience).
+    dropped_count: int = Field(default=0, exclude=True)
 
-    @field_validator("catalysts", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _drop_invalid_catalysts(cls, value: Any) -> Any:
+    def _drop_invalid_catalysts(cls, data: Any) -> Any:
         """Skip any individual catalyst that still can't be validated (e.g. a
-        missing title) rather than failing the whole finding. Enum slips are
-        already repaired by the lenient field types above, so this only drops
-        genuinely unusable items."""
-        if not isinstance(value, list):
-            return value
+        missing title) rather than failing the whole finding, and record how
+        many were dropped. Enum slips are already repaired by the lenient
+        field types above, so this only drops genuinely unusable items."""
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("catalysts")
+        if not isinstance(raw, list):
+            return data
         valid: list[CatalystItem] = []
-        for item in value:
+        for item in raw:
             try:
                 valid.append(CatalystItem.model_validate(item))
             except ValidationError:
                 continue
-        return valid
+        return {**data, "catalysts": valid, "dropped_count": len(raw) - len(valid)}
 
 
 class RiskAssessment(BaseModel):

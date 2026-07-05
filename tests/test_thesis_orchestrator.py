@@ -413,6 +413,40 @@ def test_unusable_research_agent_response_records_warning_instead_of_502():
     assert "unusable model response" in catalyst_warnings[0].lower()
 
 
+def test_dropped_catalyst_item_records_warning():
+    """A malformed individual catalyst is dropped (not fatal), and the drop
+    is surfaced as a pipeline_warning so it isn't silent."""
+    catalyst_with_bad_item = json.dumps(
+        {
+            "catalysts": [
+                {"title": "Good", "category": "earnings", "horizon": "recent", "direction": "bullish"},
+                {"category": "news", "horizon": "recent", "direction": "bullish"},  # no title -> dropped
+            ],
+            "summary": "x",
+            "net_bias": "bullish",
+        }
+    )
+    responses = {**_ALL_RESPONSES_WITH_RESEARCH, "catalyst analyst": catalyst_with_bad_item}
+    llm = FakeLlmClient(responses)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(
+        result, llm, news_provider=FakeNewsProvider(), sec_provider=FakeSecProvider()
+    )
+
+    assert thesis.catalyst_research is not None
+    assert len(thesis.catalyst_research.catalysts) == 1   # kept the good one
+    drop_warnings = [
+        w for w in thesis.pipeline_warnings if w.startswith("catalyst_research: dropped")
+    ]
+    assert len(drop_warnings) == 1
+    assert "dropped 1 malformed" in drop_warnings[0]
+
+
 def test_research_agents_run_even_without_candidate():
     """Research findings are ticker/market-wide, not contract-specific, so
     they should still run when there's no candidate to size (unlike

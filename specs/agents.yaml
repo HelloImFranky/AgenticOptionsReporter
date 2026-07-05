@@ -95,7 +95,11 @@ llm_output_resilience: >
   enum, coerces to a safe neutral default instead of failing validation.
   A single malformed catalyst item (e.g. missing title) is dropped rather
   than failing the whole CatalystFinding
-  (CatalystFinding._drop_invalid_catalysts). (2) NON-FATAL PARSE: if a
+  (CatalystFinding._drop_invalid_catalysts); the drop is counted on the
+  finding (dropped_count, excluded from serialization/persistence) and the
+  orchestrator turns a non-zero count into a "catalyst_research: dropped N
+  malformed catalyst item(s) ..." pipeline_warning, so a silent drop is
+  still surfaced at the end of the run. (2) NON-FATAL PARSE: if a
   response STILL can't be parsed/validated, the orchestrator catches the
   ThesisGenerationError around each OPTIONAL research agent
   (financial/news/macro/catalyst) exactly like a provider failure —
