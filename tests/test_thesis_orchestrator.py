@@ -385,6 +385,68 @@ def test_provider_failure_mid_run_records_warning_instead_of_crashing():
     assert "news" in catalyst_warnings[0].lower()
 
 
+def test_unusable_research_agent_response_records_warning_instead_of_502():
+    """An LLM response an agent can't parse/validate (even after lenient
+    coercion) must not 502 the whole thesis: the affected research finding
+    stays null, a warning is recorded, and the rest completes."""
+    responses = {**_ALL_RESPONSES_WITH_RESEARCH, "catalyst analyst": "sorry, I cannot help with that"}
+    llm = FakeLlmClient(responses)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(
+        result,
+        llm,
+        news_provider=FakeNewsProvider(),
+        macro_provider=FakeMacroProvider(),
+        sec_provider=FakeSecProvider(),
+    )
+
+    assert thesis.catalyst_research is None            # the unparseable agent is dropped
+    assert thesis.news_research is not None            # the others still ran
+    assert thesis.investment_thesis is not None        # synthesis still completed
+    catalyst_warnings = [w for w in thesis.pipeline_warnings if w.startswith("catalyst_research:")]
+    assert len(catalyst_warnings) == 1
+    assert "unusable model response" in catalyst_warnings[0].lower()
+
+
+def test_dropped_catalyst_item_records_warning():
+    """A malformed individual catalyst is dropped (not fatal), and the drop
+    is surfaced as a pipeline_warning so it isn't silent."""
+    catalyst_with_bad_item = json.dumps(
+        {
+            "catalysts": [
+                {"title": "Good", "category": "earnings", "horizon": "recent", "direction": "bullish"},
+                {"category": "news", "horizon": "recent", "direction": "bullish"},  # no title -> dropped
+            ],
+            "summary": "x",
+            "net_bias": "bullish",
+        }
+    )
+    responses = {**_ALL_RESPONSES_WITH_RESEARCH, "catalyst analyst": catalyst_with_bad_item}
+    llm = FakeLlmClient(responses)
+    candidate = _candidate()
+    recommendation = Recommendation(
+        action="BUY", contract_symbol=candidate.contract_symbol, confidence=0.78, rationale="top pick"
+    )
+    result = _analysis_result([candidate], recommendation)
+
+    thesis = run_thesis_pipeline(
+        result, llm, news_provider=FakeNewsProvider(), sec_provider=FakeSecProvider()
+    )
+
+    assert thesis.catalyst_research is not None
+    assert len(thesis.catalyst_research.catalysts) == 1   # kept the good one
+    drop_warnings = [
+        w for w in thesis.pipeline_warnings if w.startswith("catalyst_research: dropped")
+    ]
+    assert len(drop_warnings) == 1
+    assert "dropped 1 malformed" in drop_warnings[0]
+
+
 def test_research_agents_run_even_without_candidate():
     """Research findings are ticker/market-wide, not contract-specific, so
     they should still run when there's no candidate to size (unlike

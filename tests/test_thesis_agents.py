@@ -122,7 +122,7 @@ def test_risk_challenger_parses_response():
     assert result.concerns == ["high IV"]
 
 
-def test_risk_challenger_raises_on_invalid_risk_level():
+def test_risk_challenger_coerces_invalid_risk_level_to_medium():
     llm = FakeLlmClient(
         {
             "skeptical risk manager": json.dumps(
@@ -130,8 +130,8 @@ def test_risk_challenger_raises_on_invalid_risk_level():
             )
         }
     )
-    with pytest.raises(ThesisGenerationError):
-        risk_challenger.run(llm, _candidate(), _trend(), _levels())
+    result = risk_challenger.run(llm, _candidate(), _trend(), _levels())
+    assert result.risk_level == "medium"
 
 
 def test_options_strategy_parses_response():
@@ -302,7 +302,7 @@ def test_financial_research_ignores_llm_attempt_to_smuggle_consensus():
     assert result.analyst_consensus != "Strong Sell"
 
 
-def test_financial_research_raises_on_invalid_health():
+def test_financial_research_coerces_invalid_health_to_stable():
     llm = FakeLlmClient(
         {
             "financial research analyst": json.dumps(
@@ -316,8 +316,9 @@ def test_financial_research_raises_on_invalid_health():
             )
         }
     )
-    with pytest.raises(ThesisGenerationError):
-        financial_research.run(llm, _profile(), _statements(), _ratios(), _estimates())
+    result = financial_research.run(llm, _profile(), _statements(), _ratios(), _estimates())
+    assert result.company_health == "stable"   # off-vocab coerced to the neutral default
+    assert result.growth == "accelerating"     # valid values pass through unchanged
 
 
 def _articles() -> list[NewsArticle]:
@@ -361,7 +362,7 @@ def test_news_research_handles_no_articles():
     assert result.catalysts == []
 
 
-def test_news_research_raises_on_invalid_sentiment():
+def test_news_research_coerces_invalid_sentiment_to_neutral():
     llm = FakeLlmClient(
         {
             "news research analyst": json.dumps(
@@ -369,8 +370,8 @@ def test_news_research_raises_on_invalid_sentiment():
             )
         }
     )
-    with pytest.raises(ThesisGenerationError):
-        news_research.run(llm, _articles())
+    result = news_research.run(llm, _articles())
+    assert result.sentiment == "neutral"
 
 
 def _observations() -> list[MacroObservation]:
@@ -407,7 +408,7 @@ def test_macro_research_parses_response():
     assert "risk assets" in result.outlook.lower()
 
 
-def test_macro_research_raises_on_invalid_regime():
+def test_macro_research_coerces_invalid_regime_to_neutral():
     llm = FakeLlmClient(
         {
             "macroeconomic analyst": json.dumps(
@@ -415,8 +416,8 @@ def test_macro_research_raises_on_invalid_regime():
             )
         }
     )
-    with pytest.raises(ThesisGenerationError):
-        macro_research.run(llm, _observations())
+    result = macro_research.run(llm, _observations())
+    assert result.regime == "neutral"
 
 
 def _filings() -> list[SecFiling]:
@@ -485,7 +486,7 @@ def test_catalyst_research_handles_all_streams_empty():
     assert "(no recent filings)" in user_prompt
 
 
-def test_catalyst_research_raises_on_invalid_category():
+def test_catalyst_research_coerces_invalid_category_to_other():
     llm = FakeLlmClient(
         {
             "catalyst analyst": json.dumps(
@@ -500,13 +501,59 @@ def test_catalyst_research_raises_on_invalid_category():
             )
         }
     )
-    with pytest.raises(ThesisGenerationError):
-        catalyst_research.run(llm, _articles(), _filings(), _observations())
+    result = catalyst_research.run(llm, _articles(), _filings(), _observations())
+    assert result.catalysts[0].category == "other"
 
 
-def test_catalyst_research_raises_on_invalid_net_bias():
+def test_catalyst_research_coerces_a_sentence_in_direction_to_uncertain():
+    """The exact failure that used to 502: the model put a sentence in the
+    `direction` enum field. It must now coerce, not raise."""
+    llm = FakeLlmClient(
+        {
+            "catalyst analyst": json.dumps(
+                {
+                    "catalysts": [
+                        {"title": "Oil shock", "category": "macro", "horizon": "near_term",
+                         "direction": "The 2026 oil shock points to slower growth.", "detail": ""}
+                    ],
+                    "summary": "x",
+                    "net_bias": "bearish",
+                }
+            )
+        }
+    )
+    result = catalyst_research.run(llm, _articles(), _filings(), _observations())
+    assert result.catalysts[0].direction == "uncertain"
+    assert result.net_bias == "bearish"
+
+
+def test_catalyst_research_coerces_invalid_net_bias_to_neutral():
     llm = FakeLlmClient(
         {"catalyst analyst": json.dumps({"catalysts": [], "summary": "x", "net_bias": "euphoric"})}
     )
-    with pytest.raises(ThesisGenerationError):
-        catalyst_research.run(llm, [], [], [])
+    result = catalyst_research.run(llm, [], [], [])
+    assert result.net_bias == "neutral"
+
+
+def test_catalyst_research_drops_a_catalyst_missing_its_title():
+    """A single unusable item (here, no title) is dropped rather than failing
+    the whole finding."""
+    llm = FakeLlmClient(
+        {
+            "catalyst analyst": json.dumps(
+                {
+                    "catalysts": [
+                        {"title": "Good one", "category": "earnings", "horizon": "recent",
+                         "direction": "bullish"},
+                        {"category": "news", "horizon": "recent", "direction": "bullish"},
+                    ],
+                    "summary": "x",
+                    "net_bias": "bullish",
+                }
+            )
+        }
+    )
+    result = catalyst_research.run(llm, _articles(), _filings(), _observations())
+    assert len(result.catalysts) == 1
+    assert result.catalysts[0].title == "Good one"
+    assert result.dropped_count == 1   # the count is carried for a pipeline warning

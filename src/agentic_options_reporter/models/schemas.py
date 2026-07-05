@@ -7,10 +7,10 @@ specs/database.yaml. See docs/architecture.md for the module map.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
 OptionType = Literal["call", "put"]
 TrendDirection = Literal["bullish", "bearish", "neutral"]
@@ -277,22 +277,74 @@ class SecFiling(BaseModel):
 # FinancialResearchFinding is likewise a pass-through from AnalystEstimates.
 # ---------------------------------------------------------------------------
 
-RiskLevel = Literal["low", "medium", "high"]
-Consensus = Literal["bullish", "bearish", "neutral", "mixed"]
-CompanyHealth = Literal["strong", "stable", "weak"]
-GrowthTrend = Literal["accelerating", "steady", "decelerating"]
-ProfitabilityLevel = Literal["high", "moderate", "low"]
-CashFlowState = Literal["positive", "neutral", "negative"]
-NewsSentiment = Literal["bullish", "bearish", "neutral"]
-MacroRegime = Literal["risk_on", "risk_off", "neutral"]
-CatalystCategory = Literal[
-    "earnings", "filing", "news", "macro", "corporate_action", "other"
+# -- Lenient enums for LLM-authored fields ---------------------------------
+# LLMs occasionally slip an off-vocabulary value — or a whole sentence — into
+# an enum field. Rather than fail the entire finding (and, before this,
+# 502 the whole thesis), coerce an unknown value to a safe neutral default so
+# only that one field degrades. The coercion rides on the TYPE (a
+# BeforeValidator on an Annotated Literal), so every model using it is
+# resilient with no per-model boilerplate. Only LLM-authored enums are made
+# lenient; engine-computed enums (OptionType, TrendDirection, …) stay strict.
+# See specs/agents.yaml: llm_output_resilience.
+
+
+def _lenient_enum(*allowed: str, default: str) -> BeforeValidator:
+    valid = frozenset(allowed)
+
+    def _coerce(value: Any) -> Any:
+        if isinstance(value, str) and value.strip().lower() in valid:
+            return value.strip().lower()
+        return default
+
+    return BeforeValidator(_coerce)
+
+
+RiskLevel = Annotated[
+    Literal["low", "medium", "high"], _lenient_enum("low", "medium", "high", default="medium")
+]
+Consensus = Annotated[
+    Literal["bullish", "bearish", "neutral", "mixed"],
+    _lenient_enum("bullish", "bearish", "neutral", "mixed", default="neutral"),
+]
+CompanyHealth = Annotated[
+    Literal["strong", "stable", "weak"],
+    _lenient_enum("strong", "stable", "weak", default="stable"),
+]
+GrowthTrend = Annotated[
+    Literal["accelerating", "steady", "decelerating"],
+    _lenient_enum("accelerating", "steady", "decelerating", default="steady"),
+]
+ProfitabilityLevel = Annotated[
+    Literal["high", "moderate", "low"],
+    _lenient_enum("high", "moderate", "low", default="moderate"),
+]
+CashFlowState = Annotated[
+    Literal["positive", "neutral", "negative"],
+    _lenient_enum("positive", "neutral", "negative", default="neutral"),
+]
+NewsSentiment = Annotated[
+    Literal["bullish", "bearish", "neutral"],
+    _lenient_enum("bullish", "bearish", "neutral", default="neutral"),
+]
+MacroRegime = Annotated[
+    Literal["risk_on", "risk_off", "neutral"],
+    _lenient_enum("risk_on", "risk_off", "neutral", default="neutral"),
+]
+CatalystCategory = Annotated[
+    Literal["earnings", "filing", "news", "macro", "corporate_action", "other"],
+    _lenient_enum("earnings", "filing", "news", "macro", "corporate_action", "other", default="other"),
 ]
 # When a catalyst sits relative to now: recent = already occurred,
 # near_term = expected within weeks, long_term = months out, unknown =
 # no datable timing in the source material.
-CatalystHorizon = Literal["recent", "near_term", "long_term", "unknown"]
-CatalystDirection = Literal["bullish", "bearish", "uncertain"]
+CatalystHorizon = Annotated[
+    Literal["recent", "near_term", "long_term", "unknown"],
+    _lenient_enum("recent", "near_term", "long_term", "unknown", default="unknown"),
+]
+CatalystDirection = Annotated[
+    Literal["bullish", "bearish", "uncertain"],
+    _lenient_enum("bullish", "bearish", "uncertain", default="uncertain"),
+]
 
 
 class QuantInterpretation(BaseModel):
@@ -341,6 +393,33 @@ class CatalystFinding(BaseModel):
     catalysts: list[CatalystItem]
     summary: str
     net_bias: Consensus
+    # How many individual catalysts were skipped because they couldn't be
+    # validated even after lenient coercion (e.g. a missing title). Transient
+    # run metadata, not part of the finding's data — excluded from
+    # serialization/persistence; the orchestrator turns a non-zero count into
+    # a pipeline_warning so a silent drop is still surfaced at the end of the
+    # run (see specs/agents.yaml llm_output_resilience).
+    dropped_count: int = Field(default=0, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_invalid_catalysts(cls, data: Any) -> Any:
+        """Skip any individual catalyst that still can't be validated (e.g. a
+        missing title) rather than failing the whole finding, and record how
+        many were dropped. Enum slips are already repaired by the lenient
+        field types above, so this only drops genuinely unusable items."""
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("catalysts")
+        if not isinstance(raw, list):
+            return data
+        valid: list[CatalystItem] = []
+        for item in raw:
+            try:
+                valid.append(CatalystItem.model_validate(item))
+            except ValidationError:
+                continue
+        return {**data, "catalysts": valid, "dropped_count": len(raw) - len(valid)}
 
 
 class RiskAssessment(BaseModel):
