@@ -220,7 +220,11 @@ def test_finnhub_get_analyst_estimates_handles_empty_response():
 
 def test_finnhub_does_not_advertise_statements():
     provider = FinnhubFinancialProvider(api_key="test-key")
-    assert provider.supported_datasets == frozenset({"profile", "ratios", "analyst_estimates"})
+    # Still no statements on the free tier, but Finnhub now also serves the
+    # metrics/earnings/earnings_calendar/insider datasets.
+    assert provider.supported_datasets == frozenset(
+        {"profile", "ratios", "analyst_estimates", "metrics", "earnings", "earnings_calendar", "insider"}
+    )
     assert provider.supports("statements") is False
     # The method is still a defensive guard for a direct call.
     with pytest.raises(FinancialProviderUnsupported):
@@ -234,7 +238,9 @@ def test_finnhub_does_not_advertise_statements():
         (AlphaVantageFinancialProvider, {"profile", "statements", "ratios", "analyst_estimates"}),
     ],
 )
-def test_full_coverage_providers_advertise_all_datasets(provider_cls, expected):
+def test_full_coverage_providers_advertise_the_core_datasets(provider_cls, expected):
+    # FMP and Alpha Vantage cover the original four datasets; the newer
+    # metrics/earnings/insider datasets are served by Finnhub and Yahoo.
     provider = provider_cls(api_key="test-key")
     assert provider.supported_datasets == frozenset(expected)
 
@@ -482,9 +488,11 @@ def test_router_health_aggregates():
 # -- build_financial_provider --
 
 
-def test_build_financial_provider_raises_when_unconfigured():
-    with pytest.raises(FinancialProviderError):
-        build_financial_provider()
+def test_build_financial_provider_defaults_to_keyless_yahoo():
+    # Yahoo Finance is keyless, so fundamentals are always available even
+    # with no API keys configured — the router is never empty.
+    provider = build_financial_provider()
+    assert provider.provider_names == ["yfinance"]
 
 
 def test_build_financial_provider_orders_configured_providers(monkeypatch):
@@ -493,7 +501,8 @@ def test_build_financial_provider_orders_configured_providers(monkeypatch):
 
     provider = build_financial_provider()
 
-    assert provider.provider_names == ["fmp", "finnhub"]
+    # Keyless Yahoo joins after the key-gated providers in the default order.
+    assert provider.provider_names == ["fmp", "finnhub", "yfinance"]
 
 
 def test_build_financial_provider_respects_fallback_order_env_var(monkeypatch):

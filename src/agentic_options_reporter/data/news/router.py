@@ -19,8 +19,11 @@ from agentic_options_reporter.data.news.guardian import GuardianNewsProvider
 from agentic_options_reporter.data.news.hackernews import HackerNewsProvider
 from agentic_options_reporter.data.news.newsapi import NewsApiOrgProvider
 from agentic_options_reporter.data.news.newsdata import NewsDataProvider
+from agentic_options_reporter.data.news.yfinance_provider import YFinanceNewsProvider
 from agentic_options_reporter.data.provider_router import (
+    acall_and_merge,
     acall_with_fallback,
+    merge_lists,
     prioritize_supporting,
 )
 from agentic_options_reporter.models.schemas import NewsArticle
@@ -59,14 +62,24 @@ class NewsProviderRouter(NewsProvider):
         limit: int = 20,
     ) -> list[NewsArticle]:
         # `search` treats the query as a ticker/company. Prefer providers
-        # that advertise COMPANY_NEWS, but keep general-news providers as a
-        # fallback (they can still surface a keyword match) — a SOFT
-        # priority, not a hard filter (see data.provider_router).
+        # that advertise COMPANY_NEWS, but keep general-news providers too
+        # (they can still surface a keyword match) — a SOFT priority, not a
+        # hard filter (see data.provider_router). Then FAN OUT across all of
+        # them and merge, so coverage is the union of every source (Yahoo +
+        # Finnhub + …) de-duplicated by URL, not just the first that
+        # answers. Results are trimmed to `limit` after merging.
         candidates = prioritize_supporting(self._clients, COMPANY_NEWS)
-        return await acall_with_fallback(
+
+        def _combine(results: list[list[NewsArticle]]) -> list[NewsArticle]:
+            merged = merge_lists(results, key=lambda a: a.url or a.headline)
+            merged.sort(key=lambda a: a.published_at, reverse=True)
+            return merged[:limit]
+
+        return await acall_and_merge(
             candidates,
             "search",
             NewsProviderError,
+            _combine,
             query,
             start_date=start_date,
             end_date=end_date,
@@ -101,6 +114,7 @@ class NewsProviderRouter(NewsProvider):
 
 _PROVIDERS: dict[str, type[NewsProvider]] = {
     "finnhub": FinnhubNewsProvider,
+    "yfinance": YFinanceNewsProvider,
     "newsdata": NewsDataProvider,
     "guardian": GuardianNewsProvider,
     "gnews": GNewsProvider,
@@ -109,11 +123,14 @@ _PROVIDERS: dict[str, type[NewsProvider]] = {
     "hackernews": HackerNewsProvider,
 }
 
-# Financial-news specialists first, general journalism next, Alpha
-# Vantage late (25 requests/day), Hacker News last (keyless and always
-# available, but community discussion rather than journalism).
+# Financial-news specialists first (Finnhub, then keyless Yahoo company
+# news), general journalism next, Alpha Vantage late (25 requests/day),
+# Hacker News last (keyless and always available, but community discussion
+# rather than journalism). With merge routing, `search` fans out across all
+# of these; order sets the de-dup tie-break priority.
 _DEFAULT_FALLBACK_ORDER = [
     "finnhub",
+    "yfinance",
     "newsdata",
     "guardian",
     "gnews",

@@ -16,9 +16,16 @@ See specs/providers.yaml: provider_router for the full design.
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from collections.abc import Callable, Iterable
+from typing import Any, TypeVar
+
+from pydantic import BaseModel
 
 from agentic_options_reporter.data.provider_errors import RetryableProviderError
+
+T = TypeVar("T")
+M = TypeVar("M", bound=BaseModel)
 
 
 def classify_requests_error(
@@ -91,6 +98,94 @@ async def acall_with_fallback(
     raise all_failed_error_cls(
         f"All configured providers failed for {method_name}(): " + "; ".join(failures)
     )
+
+
+def _is_present(value: Any) -> bool:
+    """Whether a field value counts as real data for merge purposes.
+
+    None, an empty/whitespace string, the placeholder "N/A", and an empty
+    list all count as *absent* — so a provider that left a field at its
+    default doesn't shadow a later provider that actually filled it. A
+    numeric 0 IS present (a real zero, e.g. a 0% dividend yield, is
+    meaningful)."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() not in ("", "N/A")
+    if isinstance(value, (list, tuple, dict)):
+        return len(value) > 0
+    return True
+
+
+def merge_models(models: list[M]) -> M:
+    """Field-by-field union of same-typed pydantic models, in priority
+    order: for each field the first model with a *present* value
+    (see `_is_present`) wins, so combining Finnhub + Yahoo yields a record
+    richer than either alone. `models` must be non-empty and homogeneous;
+    the first is the base whose fields the rest fill in."""
+    if not models:
+        raise ValueError("merge_models requires at least one model")
+    base = models[0]
+    merged = base.model_dump()
+    for field in merged:
+        if _is_present(merged[field]):
+            continue
+        for other in models[1:]:
+            candidate = getattr(other, field, None)
+            if _is_present(candidate):
+                merged[field] = candidate
+                break
+    return type(base).model_validate(merged)
+
+
+def merge_lists(
+    lists: Iterable[list[T]], key: Callable[[T], Any]
+) -> list[T]:
+    """Concatenate per-provider lists into one, de-duplicating by `key`
+    and preserving first-seen order — so the same article/transaction
+    reported by two providers appears once, but each provider's unique
+    items are all kept."""
+    seen: set[Any] = set()
+    merged: list[T] = []
+    for items in lists:
+        for item in items:
+            k = key(item)
+            if k in seen:
+                continue
+            seen.add(k)
+            merged.append(item)
+    return merged
+
+
+async def acall_and_merge(
+    clients: list[tuple[str, Any]],
+    method_name: str,
+    all_failed_error_cls: type[Exception],
+    combine: Callable[[list[Any]], Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Fan-out twin of `acall_with_fallback`: call `method_name` on EVERY
+    client concurrently and combine the successes with `combine`, instead
+    of stopping at the first one. A client that fails (for any reason)
+    simply doesn't contribute — best-effort, "get all the data we can."
+    Raises `all_failed_error_cls` only if every client failed."""
+    results = await asyncio.gather(
+        *(getattr(client, method_name)(*args, **kwargs) for _, client in clients),
+        return_exceptions=True,
+    )
+    successes: list[Any] = []
+    failures: list[str] = []
+    for (name, _), result in zip(clients, results):
+        if isinstance(result, Exception):
+            failures.append(f"{name}: {result}")
+        else:
+            successes.append(result)
+    if not successes:
+        raise all_failed_error_cls(
+            f"All configured providers failed for {method_name}(): " + "; ".join(failures)
+        )
+    return combine(successes)
 
 
 def filter_supporting(

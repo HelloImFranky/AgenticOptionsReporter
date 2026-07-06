@@ -118,6 +118,41 @@ def fake_provider(uptrend_history: PriceHistory, sample_option_chain: OptionChai
     return FakeMarketDataProvider(uptrend_history, sample_option_chain)
 
 
+class FakeFundamentalsProvider:
+    """Offline FinancialProvider stub for workflow/analyze tests: serves a
+    canned profile + metrics with no network, so run_analysis's fundamentals
+    step is deterministic. Advertises only the two datasets it fills."""
+
+    @property
+    def supported_datasets(self):
+        return frozenset({"profile", "metrics"})
+
+    def supports(self, dataset):
+        return dataset in self.supported_datasets
+
+    async def get_company_profile(self, ticker):
+        from agentic_options_reporter.models.schemas import CompanyProfile
+
+        return CompanyProfile(ticker=ticker.upper(), name="Test Corp", sector="Technology")
+
+    async def get_company_metrics(self, ticker):
+        from agentic_options_reporter.models.schemas import CompanyMetrics
+
+        return CompanyMetrics(ticker=ticker.upper(), pe_ratio=25.0, beta=1.1)
+
+    async def health(self):
+        from datetime import datetime, timezone
+
+        from agentic_options_reporter.data.async_http import ProviderHealth
+
+        return ProviderHealth(provider="fake", healthy=True, checked_at=datetime.now(timezone.utc))
+
+
+@pytest.fixture
+def fake_financial_provider() -> FakeFundamentalsProvider:
+    return FakeFundamentalsProvider()
+
+
 class FakeLlmClient(LlmClient):
     """Dispatches canned JSON responses by matching a substring in the
     system prompt, so a single fake can serve a whole agent pipeline run."""

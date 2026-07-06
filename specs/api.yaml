@@ -13,7 +13,15 @@ endpoints:
 
   - path: /analyze/{symbol}
     method: GET
-    summary: Run the full analysis workflow for a symbol and persist the result.
+    summary: >
+      Run the full analysis workflow for a symbol and persist the result.
+      Alongside the technicals it gathers cross-provider fundamentals
+      (profile, statements, ratios, estimates, metrics, earnings history,
+      earnings calendar, insider activity) merged across every configured
+      financial provider — best-effort, so a fundamentals failure never
+      blocks the analysis (it lands in data_warnings instead). The
+      fundamentals are response-only: they are NOT persisted, so a run
+      reloaded via GET /runs/{id} has fundamentals=null.
     path_params:
       symbol: str
     query_params:
@@ -121,6 +129,71 @@ models:
     support_resistance: list[SupportResistanceLevel]
     candidates: list[ScoredCandidate]
     recommendation: Recommendation
+    fundamentals: FundamentalsSnapshot | null   # cross-provider fundamentals gathered by /analyze; response-only (NOT persisted, so null on /runs/{id} replay)
+    data_warnings: list[str]                     # non-fatal problems gathering fundamentals; [] when clean
+
+  # Cross-provider fundamentals surfaced by GET /analyze/{symbol}. Every
+  # dataset is merged across every configured financial provider (Yahoo is
+  # keyless, so this is always at least partially populated); each field is
+  # optional so partial coverage still yields a useful snapshot.
+  FundamentalsSnapshot:
+    ticker: str
+    profile: CompanyProfile | null
+    statements: FinancialStatementSummary | null
+    ratios: FinancialRatios | null
+    estimates: AnalystEstimates | null
+    metrics: CompanyMetrics | null
+    earnings_history: EarningsHistory | null
+    earnings_calendar: EarningsCalendar | null
+    insider_activity: InsiderActivity | null
+
+  CompanyMetrics:
+    ticker: str
+    market_cap: float | null
+    pe_ratio: float | null
+    forward_pe: float | null
+    peg_ratio: float | null
+    price_to_book: float | null
+    price_to_sales: float | null
+    beta: float | null
+    dividend_yield: float | null      # fraction, e.g. 0.012 for 1.2%
+    week52_high: float | null
+    week52_low: float | null
+    gross_margin: float | null        # fraction
+    operating_margin: float | null    # fraction
+    profit_margin: float | null       # fraction
+    revenue_growth: float | null      # YoY fraction
+    earnings_growth: float | null     # YoY fraction
+
+  EarningsSurprise:
+    period: str
+    actual_eps: float | null
+    estimate_eps: float | null
+    surprise: float | null
+    surprise_percent: float | null    # fraction
+
+  EarningsHistory:
+    ticker: str
+    surprises: list[EarningsSurprise]
+
+  EarningsCalendar:
+    ticker: str
+    next_date: date | null
+    eps_estimate: float | null
+    revenue_estimate: float | null
+
+  InsiderTransaction:
+    name: str
+    relationship: str
+    transaction_type: str   # buy | sell | raw provider code
+    shares: float | null
+    value: float | null
+    filed_at: date | null
+
+  InsiderActivity:
+    ticker: str
+    transactions: list[InsiderTransaction]
+    net_shares: float | null   # signed sum: buys positive, sells negative
 
   AnalysisRunSummary:
     run_id: int

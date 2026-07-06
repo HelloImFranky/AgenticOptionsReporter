@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentic_options_reporter.data.financial.base import (
-    FINANCIAL_DATASETS,
+    CORE_FINANCIAL_DATASETS,
     FinancialProviderRateLimited,
     _HttpFinancialProvider,
 )
@@ -33,10 +33,10 @@ class AlphaVantageFinancialProvider(_HttpFinancialProvider):
     PROVIDER_LABEL = "Alpha Vantage"
     API_KEY_ENV_VAR = "ALPHA_VANTAGE_API_KEY"
 
-    # Serves all four, though analyst_estimates is price-target-only (no
-    # consensus rating) and ratios omit debt/current — data-quality gaps
-    # kept null, not capability gaps.
-    DATASETS = FINANCIAL_DATASETS
+    # Serves the core four, though analyst_estimates is price-target-only
+    # (no consensus rating) and ratios omit debt/current — data-quality
+    # gaps kept null, not capability gaps.
+    DATASETS = CORE_FINANCIAL_DATASETS
 
     def _check_payload(self, payload: Any) -> None:
         if isinstance(payload, dict) and ("Information" in payload or "Note" in payload):

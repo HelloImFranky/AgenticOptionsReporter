@@ -513,9 +513,9 @@ class _StubNewsProvider(NewsProvider):
         )
 
 
-def _article() -> NewsArticle:
+def _article(url: str = "u") -> NewsArticle:
     return NewsArticle(
-        headline="x", source="s", url="u", published_at=datetime.now(timezone.utc)
+        headline="x", source="s", url=url, published_at=datetime.now(timezone.utc)
     )
 
 
@@ -563,9 +563,9 @@ def test_general_providers_do_not_advertise_company_news():
     assert HackerNewsProvider().supports(GENERAL_NEWS)
 
 
-def test_router_search_prefers_company_news_providers():
-    """A ticker search prioritizes COMPANY_NEWS providers even when a
-    general-news provider is configured earlier in the fallback order."""
+def test_router_search_fans_out_prioritizing_company_news_providers():
+    """A ticker search now fans out across ALL providers and merges, but
+    still PRIORITIZES COMPANY_NEWS providers first (the de-dup tie-break)."""
     called: list[str] = []
 
     class _RecordingStub(_StubNewsProvider):
@@ -574,16 +574,23 @@ def test_router_search_prefers_company_news_providers():
             return await super().search(query, start_date, end_date, language, limit)
 
     general = _RecordingStub(
-        articles=[_article()], name="general", capabilities=frozenset({GENERAL_NEWS, TOP_HEADLINES})
+        articles=[_article(url="https://ex.com/g")],
+        name="general",
+        capabilities=frozenset({GENERAL_NEWS, TOP_HEADLINES}),
     )
     specialist = _RecordingStub(
-        articles=[_article()], name="specialist", capabilities=frozenset({COMPANY_NEWS, TOP_HEADLINES})
+        articles=[_article(url="https://ex.com/s")],
+        name="specialist",
+        capabilities=frozenset({COMPANY_NEWS, TOP_HEADLINES}),
     )
     router = NewsProviderRouter([("general", general), ("specialist", specialist)])
 
-    asyncio.run(router.search("AAPL"))
+    articles = asyncio.run(router.search("AAPL"))
 
-    assert called == ["specialist"]  # specialist tried first despite later order
+    # Both fanned out (union), specialist prioritized first.
+    assert set(called) == {"specialist", "general"}
+    assert called[0] == "specialist"
+    assert len(articles) == 2  # both providers' distinct articles are merged in
 
 
 def test_router_falls_back_to_general_when_specialist_fails():
@@ -627,8 +634,9 @@ def test_router_health_aggregates_and_is_healthy_if_any_provider_is():
 
 
 def test_build_news_provider_includes_only_configured_plus_keyless():
+    # Yahoo and Hacker News are keyless, so they're always present.
     provider = build_news_provider()
-    assert provider.provider_names == ["hackernews"]
+    assert provider.provider_names == ["yfinance", "hackernews"]
 
 
 def test_build_news_provider_orders_configured_providers(monkeypatch):
@@ -637,7 +645,8 @@ def test_build_news_provider_orders_configured_providers(monkeypatch):
 
     provider = build_news_provider()
 
-    assert provider.provider_names == ["finnhub", "guardian", "hackernews"]
+    # Keyless Yahoo sits second in the default order; Hacker News last.
+    assert provider.provider_names == ["finnhub", "yfinance", "guardian", "hackernews"]
 
 
 def test_build_news_provider_respects_fallback_order_env_var(monkeypatch):

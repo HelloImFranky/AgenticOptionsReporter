@@ -618,14 +618,22 @@ def test_generate_thesis_configured_provider_failure_returns_502(client, error_c
     assert response.status_code == 502
 
 
-def test_optional_financial_provider_returns_none_when_unconfigured(monkeypatch):
-    monkeypatch.delenv("FMP_API_KEY", raising=False)
-    assert main_module._optional_financial_provider() is None
+def test_optional_financial_provider_returns_keyless_yahoo_when_unconfigured(monkeypatch):
+    # Yahoo Finance needs no API key, so the fundamentals provider is never
+    # fully "unconfigured" — it always falls back to Yahoo alone (like
+    # Hacker News for news, IMF/World Bank for macro).
+    for var in ("FMP_API_KEY", "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    provider = main_module._optional_financial_provider()
+
+    assert provider is not None
+    assert provider.provider_names == ["yfinance"]
 
 
-def test_optional_news_provider_returns_router_with_only_hackernews_when_others_unconfigured(monkeypatch):
-    # Hacker News needs no API key, so the news provider is never fully
-    # "unconfigured" — it always falls back to Hacker News alone.
+def test_optional_news_provider_returns_router_with_keyless_sources_when_others_unconfigured(monkeypatch):
+    # Yahoo and Hacker News need no API key, so the news provider is never
+    # fully "unconfigured" — it always falls back to those keyless sources.
     for var in (
         "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "NEWSAPI_API_KEY",
         "NEWSDATA_API_KEY", "GUARDIAN_API_KEY", "GNEWS_API_KEY",
@@ -635,7 +643,7 @@ def test_optional_news_provider_returns_router_with_only_hackernews_when_others_
     provider = main_module._optional_news_provider()
 
     assert provider is not None
-    assert provider.provider_names == ["hackernews"]
+    assert provider.provider_names == ["yfinance", "hackernews"]
 
 
 def test_optional_macro_provider_returns_router_with_keyless_sources_when_unconfigured(monkeypatch):
@@ -652,12 +660,14 @@ def test_optional_macro_provider_returns_router_with_keyless_sources_when_unconf
 
 def test_optional_financial_provider_returns_router_when_configured(monkeypatch):
     monkeypatch.setenv("FMP_API_KEY", "test-key")
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
     monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
 
     provider = main_module._optional_financial_provider()
 
     assert provider is not None
-    assert provider.provider_names == ["fmp"]
+    # FMP plus keyless Yahoo (always available).
+    assert provider.provider_names == ["fmp", "yfinance"]
 
 
 def test_optional_sec_provider_is_always_available():

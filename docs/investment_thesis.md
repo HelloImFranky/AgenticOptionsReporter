@@ -106,9 +106,33 @@ happens **per method call**, not per whole provider: routing for one
 dataset/metric is independent of which provider answered the last one. A
 transient failure (rate limit, quota, timeout, 5xx) advances to the next
 configured provider (see `specs/providers.yaml: provider_router`). Since
-Hacker News (news) and IMF/World Bank (macro) need no API key, News
-Research and Macro Research always have at least one provider available;
-only Financial Research still requires a configured key.
+Hacker News + Yahoo (news), Yahoo (fundamentals), and IMF/World Bank
+(macro) need no API key, News Research, Financial Research, Macro Research,
+and the `/analyze` fundamentals snapshot always have at least one provider
+available — nothing requires a configured key anymore.
+
+**Fan-out + merge (financial & news).** The financial and news routers go
+a step further than failover: instead of stopping at the first provider
+that answers, they query **every** supporting provider concurrently and
+**combine** the results (`data.provider_router.acall_and_merge`). Record
+datasets (company profile, ratios, estimates, metrics, earnings calendar)
+are unioned **field-by-field** in priority order — a value present in
+Finnhub but missing in Yahoo is filled in, and vice versa, so the merged
+record is richer than any single source. List datasets (earnings history,
+insider transactions, news articles) are unioned and de-duplicated. A
+provider that fails simply doesn't contribute; the merge raises only if
+*every* provider failed. Financial **statements** are the one exception —
+period-bound, so merging across providers would mix reporting periods, and
+they stay first-success failover. This is what "try all providers and get
+all the data" means: the `/analyze` fundamentals snapshot and the Financial
+Research agent both see the combined view, not whichever source happened to
+answer first.
+
+Yahoo Finance was added as a keyless source for **both** fundamentals
+(`YFinanceFinancialProvider` — profile/statements/ratios/estimates/metrics/
+earnings/calendar/insider) and company news (`YFinanceNewsProvider`), which
+is what makes fundamentals and news available with zero configuration and
+gives the merge a second source to combine on day one.
 
 **Capability-based routing.** Rather than discovering "unsupported" by
 catching an exception mid-call, every provider *declares what it serves*
@@ -120,7 +144,9 @@ research interfaces, in two flavors:
   `supported_metrics` and serves any one through a single
   `fetch(metric_id) -> MacroObservation`; each financial provider
   declares its `supported_datasets` (`profile`, `statements`, `ratios`,
-  `analyst_estimates`). The router narrows to the providers that
+  `analyst_estimates`, plus the newer `metrics`, `earnings`,
+  `earnings_calendar`, `insider` served by Finnhub and Yahoo). The router
+  narrows to the providers that
   advertise a metric/dataset and drops the rest
   (`data.provider_router.filter_supporting`) — the fix for the "World
   Bank has no US fed funds rate" error: World Bank doesn't advertise

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentic_options_reporter.data.financial.base import FINANCIAL_DATASETS, _HttpFinancialProvider
+from agentic_options_reporter.data.financial.base import CORE_FINANCIAL_DATASETS, _HttpFinancialProvider
 from agentic_options_reporter.models.schemas import (
     AnalystEstimates,
     CompanyProfile,
@@ -23,7 +23,7 @@ class FmpFinancialProvider(_HttpFinancialProvider):
     PROVIDER_LABEL = "Financial Modeling Prep"
     API_KEY_ENV_VAR = "FMP_API_KEY"
 
-    DATASETS = FINANCIAL_DATASETS  # full coverage: profile, statements, ratios, analyst_estimates
+    DATASETS = CORE_FINANCIAL_DATASETS  # profile, statements, ratios, analyst_estimates
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         query = dict(params or {})
