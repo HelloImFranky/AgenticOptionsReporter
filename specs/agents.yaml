@@ -1,17 +1,25 @@
 pipeline: investment_thesis
-version: 2
+version: 3
 description: >
   A pipeline of LLM-backed agents that interpret, challenge, and narrate
   the output of the deterministic quant engine (workflow.yaml) plus
   external research providers (specs/providers.yaml) into a
   human-readable investment thesis. Agents never compute technical
-  indicators, Greeks, probability of profit, scoring, or risk metrics —
-  those remain the sole responsibility of analysis/*.py. Agents consume
-  already-computed data (persisted AnalysisResult, or provider-supplied
-  normalized models) and add interpretation and judgment on top of it —
-  never their own numbers.
+  indicators, Greeks, or probability of profit — those remain the sole
+  responsibility of analysis/*.py, and an agent never alters or copies
+  ANOTHER source's number as its own. SINCE PHASE 3, the blanket "agents
+  never score" rule is relaxed specifically for the Trade Quality Score
+  (specs/scoring.yaml): most agents below ALSO independently author their
+  own DomainScore (score/confidence/evidence, 0-100) for one domain —
+  their own judgment call over the same material they already reason
+  over, never a copy of the quant engine's DomainScore for that domain.
+  The orchestrator blends whichever agent DomainScores a run produced
+  into a second, agent-side Trade Quality Score
+  (analysis/composite_score.py, source="agent") shown alongside (never
+  replacing) the quant one, so a user can see where the two agree or
+  diverge.
 
-status: phase_2b
+status: phase_3
 phase_1_recap: >
   Phase 1 shipped quant_interpreter, risk_challenger, options_strategy,
   and investment_thesis, reasoning only over data the quant engine
@@ -31,6 +39,32 @@ phase_2b_scope: >
   the pipeline here for the first time. Like the phase-2a research
   agents, it is optional and degrades gracefully: it runs if ANY of its
   three streams is configured, reasoning over whatever subset is present.
+phase_3_scope: >
+  The Trade Quality Score overhaul (specs/scoring.yaml). Six existing
+  agents each gain a `domain_score: DomainScore` output field (see
+  agent_domain_mapping below); two NEW agents are added for domains with
+  no existing agent (relative_strength_research, statistical_edge_research);
+  the orchestrator gains a composite step that blends every agent
+  DomainScore present into AgentThesisResult.agent_trade_quality using the
+  SAME composite engine the quant path uses. catalyst_research is
+  UNCHANGED — it doesn't own a domain (its findings feed
+  investment_thesis's synthesis and news_research's context, not a
+  Trade Quality Score domain directly).
+agent_domain_mapping:
+  quant_interpreter: technical
+  financial_research: fundamental
+  news_research: sentiment
+  macro_research: macro
+  risk_challenger: risk
+  options_strategy: liquidity   # an acknowledged imperfect fit, chosen for smallest blast radius over a dedicated 9th agent
+  relative_strength_research: relative_strength   # new in phase 3
+  statistical_edge_research: statistical_edge     # new in phase 3
+domain_score_resilience: >
+  Every LLM-authored DomainScore field (score, confidence) is the
+  Score0to100 type (models/schemas.py _clamp_0_100) — a numeric extension
+  of the existing llm_output_resilience pattern (_lenient_enum): a
+  trailing '%', an accidental 0-1 fraction, or an out-of-range value all
+  coerce/clamp into a valid 0-100 rather than failing validation.
 deferred:
   - name: risk_and_strategy_incorporate_research_findings
     description: >
@@ -51,19 +85,24 @@ entrypoint: agentic_options_reporter.thesis.orchestrator:run_thesis_pipeline
 input:
   analysis_result: AnalysisResult   # see specs/api.yaml
   llm_client: LlmClient
+  market_data_provider: MarketDataProvider   # NEW in phase 3; not nullable (keyless yfinance always available) — feeds relative_strength_research's SPY/sector-ETF benchmark fetch
   financial_provider: FinancialProvider | null = null   # see specs/providers.yaml
   news_provider: NewsProvider | null = null
   macro_provider: MacroProvider | null = null
   sec_provider: SECProvider | null = null   # SEC EDGAR (keyless); feeds catalyst_research
 no_candidate_short_circuit: >
   If analysis_result.recommendation.contract_symbol is null (AVOID / no
-  liquid candidates), the orchestrator skips the risk_challenger and
-  options_strategy agents (nothing to assess or size) and produces only
-  a quant_interpretation and a short investment_thesis explaining why no
-  position is recommended. financial_research/news_research/macro_research
-  are unaffected by this — they reason about the company/market, not the
-  specific candidate contract — and still run if their providers are
-  configured.
+  liquid candidates), the orchestrator skips the risk_challenger,
+  options_strategy, relative_strength_research, and
+  statistical_edge_research agents (nothing to assess or size) and
+  produces only a quant_interpretation (with a zeroed placeholder
+  technical_domain_score and an empty quant_trade_quality) and a short
+  investment_thesis explaining why no position is recommended.
+  financial_research/news_research/macro_research are unaffected by this —
+  they reason about the company/market, not the specific candidate
+  contract — and still run if their providers are configured.
+  agent_trade_quality is null only if literally no agent DomainScore was
+  produced (e.g. no providers configured at all).
 provider_availability: >
   financial_research/news_research/macro_research each run only if their
   provider was constructed (non-null) — i.e. only if at least one
@@ -120,12 +159,19 @@ agents:
       - TrendAssessment
       - VolumeAssessment
       - ScoredCandidate (top-ranked)
+      - WeightingProfileId (from analysis_result.weighting_profile)
     output: QuantInterpretation
     contract: >
-      MUST NOT invent or alter any numeric score. score_breakdown and
-      score in the output are passed through verbatim from the
-      already-computed ScoredCandidate (specs/scoring.yaml); the agent
-      only contributes `narrative` and `key_factors` prose.
+      MUST NOT invent or alter the quant engine's own composite score:
+      quant_trade_quality in the output is recomputed via
+      analysis.composite_score.compute_composite_score over the
+      already-computed ScoredCandidate.domain_scores (specs/scoring.yaml)
+      — a pass-through of the quant numbers, not LLM-authored. The agent
+      contributes `narrative`/`key_factors` prose AND its own,
+      independently-authored `technical_domain_score` (DomainScore,
+      domain="technical") — a separate judgment call that may agree or
+      disagree with the quant engine's own Technical domain score shown
+      to it as context.
 
   - name: financial_research
     module: agentic_options_reporter.thesis.financial_research
@@ -151,6 +197,8 @@ agents:
       Reasons over whatever datasets are present — a deployment whose only
       financial source is Finnhub sees no raw statements (rendered "not
       available" in the prompt) — and never fabricates a missing figure.
+      Since phase 3, ALSO independently authors `domain_score`
+      (DomainScore, domain="fundamental") from this same material.
       Skipped entirely (null finding) if financial_provider is null.
 
   - name: news_research
@@ -166,8 +214,12 @@ agents:
       and lists of catalysts/risks. The sentiment label is the agent's
       own qualitative judgment over the actual articles (a judgment call
       over given facts, like risk_level), never a number the quant
-      engine computes. Skipped entirely (null finding) if news_provider
-      is null.
+      engine computes. Since phase 3, ALSO independently authors
+      `domain_score` (DomainScore, domain="sentiment") — the one place a
+      quant-side sub-factor (news_volume, direction-agnostic) and an
+      agent-side judgment (bullish/bearish direction) cover the same
+      domain from genuinely different angles. Skipped entirely (null
+      finding) if news_provider is null.
 
   - name: macro_research
     module: agentic_options_reporter.thesis.macro_research
@@ -183,10 +235,11 @@ agents:
       over whatever metrics are present — a keyless-only deployment sees
       CPI and GDP but no policy rate (see specs/providers.yaml
       MacroProvider capability model) — and does not compute or forecast
-      any macro figure itself. Skipped entirely (null finding) if
-      macro_provider is null OR no configured provider serves any
-      requested metric. Market-wide, not ticker-specific — runs
-      independent of no_candidate_short_circuit.
+      any macro figure itself. Since phase 3, ALSO independently authors
+      `domain_score` (DomainScore, domain="macro") from this same
+      material. Skipped entirely (null finding) if macro_provider is null
+      OR no configured provider serves any requested metric. Market-wide,
+      not ticker-specific — runs independent of no_candidate_short_circuit.
 
   - name: catalyst_research
     module: agentic_options_reporter.thesis.catalyst_research
@@ -233,6 +286,10 @@ agents:
       time to expiration). risk_level is the agent's qualitative
       judgment (low/medium/high) — this is a judgment call, not a
       formula, so it is allowed to be LLM-authored (unlike scores).
+      Since phase 3, ALSO independently authors `domain_score`
+      (DomainScore, domain="risk") — a HIGH score means LOW risk (a
+      well-managed, favorable risk profile), the same polarity as the
+      quant Risk domain, not a danger scale.
       Phase 2a note: does not yet receive financial/news/macro findings
       as input — see deferred.risk_and_strategy_incorporate_research_findings.
     skipped_when: no_candidate_short_circuit
@@ -243,7 +300,7 @@ agents:
     calls_llm: true
     input:
       - TrendAssessment
-      - ScoredCandidate (top-ranked)
+      - ScoredCandidate (top-ranked; now also carries open_interest/volume/spread_pct)
       - RiskAssessment (from risk_challenger)
     output: StrategySuggestion
     contract: >
@@ -252,7 +309,53 @@ agents:
       the top candidate's risk profile, and the risk_challenger's
       concerns. Does not price a spread or pick specific strikes —
       that would require new deterministic multi-leg pricing, out of
-      scope for this phase.
+      scope for this phase. Since phase 3, ALSO independently authors
+      `domain_score` (DomainScore, domain="liquidity") — how practical
+      the contract/strategy shape is to actually enter and exit. An
+      acknowledged imperfect domain fit for this agent, chosen for
+      smallest blast radius over adding a dedicated 9th agent.
+    skipped_when: no_candidate_short_circuit
+
+  - name: relative_strength_research
+    module: agentic_options_reporter.thesis.relative_strength_research
+    function: run
+    calls_llm: true
+    new_in: phase_3
+    input:
+      - option_type (from the top-ranked ScoredCandidate)
+      - symbol, symbol_return, benchmark_return (SPY), sector_return, sector_etf
+      # Fetched by the orchestrator via MarketDataProvider (no new
+      # provider interface) — mirrors analysis/domain_scoring.py's quant
+      # Relative Strength scorer's data flow, refetched fresh since
+      # AnalysisResult doesn't carry raw PriceHistory.
+    output: RelativeStrengthFinding
+    contract: >
+      Characterizes whether the stock is leading or lagging its
+      market/sector and what that means for the directional trade;
+      authors `domain_score` (DomainScore, domain="relative_strength").
+      Never computes the returns itself. Skipped when no_candidate_short_circuit.
+    skipped_when: no_candidate_short_circuit
+
+  - name: statistical_edge_research
+    module: agentic_options_reporter.thesis.statistical_edge_research
+    function: run
+    calls_llm: true
+    new_in: phase_3
+    input:
+      - DomainScore | null (the quant-computed Statistical Edge domain
+        score for the top candidate, i.e. ScoredCandidate.domain_scores
+        ["statistical_edge"] — the one place besides quant_interpreter
+        where an agent's prompt includes a quant DomainScore as context)
+      - TrendAssessment
+      - ScoredCandidate (top-ranked)
+    output: StatisticalEdgeFinding
+    contract: >
+      Interprets the quant engine's historical-hit-rate/Monte-Carlo
+      readout (or its absence/low sample size) and authors its own
+      `domain_score` (DomainScore, domain="statistical_edge") — expected
+      to keep confidence low when the quant readout is thin or missing,
+      rather than inventing certainty. Never recomputes the underlying
+      statistics.
     skipped_when: no_candidate_short_circuit
 
   - name: investment_thesis
@@ -276,14 +379,62 @@ agents:
       plus a consensus label (bullish/bearish/neutral/mixed). This is
       the text the user actually reads. If financial/news/macro/catalyst
       findings are absent (provider not configured), synthesizes over
-      whatever is present rather than erroring.
+      whatever is present rather than erroring. Phase 3 note: does NOT
+      yet take relative_strength_research/statistical_edge_research as
+      input (deferred, same reasoning as
+      deferred.risk_and_strategy_incorporate_research_findings) — those
+      two findings surface via their own Agents-tab cards and the
+      agent_trade_quality composite instead.
+
+composite_step:
+  module: agentic_options_reporter.thesis.orchestrator
+  description: >
+    After every agent above has run (or been skipped), the orchestrator
+    collects whichever agent DomainScores were actually produced
+    (quant_interpreter.technical_domain_score is included only if a
+    candidate existed; financial/news/macro/risk/liquidity/relative_
+    strength/statistical_edge each only if that agent ran) into
+    dict[domain_id, DomainScore], then calls the SAME
+    analysis.composite_score.compute_composite_score(source="agent")
+    function analysis/scoring.py uses for the quant path, with
+    weighting_profile=analysis_result.weighting_profile (not an
+    independent selection — see specs/scoring.yaml
+    weighting_profile_selection). Produces
+    AgentThesisResult.agent_trade_quality; null only if the dict ended up
+    empty (e.g. no providers configured at all).
 
 models:
+  DomainScore:
+    domain: "technical | risk | liquidity | fundamental | macro | sentiment | relative_strength | statistical_edge"
+    score: float          # 0-100
+    confidence: float      # 0-100
+    evidence: list[str]
+    factors: list[DomainFactor]   # quant scorers populate this; agent scorers leave it empty
+    source: "quant | agent"
+    generated_at: datetime
+
+  DomainFactor:
+    name: str
+    value: float      # 0-1
+    weight: float      # 0-1, within-domain weight
+    detail: str
+
+  TradeQualityScore:
+    contract_symbol: str | null
+    domain_scores: dict[str, DomainScore]
+    composite_score: float   # 0-100
+    confidence: float         # 0-100, coverage-discounted (specs/scoring.yaml)
+    recommendation_action: str   # STRONG_BUY | BUY | HOLD | AVOID
+    weighting_profile: str        # day_trade | swing | long_term
+    source: "quant | agent"
+    generated_at: datetime
+    explainability: list[str]
+
   QuantInterpretation:
     narrative: str
     key_factors: list[str]
-    score_breakdown: dict[str, float]   # pass-through, not LLM-authored
-    overall_score: float                # pass-through, not LLM-authored
+    quant_trade_quality: TradeQualityScore   # pass-through, not LLM-authored
+    technical_domain_score: DomainScore        # this agent's own judgment, source="agent"
 
   FinancialResearchFinding:
     company_health: "strong | stable | weak"
@@ -292,17 +443,28 @@ models:
     cash_flow: "positive | neutral | negative"
     analyst_consensus: str        # pass-through from AnalystEstimates, not LLM-authored
     narrative: str
+    domain_score: DomainScore      # domain="fundamental"
 
   NewsResearchFinding:
     sentiment: "bullish | bearish | neutral"
     summary: str
     catalysts: list[str]
     risks: list[str]
+    domain_score: DomainScore      # domain="sentiment"
 
   MacroResearchFinding:
     regime: "risk_on | risk_off | neutral"
     outlook: str
     summary: str
+    domain_score: DomainScore      # domain="macro"
+
+  RelativeStrengthFinding:
+    narrative: str
+    domain_score: DomainScore      # domain="relative_strength"
+
+  StatisticalEdgeFinding:
+    narrative: str
+    domain_score: DomainScore      # domain="statistical_edge"
 
   CatalystItem:
     title: str
@@ -320,10 +482,12 @@ models:
     risk_level: "low | medium | high"
     concerns: list[str]
     position_sizing_note: str
+    domain_score: DomainScore      # domain="risk"
 
   StrategySuggestion:
     strategy: str
     rationale: str
+    domain_score: DomainScore      # domain="liquidity"
 
   InvestmentThesis:
     thesis: str
@@ -337,9 +501,12 @@ models:
     news_research: "NewsResearchFinding | null"
     macro_research: "MacroResearchFinding | null"
     catalyst_research: "CatalystFinding | null"
+    relative_strength_research: "RelativeStrengthFinding | null"
+    statistical_edge_research: "StatisticalEdgeFinding | null"
     risk_assessment: "RiskAssessment | null"
     strategy_suggestion: "StrategySuggestion | null"
     investment_thesis: InvestmentThesis
+    agent_trade_quality: "TradeQualityScore | null"   # see composite_step
     pipeline_warnings: "list[str] = []"   # see provider_failure_mid_run
 
 llm_client:

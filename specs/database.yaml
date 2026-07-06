@@ -12,6 +12,7 @@ tables:
       generated_at: datetime
       lookback_days: int
       expiration: str | null
+      weighting_profile: str default=swing   # day_trade | swing | long_term (specs/scoring.yaml); added by migration d8f3b2a1c9e4
       fundamentals: json | null    # FundamentalsSnapshot serialized to JSON (profile/metrics/earnings/insider merged across providers); null when no provider returned any
       data_warnings: json | null   # list[str] of non-fatal problems gathering fundamentals; null when clean
     relationships:
@@ -21,6 +22,7 @@ tables:
       - support_resistance_levels: one-to-many
       - scored_candidates: one-to-many
       - recommendation: one-to-one
+      - trade_quality_score: one-to-one
       - agent_thesis: one-to-one
 
   indicator_snapshot:
@@ -87,13 +89,16 @@ tables:
       theta: float
       vega: float
       rho: float
+      open_interest: int default=0    # added by migration d8f3b2a1c9e4; feeds the quant Liquidity domain scorer
+      spread_pct: float default=0
+      volume: int default=0
       max_loss: float
       max_gain: float | null
       breakeven: float
       reward_risk_ratio: float | null
       probability_of_profit: float
       score: float
-      score_breakdown: json
+      domain_scores: json default={}   # dict[str, DomainScore] serialized; replaces score_breakdown (dropped by migration d8f3b2a1c9e4)
 
   recommendation:
     columns:
@@ -104,6 +109,23 @@ tables:
       confidence: float
       rationale: str
 
+  # The quant-side composite Trade Quality Score for a run's recommended
+  # candidate (specs/scoring.yaml). Absent when the run had no liquid
+  # candidate (AVOID), mirroring recommendation.contract_symbol being
+  # null. Added by migration d8f3b2a1c9e4.
+  trade_quality_score:
+    columns:
+      id: int primary_key autoincrement
+      run_id: int foreign_key(analysis_run.id) unique
+      contract_symbol: str | null
+      composite_score: float
+      confidence: float
+      recommendation_action: str
+      weighting_profile: str
+      domain_scores: json   # dict[str, DomainScore] serialized
+      explainability: json   # list[str]
+      generated_at: datetime
+
   # See specs/agents.yaml for the pipeline that produces this row.
   agent_thesis:
     columns:
@@ -112,8 +134,8 @@ tables:
       generated_at: datetime
       quant_narrative: str
       quant_key_factors: json
-      quant_score_breakdown: json
-      quant_overall_score: float
+      quant_trade_quality: json default={}    # TradeQualityScore serialized; replaces quant_score_breakdown/quant_overall_score (dropped by migration d8f3b2a1c9e4)
+      technical_domain_score: json default={}  # DomainScore serialized, source="agent"
       # null when the corresponding provider wasn't configured (see
       # specs/providers.yaml provider_availability), same convention as
       # risk_level being null on the no-candidate short circuit.
@@ -123,13 +145,16 @@ tables:
       financial_cash_flow: str | null
       financial_analyst_consensus: str | null
       financial_narrative: str | null
+      fundamental_domain_score: json | null   # DomainScore serialized, source="agent"
       news_sentiment: str | null
       news_summary: str | null
       news_catalysts: json | null
       news_risks: json | null
+      sentiment_domain_score: json | null
       macro_regime: str | null
       macro_outlook: str | null
       macro_summary: str | null
+      macro_domain_score: json | null
       # catalyst_research (news + SEC filings + macro). Null when none of
       # those three providers was configured. catalyst_items is the list
       # of {title, category, horizon, direction, detail} dicts. Added by
@@ -137,15 +162,37 @@ tables:
       catalyst_net_bias: str | null   # bullish | bearish | neutral | mixed
       catalyst_summary: str | null
       catalyst_items: json | null
+      # relative_strength_research / statistical_edge_research (new in
+      # phase 3, specs/agents.yaml). Null when short-circuited (no
+      # candidate). Added by migration d8f3b2a1c9e4.
+      relative_strength_narrative: str | null
+      relative_strength_domain_score: json | null
+      statistical_edge_narrative: str | null
+      statistical_edge_domain_score: json | null
       risk_level: str | null       # low | medium | high; null when short-circuited
       risk_concerns: json | null
       risk_position_sizing_note: str | null
+      risk_domain_score: json | null
       strategy: str | null
       strategy_rationale: str | null
+      liquidity_domain_score: json | null
       thesis: str
       consensus: str               # bullish | bearish | neutral | mixed
+      agent_trade_quality: json | null   # TradeQualityScore serialized, source="agent"; null only if no agent DomainScore was produced
       pipeline_warnings: json | null   # list[str]; non-fatal mid-run problems (specs/agents.yaml provider_failure_mid_run); null on pre-migration rows, read back as []
 
 indexes:
   - table: analysis_run
     columns: [symbol, generated_at]
+
+migrations:
+  - id: d8f3b2a1c9e4
+    down_revision: c4e9a1f2d3b7
+    summary: >
+      Trade Quality Score overhaul (specs/scoring.yaml): adds
+      analysis_run.weighting_profile, replaces scored_candidate.
+      score_breakdown with open_interest/spread_pct/volume/domain_scores,
+      adds the trade_quality_score table, and replaces agent_thesis.
+      quant_score_breakdown/quant_overall_score with quant_trade_quality/
+      technical_domain_score plus the new per-agent *_domain_score and
+      relative_strength_*/statistical_edge_* columns and agent_trade_quality.

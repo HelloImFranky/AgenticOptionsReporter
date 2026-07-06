@@ -33,6 +33,7 @@ from reportlab.platypus import (
 from agentic_options_reporter.frontend.formatting import (
     company_health_tone,
     consensus_tone,
+    domain_score_items,
     earnings_surprise_facts,
     format_next_earnings,
     format_timestamp,
@@ -40,13 +41,13 @@ from agentic_options_reporter.frontend.formatting import (
     insider_activity_header,
     insider_activity_series,
     macro_regime_tone,
-    quant_score_tone,
+    missing_domain_labels,
     recommendation_facts,
     recommendation_tone,
     risk_level_tone,
-    score_breakdown_items,
-    score_breakdown_summary,
     technical_snapshot_facts,
+    trade_quality_summary,
+    trade_quality_tone,
     trend_tone,
 )
 
@@ -196,24 +197,30 @@ def _bullets(items: list[str], styles: dict[str, ParagraphStyle]) -> list[Any]:
     ]
 
 
-def score_breakdown_flowables(
-    score_breakdown: dict[str, Any] | None, styles: dict[str, ParagraphStyle]
+def trade_quality_flowables(
+    trade_quality: dict[str, Any] | None, styles: dict[str, ParagraphStyle]
 ) -> list[Any]:
-    payload = score_breakdown or {}
-    if isinstance(payload.get("score_breakdown"), dict):
-        payload = payload["score_breakdown"]
-
-    items = score_breakdown_items(payload or {})
-    if not items:
+    """Renders a Trade Quality Score (specs/scoring.yaml): a composite
+    score/confidence/recommendation heading, then one row per domain
+    (present domains as a score/confidence bar, absent domains as a
+    muted 'Not available' row)."""
+    if not trade_quality:
+        return []
+    domain_scores = trade_quality.get("domain_scores") or {}
+    items = domain_score_items(domain_scores)
+    missing = missing_domain_labels(domain_scores)
+    if not items and not missing:
         return []
 
-    rows: list[list[Any]] = []
     body_style = styles.get("body", styles.get("cell", getSampleStyleSheet()["BodyText"]))
     cell_style = styles.get("cell", body_style)
+    muted_style = styles.get("muted", cell_style)
     track_width = 1.2 * inch
     bar_height = 7
-    for label, value in items:
-        ratio = max(0.0, min(1.0, float(value)))
+
+    rows: list[list[Any]] = []
+    for label, score, confidence, _evidence in items:
+        ratio = max(0.0, min(1.0, score / 100))
         if ratio >= 0.75:
             color = _TONE_COLORS["success"]
         elif ratio >= 0.4:
@@ -246,9 +253,13 @@ def score_breakdown_flowables(
                 ]
             )
         )
-        rows.append([Paragraph(escape(label), cell_style), bar, Paragraph(f"{value:.2f}", cell_style)])
+        rows.append(
+            [Paragraph(escape(label), cell_style), bar, Paragraph(f"{score:.0f}/{confidence:.0f}%", cell_style)]
+        )
+    for label in missing:
+        rows.append([Paragraph(escape(label), muted_style), "", Paragraph("Not available", muted_style)])
 
-    table = Table(rows, colWidths=[1.8 * inch, 1.35 * inch, 0.45 * inch], hAlign="LEFT")
+    table = Table(rows, colWidths=[1.8 * inch, 1.35 * inch, 0.6 * inch], hAlign="LEFT")
     table.setStyle(
         TableStyle(
             [
@@ -261,11 +272,18 @@ def score_breakdown_flowables(
         )
     )
     heading_style = styles.get("cellhead", cell_style)
-    return [Paragraph("Score breakdown", heading_style), Spacer(1, 3), table, Spacer(1, 4)]
+    composite = float(trade_quality.get("composite_score") or 0.0)
+    confidence = float(trade_quality.get("confidence") or 0.0)
+    action = trade_quality.get("recommendation_action", "—")
+    heading = f"Trade Quality Score: {composite:.0f}/100 ({action}, confidence {confidence:.0f}%)"
+    return [Paragraph(escape(heading), heading_style), Spacer(1, 3), table, Spacer(1, 4)]
 
 
 def _recommendation_block(
-    rec: dict[str, Any], candidates: list[dict[str, Any]] | None, styles: dict[str, ParagraphStyle]
+    rec: dict[str, Any],
+    candidates: list[dict[str, Any]] | None,
+    trade_quality: dict[str, Any] | None,
+    styles: dict[str, ParagraphStyle],
 ) -> list[Any]:
     action = rec.get("action", "—")
     confidence = rec.get("confidence") or 0.0
@@ -289,26 +307,18 @@ def _recommendation_block(
     block: list[Any] = [row, Spacer(1, 6)]
     block.extend(_facts_table(recommendation_facts(rec, candidates), styles))
 
-    matching_candidate = None
-    if candidates:
-        for candidate in candidates:
-            if candidate.get("contract_symbol") == rec.get("contract_symbol"):
-                matching_candidate = candidate
-                break
-    breakdown = matching_candidate.get("score_breakdown") if matching_candidate else None
-    if breakdown:
+    if trade_quality:
         block.append(Spacer(1, 6))
-        block.extend(score_breakdown_flowables(breakdown, styles))
-        # Caption the chart with a plain-language read of it, and drop the
-        # deterministic rationale — that's just the same factors restated as
-        # text ("... scored 82/100 (trend_alignment=1.00, ...)"), now
-        # redundant with the visualization above.
-        summary = score_breakdown_summary(breakdown)
+        block.extend(trade_quality_flowables(trade_quality, styles))
+        # Caption the chart with the composite engine's own explainability
+        # bullets, and drop the deterministic rationale — that's the same
+        # factors restated as text, now redundant with the visualization above.
+        summary = trade_quality_summary(trade_quality)
         if summary:
             block.append(Paragraph(escape(summary), styles["muted"]))
     elif rationale:
-        # No breakdown to visualize (e.g. AVOID / no candidate) — the
-        # rationale is the only explanation, so keep it.
+        # No Trade Quality Score to visualize (e.g. AVOID / no candidate) —
+        # the rationale is the only explanation, so keep it.
         block.append(Spacer(1, 6))
         block.append(Paragraph(escape(rationale), styles["body"]))
     return block
@@ -489,7 +499,8 @@ def _pipeline_blocks(thesis: dict[str, Any], styles: dict[str, ParagraphStyle]) 
     blocks: list[Any] = []
 
     quant = thesis.get("quant_interpretation") or {}
-    q_score = quant.get("overall_score") or 0.0
+    q_trade_quality = quant.get("quant_trade_quality") or {}
+    q_score = q_trade_quality.get("composite_score") or 0.0
     q_body = [Paragraph(escape(quant.get("narrative", "")), styles["body"])]
     factors = quant.get("key_factors") or []
     if factors:
@@ -497,7 +508,7 @@ def _pipeline_blocks(thesis: dict[str, Any], styles: dict[str, ParagraphStyle]) 
     blocks.append(
         _agent_block(
             "Quant Interpreter", styles,
-            badge=(f"SCORE {q_score:.0f}/100", quant_score_tone(q_score)), body=q_body,
+            badge=(f"SCORE {q_score:.0f}/100", trade_quality_tone(q_score)), body=q_body,
         )
     )
 
@@ -626,6 +637,34 @@ def _pipeline_blocks(thesis: dict[str, Any], styles: dict[str, ParagraphStyle]) 
                          skipped="Skipped — no candidate contract to build a strategy around.")
         )
 
+    relative_strength = thesis.get("relative_strength_research")
+    if relative_strength is not None:
+        blocks.append(
+            _agent_block(
+                "Relative Strength Research", styles,
+                body=[Paragraph(escape(relative_strength.get("narrative", "")), styles["body"])],
+            )
+        )
+    else:
+        blocks.append(
+            _agent_block("Relative Strength Research", styles,
+                         skipped="Skipped — no candidate contract to assess.")
+        )
+
+    statistical_edge = thesis.get("statistical_edge_research")
+    if statistical_edge is not None:
+        blocks.append(
+            _agent_block(
+                "Statistical Edge Research", styles,
+                body=[Paragraph(escape(statistical_edge.get("narrative", "")), styles["body"])],
+            )
+        )
+    else:
+        blocks.append(
+            _agent_block("Statistical Edge Research", styles,
+                         skipped="Skipped — no candidate contract to assess.")
+        )
+
     investment = thesis.get("investment_thesis") or {}
     consensus = str(investment.get("consensus", "—"))
     blocks.append(
@@ -633,6 +672,17 @@ def _pipeline_blocks(thesis: dict[str, Any], styles: dict[str, ParagraphStyle]) 
                      badge=(consensus.upper(), consensus_tone(consensus)),
                      body=[Paragraph(escape(investment.get("thesis", "")), styles["body"])])
     )
+
+    agent_trade_quality = thesis.get("agent_trade_quality")
+    if agent_trade_quality:
+        agent_score = agent_trade_quality.get("composite_score") or 0.0
+        blocks.append(
+            _agent_block(
+                "Agent Trade Quality Score", styles,
+                badge=(f"SCORE {agent_score:.0f}/100", trade_quality_tone(agent_score)),
+                body=trade_quality_flowables(agent_trade_quality, styles),
+            )
+        )
     return blocks
 
 
@@ -661,7 +711,11 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
     recommendation = report.get("recommendation")
     if recommendation:
         story.extend(_section_header("Recommendation", styles))
-        story.extend(_recommendation_block(recommendation, report.get("candidates"), styles))
+        story.extend(
+            _recommendation_block(
+                recommendation, report.get("candidates"), report.get("trade_quality"), styles
+            )
+        )
 
     trend = report.get("trend")
     volume = report.get("volume")

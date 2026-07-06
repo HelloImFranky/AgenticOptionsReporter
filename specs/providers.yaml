@@ -12,6 +12,21 @@ description: >
   raw API response shape.
 
 status: phase_2b
+phase_3_note: >
+  The Trade Quality Score overhaul (specs/scoring.yaml) widens which
+  pipelines depend on which provider interfaces, but introduces NO NEW
+  provider interface:
+  - MacroProvider and NewsProvider, previously consumed ONLY by the
+    optional thesis/Agents-tab pipeline, are now ALSO fetched best-effort
+    by /analyze itself (workflow.py _optional_macro_provider /
+    _optional_news_provider), feeding the quant Macro and Sentiment
+    domain scorers (analysis/domain_scoring.py). Same non-fatal,
+    best-effort contract as the existing fundamentals fetch.
+  - MarketDataProvider, previously consumed only by /analyze, is now ALSO
+    used by the thesis orchestrator (thesis/orchestrator.py
+    _fetch_relative_strength_inputs) to fetch a SPY/sector-ETF benchmark
+    for relative_strength_research — reusing the existing interface
+    rather than adding one for Relative Strength or Statistical Edge.
 phase_2a_scope: >
   One concrete implementation per new interface, chosen for being free
   or keyless to reach for a working prototype (specs/agents.yaml

@@ -24,6 +24,7 @@ from agentic_options_reporter.frontend.formatting import (
     cash_flow_tone,
     company_health_tone,
     consensus_tone,
+    domain_score_items,
     format_indicator_summary,
     format_next_earnings,
     format_num,
@@ -35,13 +36,15 @@ from agentic_options_reporter.frontend.formatting import (
     insider_activity_header,
     insider_activity_series,
     macro_regime_tone,
+    missing_domain_labels,
     profitability_tone,
-    quant_score_tone,
     recommendation_facts,
     recommendation_tone,
     risk_level_tone,
     runs_to_rows,
-    score_breakdown_items,
+    trade_quality_agreement_summary,
+    trade_quality_summary,
+    trade_quality_tone,
     trend_tone,
 )
 from agentic_options_reporter.frontend.report_pdf import build_report_pdf
@@ -274,50 +277,103 @@ def _card(*controls: ft.Control, padding: int = 20, spacing: int = 12) -> ft.Car
     )
 
 
-def _score_breakdown_panel(score_breakdown: dict[str, float] | None) -> ft.Container:
-    items = score_breakdown_items(score_breakdown or {})
-    if not items:
+def _domain_score_row(label: str, score: float, confidence: float, evidence: list[str]) -> ft.Column:
+    ratio = max(0.0, min(1.0, score / 100))
+    if ratio >= 0.75:
+        color = ft.Colors.GREEN_600
+    elif ratio >= 0.4:
+        color = ft.Colors.AMBER_700
+    else:
+        color = ft.Colors.RED_600
+
+    return ft.Column(
+        [
+            ft.Row(
+                [
+                    ft.Text(label, size=11, weight=ft.FontWeight.W_600, expand=True),
+                    ft.Text(
+                        f"{score:.0f}/100 · {confidence:.0f}% conf.",
+                        size=11,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ],
+                spacing=8,
+            ),
+            ft.ProgressBar(value=ratio, width=220, color=color, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST),
+            ft.Text(
+                " · ".join(evidence[:2]), size=10, color=ft.Colors.ON_SURFACE_VARIANT
+            ) if evidence else ft.Container(height=0),
+        ],
+        spacing=4,
+        tight=True,
+    )
+
+
+def _missing_domain_row(label: str) -> ft.Row:
+    return ft.Row(
+        [
+            ft.Text(label, size=11, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE_VARIANT, expand=True),
+            ft.Text("Not available", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+        ],
+        spacing=8,
+    )
+
+
+def _trade_quality_panel(trade_quality: dict | None) -> ft.Container:
+    """Renders a Trade Quality Score (either source="quant" or "agent") —
+    composite score + confidence + recommendation, then one row per
+    domain (present domains as a score/confidence/evidence bar, absent
+    domains as a muted 'Not available' row rather than a fabricated 0)."""
+    if not trade_quality:
         return ft.Container(
-            content=ft.Text("No breakdown available", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+            content=ft.Text("No Trade Quality Score available", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
             border_radius=10,
             padding=12,
         )
 
-    controls: list[ft.Control] = []
-    for label, value in items:
-        ratio = max(0.0, min(1.0, float(value)))
-        if ratio >= 0.75:
-            color = ft.Colors.GREEN_600
-        elif ratio >= 0.4:
-            color = ft.Colors.AMBER_700
-        else:
-            color = ft.Colors.RED_600
+    domain_scores = trade_quality.get("domain_scores") or {}
+    composite = float(trade_quality.get("composite_score") or 0.0)
+    confidence = float(trade_quality.get("confidence") or 0.0)
+    action = trade_quality.get("recommendation_action", "—")
+    tone = trade_quality_tone(composite)
+    color, _ = _tone_colors(tone)
 
-        controls.append(
-            ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Text(label, size=11, weight=ft.FontWeight.W_600, expand=True),
-                            ft.Text(f"{value:.2f}", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
-                        ],
-                        spacing=8,
-                    ),
-                    ft.ProgressBar(value=ratio, width=220, color=color, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST),
-                ],
-                spacing=4,
-                tight=True,
-            )
-        )
+    rows: list[ft.Control] = [
+        _domain_score_row(label, score, conf, evidence)
+        for label, score, conf, evidence in domain_score_items(domain_scores)
+    ]
+    rows.extend(_missing_domain_row(label) for label in missing_domain_labels(domain_scores))
+
+    summary = trade_quality_summary(trade_quality)
 
     return ft.Container(
         content=ft.Column(
             [
-                ft.Text("Score breakdown", size=12, weight=ft.FontWeight.W_600),
-                ft.Column(controls, spacing=8, tight=True),
+                ft.Row(
+                    [
+                        ft.Container(
+                            content=ft.Text(f"{composite:.0f}/100", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                            bgcolor=color,
+                            border_radius=16,
+                            padding=ft.padding.symmetric(vertical=4, horizontal=12),
+                        ),
+                        ft.Column(
+                            [
+                                ft.Text(f"Trade Quality Score · {action}", size=12, weight=ft.FontWeight.W_600),
+                                ft.Text(f"Confidence {confidence:.0f}%", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                            ],
+                            spacing=2,
+                            tight=True,
+                        ),
+                    ],
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Text(summary, size=11, color=ft.Colors.ON_SURFACE_VARIANT) if summary else ft.Container(height=0),
+                ft.Column(rows, spacing=8, tight=True),
             ],
-            spacing=8,
+            spacing=10,
             tight=True,
         ),
         bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
@@ -565,6 +621,18 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         label="Expiration (optional)", hint_text="YYYY-MM-DD", width=200,
         border_radius=10, text_size=14,
     )
+    weighting_profile_dropdown = ft.Dropdown(
+        label="Weighting profile",
+        value="swing",
+        width=170,
+        border_radius=10,
+        text_size=14,
+        options=[
+            ft.dropdown.Option("day_trade", "Day trade"),
+            ft.dropdown.Option("swing", "Swing"),
+            ft.dropdown.Option("long_term", "Long term"),
+        ],
+    )
 
     current_run_id: dict[str, int | None] = {"value": None}
     last_recommendation: dict[str, object] = {"action": "—", "confidence": 0.0}
@@ -636,7 +704,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
     )
     confidence_bar = ft.ProgressBar(value=0, width=160, border_radius=6, bgcolor=ft.Colors.GREY_200)
     confidence_text = ft.Text("0%", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
-    score_breakdown_panel = ft.Container()
+    trade_quality_panel = ft.Container()
     rec_facts_grid = ft.ResponsiveRow([], spacing=10, run_spacing=10)
 
     recommendation_card = _card(
@@ -647,7 +715,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
         rec_facts_grid,
-        score_breakdown_panel,
+        trade_quality_panel,
     )
 
     # ---- results: stat cards -----------------------------------------
@@ -780,6 +848,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
                 symbol,
                 lookback_days=lookback_days,
                 expiration=(expiration_field.value or "").strip() or None,
+                weighting_profile=weighting_profile_dropdown.value or "swing",
             )
         except ApiError as exc:
             progress.visible = False
@@ -825,24 +894,10 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             _fact_box(label, value)
             for label, value in recommendation_facts(recommendation, result.get("candidates"))
         ]
-        candidate = None
-        for item in result.get("candidates", []) or []:
-            if item.get("contract_symbol") == recommendation.get("contract_symbol"):
-                candidate = item
-                break
-        if candidate:
-            score_breakdown_panel.content = _score_breakdown_panel(candidate.get("score_breakdown") or {})
-            score_breakdown_panel.bgcolor = ft.Colors.TRANSPARENT
-            score_breakdown_panel.padding = 0
-            score_breakdown_panel.border_radius = 0
-        else:
-            score_breakdown_panel.content = ft.Container(
-                content=ft.Text("No breakdown available", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                bgcolor=ft.Colors.TRANSPARENT,
-            )
-            score_breakdown_panel.bgcolor = ft.Colors.TRANSPARENT
-            score_breakdown_panel.padding = 0
-            score_breakdown_panel.border_radius = 0
+        trade_quality_panel.content = _trade_quality_panel(result.get("trade_quality"))
+        trade_quality_panel.bgcolor = ft.Colors.TRANSPARENT
+        trade_quality_panel.padding = 0
+        trade_quality_panel.border_radius = 0
 
         trend = result["trend"]
         trend_tone_name = trend_tone(trend.get("direction", ""))
@@ -891,9 +946,10 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
                     _section_title("Run analysis", ft.Icons.SEARCH),
                     ft.ResponsiveRow(
                         [
-                            ft.Column([symbol_field], col={"xs": 12, "sm": 3}),
-                            ft.Column([lookback_field], col={"xs": 12, "sm": 3}),
-                            ft.Column([expiration_field], col={"xs": 12, "sm": 4}),
+                            ft.Column([symbol_field], col={"xs": 12, "sm": 2}),
+                            ft.Column([lookback_field], col={"xs": 12, "sm": 2}),
+                            ft.Column([expiration_field], col={"xs": 12, "sm": 3}),
+                            ft.Column([weighting_profile_dropdown], col={"xs": 12, "sm": 3}),
                             ft.Column(
                                 [ft.Row([analyze_button, progress], spacing=10)],
                                 col={"xs": 12, "sm": 2},
@@ -1038,6 +1094,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             "volume": analysis.get("volume"),
             "indicators": analysis.get("indicators"),
             "candidates": analysis.get("candidates"),
+            "trade_quality": analysis.get("trade_quality"),
             "fundamentals": analysis.get("fundamentals"),
             "data_warnings": analysis.get("data_warnings"),
             "thesis": report_state.get("thesis"),
@@ -1104,6 +1161,12 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
 
     download_pdf_button.on_click = _download_pdf
 
+    trade_quality_comparison_column = ft.Column([], spacing=12, tight=True)
+    trade_quality_comparison_card = _card(
+        _section_title("Trade Quality Score — Quant vs. Agents", ft.Icons.COMPARE_ARROWS_OUTLINED),
+        trade_quality_comparison_column,
+    )
+
     final_output_card = ft.Column(
         [
             _card(
@@ -1117,6 +1180,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
                 download_status,
                 download_pdf_link,
             ),
+            trade_quality_comparison_card,
         ],
         visible=False,
     )
@@ -1176,6 +1240,12 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         [strategy_name_text, strategy_rationale_text], spacing=4, tight=True
     )
 
+    relative_strength_narrative_text = ft.Text("", size=13, selectable=True)
+    relative_strength_message_body = ft.Column([relative_strength_narrative_text], spacing=8, tight=True)
+
+    statistical_edge_narrative_text = ft.Text("", size=13, selectable=True)
+    statistical_edge_message_body = ft.Column([statistical_edge_narrative_text], spacing=8, tight=True)
+
     thesis_consensus_badge = ft.Container(visible=False)
     thesis_text = ft.Text("", size=13, selectable=True)
     thesis_message_body = ft.Column([thesis_consensus_badge, thesis_text], spacing=8, tight=True)
@@ -1188,6 +1258,8 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
     catalyst_status = _status_pill()
     risk_status = _status_pill()
     strategy_status = _status_pill()
+    relative_strength_status = _status_pill()
+    statistical_edge_status = _status_pill()
     thesis_status = _status_pill()
 
     quant_hood, quant_hood_fill = _hood()
@@ -1197,6 +1269,8 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
     catalyst_hood, catalyst_hood_fill = _hood()
     risk_hood, risk_hood_fill = _hood()
     strategy_hood, strategy_hood_fill = _hood()
+    relative_strength_hood, relative_strength_hood_fill = _hood()
+    statistical_edge_hood, statistical_edge_hood_fill = _hood()
     thesis_hood, thesis_hood_fill = _hood()
 
     conversation_card = ft.Column(
@@ -1239,6 +1313,16 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
                 ),
                 ft.Divider(),
                 _agent_message(
+                    "Relative Strength Research", ft.Icons.SHOW_CHART, ft.Colors.LIME_800,
+                    relative_strength_status, relative_strength_message_body, relative_strength_hood,
+                ),
+                ft.Divider(),
+                _agent_message(
+                    "Statistical Edge Research", ft.Icons.FUNCTIONS, ft.Colors.BROWN_600,
+                    statistical_edge_status, statistical_edge_message_body, statistical_edge_hood,
+                ),
+                ft.Divider(),
+                _agent_message(
                     "Investment Thesis", ft.Icons.AUTO_AWESOME_OUTLINED, ft.Colors.PURPLE,
                     thesis_status, thesis_message_body, thesis_hood,
                 ),
@@ -1260,13 +1344,43 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         download_status.visible = False
         download_pdf_link.visible = False
 
+    # A domain_score dict -> a compact "Domain: 82/100 (conf 90%)" text row,
+    # appended under each research agent's message body so its own
+    # independent domain judgment is visible in the conversation, not just
+    # in the quant-vs-agents comparison card (see _render_final).
+    def _domain_score_line(domain_score: dict | None) -> ft.Control:
+        if not domain_score:
+            return ft.Container(height=0)
+        label = domain_score.get("domain", "").replace("_", " ").title()
+        score = float(domain_score.get("score") or 0.0)
+        confidence = float(domain_score.get("confidence") or 0.0)
+        tone = trade_quality_tone(score)
+        color, _ = _tone_colors(tone)
+        return ft.Row(
+            [
+                ft.Container(width=8, height=8, bgcolor=color, border_radius=4),
+                ft.Text(
+                    f"{label} domain score: {score:.0f}/100 (confidence {confidence:.0f}%)",
+                    size=11,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+            ],
+            spacing=6,
+        )
+
     # -- per-agent renderers: populate a message body from one agent's output --
     def _apply_quant(quant: dict) -> None:
-        quant_score = quant.get("overall_score") or 0.0
-        _fill_pill(quant_score_badge, f"SCORE {quant_score:.0f}/100", quant_score_tone(quant_score))
+        quant_trade_quality = quant.get("quant_trade_quality") or {}
+        quant_score = quant_trade_quality.get("composite_score") or 0.0
+        _fill_pill(quant_score_badge, f"SCORE {quant_score:.0f}/100", trade_quality_tone(quant_score))
         quant_narrative_text.value = quant.get("narrative", "")
         quant_factors_row.controls = [_chip(factor) for factor in quant.get("key_factors", [])]
-        quant_message_body.controls = [quant_score_badge, quant_narrative_text, quant_factors_row]
+        quant_message_body.controls = [
+            quant_score_badge,
+            quant_narrative_text,
+            quant_factors_row,
+            _domain_score_line(quant.get("technical_domain_score")),
+        ]
 
     def _apply_financial(financial: dict) -> None:
         _fill_pill(
@@ -1287,7 +1401,8 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         financial_analyst_text.value = f"Analyst consensus: {financial.get('analyst_consensus', '—')}"
         financial_narrative_text.value = financial.get("narrative", "")
         financial_message_body.controls = [
-            financial_health_badge, financial_chips_row, financial_analyst_text, financial_narrative_text
+            financial_health_badge, financial_chips_row, financial_analyst_text, financial_narrative_text,
+            _domain_score_line(financial.get("domain_score")),
         ]
 
     def _apply_news(news: dict) -> None:
@@ -1311,7 +1426,8 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             [ft.Text("Risks", size=11, weight=ft.FontWeight.BOLD), _bullet_list(risks)] if risks else []
         )
         news_message_body.controls = [
-            news_sentiment_badge, news_summary_text, news_catalysts_column, news_risks_column
+            news_sentiment_badge, news_summary_text, news_catalysts_column, news_risks_column,
+            _domain_score_line(news.get("domain_score")),
         ]
 
     def _apply_macro(macro: dict) -> None:
@@ -1328,7 +1444,10 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         macro_regime_badge.visible = True
         macro_summary_text.value = macro.get("summary", "")
         macro_outlook_text.value = macro.get("outlook", "")
-        macro_message_body.controls = [macro_regime_badge, macro_summary_text, macro_outlook_text]
+        macro_message_body.controls = [
+            macro_regime_badge, macro_summary_text, macro_outlook_text,
+            _domain_score_line(macro.get("domain_score")),
+        ]
 
     def _apply_catalyst(catalyst: dict) -> None:
         net_bias = catalyst.get("net_bias", "—")
@@ -1359,12 +1478,28 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         risk_badge.visible = True
         risk_concerns_column.controls = [_bullet_list(risk.get("concerns", []))]
         risk_sizing_text.value = risk.get("position_sizing_note", "")
-        risk_message_body.controls = [risk_badge, risk_concerns_column, risk_sizing_text]
+        risk_message_body.controls = [
+            risk_badge, risk_concerns_column, risk_sizing_text, _domain_score_line(risk.get("domain_score")),
+        ]
 
     def _apply_strategy(strategy: dict) -> None:
         strategy_name_text.value = strategy.get("strategy", "")
         strategy_rationale_text.value = strategy.get("rationale", "")
-        strategy_message_body.controls = [strategy_name_text, strategy_rationale_text]
+        strategy_message_body.controls = [
+            strategy_name_text, strategy_rationale_text, _domain_score_line(strategy.get("domain_score")),
+        ]
+
+    def _apply_relative_strength(finding: dict) -> None:
+        relative_strength_narrative_text.value = finding.get("narrative", "")
+        relative_strength_message_body.controls = [
+            relative_strength_narrative_text, _domain_score_line(finding.get("domain_score")),
+        ]
+
+    def _apply_statistical_edge(finding: dict) -> None:
+        statistical_edge_narrative_text.value = finding.get("narrative", "")
+        statistical_edge_message_body.controls = [
+            statistical_edge_narrative_text, _domain_score_line(finding.get("domain_score")),
+        ]
 
     def _apply_thesis(investment_thesis: dict) -> None:
         consensus = investment_thesis.get("consensus", "—")
@@ -1388,6 +1523,14 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         "catalyst_research": (catalyst_status, catalyst_message_body, _apply_catalyst, catalyst_hood_fill),
         "risk_challenger": (risk_status, risk_message_body, _apply_risk, risk_hood_fill),
         "options_strategy": (strategy_status, strategy_message_body, _apply_strategy, strategy_hood_fill),
+        "relative_strength_research": (
+            relative_strength_status, relative_strength_message_body,
+            _apply_relative_strength, relative_strength_hood_fill,
+        ),
+        "statistical_edge_research": (
+            statistical_edge_status, statistical_edge_message_body,
+            _apply_statistical_edge, statistical_edge_hood_fill,
+        ),
         "investment_thesis": (thesis_status, thesis_message_body, _apply_thesis, thesis_hood_fill),
     }
 
@@ -1456,6 +1599,29 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
 
         final_confidence_text.value = f"{last_recommendation['confidence']:.0%} confidence"
         final_output_card.visible = True
+
+        # -- Trade Quality Score: quant (from the /analyze run) vs. agents --
+        quant_trade_quality = (result.get("quant_interpretation") or {}).get("quant_trade_quality")
+        agent_trade_quality = result.get("agent_trade_quality")
+        analysis_result = report_state.get("analysis") or {}
+        quant_source_trade_quality = quant_trade_quality or analysis_result.get("trade_quality")
+        agreement = trade_quality_agreement_summary(quant_source_trade_quality, agent_trade_quality)
+        trade_quality_comparison_column.controls = [
+            ft.Text(agreement, size=12, color=ft.Colors.ON_SURFACE_VARIANT) if agreement else ft.Container(height=0),
+            ft.ResponsiveRow(
+                [
+                    ft.Column(
+                        [ft.Text("Quant", size=11, weight=ft.FontWeight.W_600), _trade_quality_panel(quant_source_trade_quality)],
+                        col={"xs": 12, "sm": 6}, spacing=6, tight=True,
+                    ),
+                    ft.Column(
+                        [ft.Text("Agents", size=11, weight=ft.FontWeight.W_600), _trade_quality_panel(agent_trade_quality)],
+                        col={"xs": 12, "sm": 6}, spacing=6, tight=True,
+                    ),
+                ],
+                spacing=12, run_spacing=12,
+            ),
+        ]
 
         # Retain the payload and unlock the PDF export now that a full run exists.
         report_state["thesis"] = result

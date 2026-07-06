@@ -5,10 +5,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agentic_options_reporter import main as main_module
+from agentic_options_reporter.analysis.composite_score import compute_composite_score
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
     CatalystFinding,
     CatalystItem,
+    DomainScore,
     FinancialResearchFinding,
     IndicatorSnapshot,
     InvestmentThesis,
@@ -24,6 +26,26 @@ from agentic_options_reporter.models.schemas import (
     VolumeAssessment,
 )
 from agentic_options_reporter.persistence import make_session_factory, persist_analysis_run
+
+
+def _domain_score(domain: str, score: float = 80.0) -> DomainScore:
+    return DomainScore(
+        domain=domain, score=score, confidence=90.0, evidence=[], factors=[],
+        source="quant", generated_at=datetime(2026, 1, 1),
+    )
+
+
+def _quant_interpretation(narrative: str = "Strong trend.", score: float = 78.5) -> QuantInterpretation:
+    domain_scores = {"technical": _domain_score("technical", score)}
+    return QuantInterpretation(
+        narrative=narrative,
+        key_factors=["trend"],
+        quant_trade_quality=compute_composite_score(domain_scores, source="quant", contract_symbol="TESTC00100000"),
+        technical_domain_score=DomainScore(
+            domain="technical", score=score, confidence=85.0, evidence=[], factors=[],
+            source="agent", generated_at=datetime(2026, 1, 1),
+        ),
+    )
 
 
 @pytest.fixture
@@ -72,7 +94,7 @@ def _scored_candidate() -> ScoredCandidate:
         reward_risk_ratio=None,
         probability_of_profit=0.6,
         score=78.5,
-        score_breakdown={"trend_alignment": 1.0, "liquidity": 0.8},
+        domain_scores={"technical": _domain_score("technical", 91.0)},
     )
 
 
@@ -95,6 +117,8 @@ def _persist_full_run(session_factory, recommendation=None) -> int:
             levels,
             [_scored_candidate()],
             recommendation,
+            None,
+            "swing",
         )
 
 
@@ -139,7 +163,7 @@ def test_get_run_returns_persisted_fundamentals(client):
             TrendAssessment(direction="bullish", strength="moderate", adx=25),
             VolumeAssessment(relative_volume=1.2, flags=["normal_volume"]),
             [SupportResistanceLevel(price=95.0, level_type="support", touches=3, last_touch_index=10)],
-            [_scored_candidate()], recommendation,
+            [_scored_candidate()], recommendation, None, "swing",
             fundamentals=fundamentals, data_warnings=["statements: rate limited"],
         )
 
@@ -211,11 +235,14 @@ def _fake_thesis_result(run_id: int) -> AgentThesisResult:
     return AgentThesisResult(
         run_id=run_id,
         generated_at=datetime.now(timezone.utc),
-        quant_interpretation=QuantInterpretation(
-            narrative="Strong trend.", key_factors=["trend"], score_breakdown={"x": 1.0}, overall_score=78.5
+        quant_interpretation=_quant_interpretation(),
+        risk_assessment=RiskAssessment(
+            risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.",
+            domain_score=_domain_score("risk"),
         ),
-        risk_assessment=RiskAssessment(risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%."),
-        strategy_suggestion=StrategySuggestion(strategy="Bull Call Spread", rationale="Defined risk."),
+        strategy_suggestion=StrategySuggestion(
+            strategy="Bull Call Spread", rationale="Defined risk.", domain_score=_domain_score("liquidity")
+        ),
         investment_thesis=InvestmentThesis(thesis="Bullish setup.", consensus="bullish"),
     )
 
@@ -508,7 +535,13 @@ def test_generate_thesis_no_candidate_short_circuit(client):
         run_id=run_id,
         generated_at=datetime.now(timezone.utc),
         quant_interpretation=QuantInterpretation(
-            narrative="no candidates", key_factors=[], score_breakdown={}, overall_score=0.0
+            narrative="no candidates",
+            key_factors=[],
+            quant_trade_quality=compute_composite_score({}, source="quant", contract_symbol=None),
+            technical_domain_score=DomainScore(
+                domain="technical", score=0.0, confidence=0.0, evidence=[], factors=[],
+                source="agent", generated_at=datetime(2026, 1, 1),
+            ),
         ),
         risk_assessment=None,
         strategy_suggestion=None,
@@ -533,12 +566,14 @@ def test_generate_thesis_persists_and_returns_research_findings(client):
     fake_result.financial_research = FinancialResearchFinding(
         company_health="strong", growth="accelerating", profitability="high",
         cash_flow="positive", analyst_consensus="Buy", narrative="Fundamentals solid.",
+        domain_score=_domain_score("fundamental"),
     )
     fake_result.news_research = NewsResearchFinding(
-        sentiment="bullish", summary="Positive coverage.", catalysts=["earnings beat"], risks=["supply chain"]
+        sentiment="bullish", summary="Positive coverage.", catalysts=["earnings beat"], risks=["supply chain"],
+        domain_score=_domain_score("sentiment"),
     )
     fake_result.macro_research = MacroResearchFinding(
-        regime="risk_on", outlook="Favorable.", summary="Rates steady."
+        regime="risk_on", outlook="Favorable.", summary="Rates steady.", domain_score=_domain_score("macro")
     )
     fake_result.catalyst_research = CatalystFinding(
         net_bias="bullish",

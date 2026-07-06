@@ -56,9 +56,13 @@ class ApiClient:
         return self._request("GET", "/health")
 
     def analyze(
-        self, symbol: str, lookback_days: int = 365, expiration: str | None = None
+        self,
+        symbol: str,
+        lookback_days: int = 365,
+        expiration: str | None = None,
+        weighting_profile: str = "swing",
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {"lookback_days": lookback_days}
+        params: dict[str, Any] = {"lookback_days": lookback_days, "weighting_profile": weighting_profile}
         if expiration:
             params["expiration"] = expiration
         return self._request("GET", f"/analyze/{symbol}", params=params)

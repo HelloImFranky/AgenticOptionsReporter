@@ -206,9 +206,13 @@ surface as a 502.
 Financial Research's `analyst_consensus` field is passed through verbatim
 from the provider's `AnalystEstimates.consensus_rating` — never
 LLM-authored — the same "facts pass through, judgment is LLM-authored"
-split used for `QuantInterpretation.overall_score`. `company_health`,
+split used for `QuantInterpretation.quant_trade_quality` (see
+`specs/scoring.yaml` for the Trade Quality Score overhaul). `company_health`,
 `growth`, `profitability`, and `cash_flow` are legitimate LLM judgment
-calls over the given facts, analogous to `risk_level`.
+calls over the given facts, analogous to `risk_level`. Since phase 3, most
+agents ALSO author their own `domain_score` (specs/agents.yaml) — an
+independent 0-100 judgment for one Trade Quality Score domain, never a
+copy of the quant engine's number for that domain.
 
 The async `SECProvider` interface (`SecEdgarProvider`, backed by the free,
 keyless SEC EDGAR API, on the same `data/async_http.py` base as the other

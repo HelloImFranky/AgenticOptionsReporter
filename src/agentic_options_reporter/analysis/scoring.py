@@ -1,96 +1,95 @@
-"""Opportunity scoring and recommendation generation.
+"""Trade Quality Score assembly and recommendation generation.
 
-Weights and thresholds mirror specs/scoring.yaml exactly; update both
-together if the model changes.
+Per-candidate domain scores come from analysis/domain_scoring.py and
+analysis/statistical_edge.py; the composite blend comes from
+analysis/composite_score.py. This module's job is just to assemble the 8
+domains for each candidate (some candidate-level, some run-level and
+shared across candidates of the same run) and pick the top-scoring one.
+See specs/scoring.yaml.
 """
 
 from __future__ import annotations
 
+from agentic_options_reporter.analysis.composite_score import compute_composite_score
+from agentic_options_reporter.analysis.domain_scoring import (
+    fundamental_domain_score,
+    liquidity_domain_score,
+    macro_domain_score,
+    relative_strength_domain_score,
+    risk_domain_score,
+    sentiment_domain_score,
+    technical_domain_score,
+)
+from agentic_options_reporter.analysis.statistical_edge import statistical_edge_domain_score
 from agentic_options_reporter.models.schemas import (
+    DomainScore,
     EvaluatedContract,
+    FundamentalsSnapshot,
+    IndicatorSnapshot,
+    MacroObservation,
+    NewsArticle,
+    PastRunOutcome,
+    PriceHistory,
     Recommendation,
-    RecommendationAction,
     RiskProfile,
     ScoredCandidate,
     SupportResistanceLevel,
+    TradeQualityScore,
     TrendAssessment,
     VolumeAssessment,
+    WeightingProfileId,
 )
 
-WEIGHTS = {
-    "trend_alignment": 0.30,
-    "volume_confirmation": 0.15,
-    "support_resistance_proximity": 0.15,
-    "liquidity": 0.20,
-    "risk_reward": 0.20,
-}
 
-_SR_MAX_DISTANCE_PCT = 0.05
-_LIQUIDITY_OI_TARGET = 500
-_LIQUIDITY_MAX_SPREAD_PCT = 0.10
-_RISK_REWARD_FLOOR = 0.5
-_RISK_REWARD_CEIL = 2.0
+def _assemble_domain_scores(
+    candidate: EvaluatedContract,
+    risk: RiskProfile,
+    history: PriceHistory,
+    indicators: IndicatorSnapshot,
+    trend: TrendAssessment,
+    volume: VolumeAssessment,
+    levels: list[SupportResistanceLevel],
+    fundamentals: FundamentalsSnapshot | None,
+    macro_observations: list[MacroObservation],
+    news_articles: list[NewsArticle],
+    benchmark_history: PriceHistory | None,
+    sector_history: PriceHistory | None,
+    past_runs: list[PastRunOutcome],
+) -> dict[str, DomainScore]:
+    option_type = candidate.contract.option_type
+    domain_scores: dict[str, DomainScore] = {
+        "technical": technical_domain_score(
+            option_type, candidate.underlying_price, history, indicators, trend, volume, levels
+        ),
+        "risk": risk_domain_score(candidate, risk, indicators, levels),
+        "liquidity": liquidity_domain_score(candidate, indicators),
+    }
 
-ACTION_THRESHOLDS: list[tuple[float, RecommendationAction]] = [
-    (75, "STRONG_BUY"),
-    (60, "BUY"),
-    (40, "HOLD"),
-    (0, "AVOID"),
-]
+    fundamental = fundamental_domain_score(fundamentals)
+    if fundamental is not None:
+        domain_scores["fundamental"] = fundamental
 
+    macro = macro_domain_score(macro_observations, option_type)
+    if macro is not None:
+        domain_scores["macro"] = macro
 
-def _bias(option_type: str) -> str:
-    return "bullish" if option_type == "call" else "bearish"
+    sentiment = sentiment_domain_score(news_articles, fundamentals, option_type)
+    if sentiment is not None:
+        domain_scores["sentiment"] = sentiment
 
+    relative_strength = relative_strength_domain_score(
+        history, benchmark_history, sector_history, option_type
+    )
+    if relative_strength is not None:
+        domain_scores["relative_strength"] = relative_strength
 
-def _trend_alignment(option_type: str, trend: TrendAssessment) -> float:
-    bias = _bias(option_type)
-    if trend.direction == "neutral":
-        return 0.5
-    if trend.direction == bias:
-        return 1.0 if trend.strength != "weak" else 0.5
-    return 0.0
+    statistical_edge = statistical_edge_domain_score(
+        option_type, history, candidate.days_to_expiration, risk.breakeven, candidate.underlying_price, past_runs
+    )
+    if statistical_edge is not None:
+        domain_scores["statistical_edge"] = statistical_edge
 
-
-def _volume_confirmation(option_type: str, volume: VolumeAssessment) -> float:
-    bias = _bias(option_type)
-    if "high_volume" in volume.flags:
-        return 1.0
-    if bias == "bullish" and "bearish_divergence" in volume.flags:
-        return 0.0
-    if bias == "bearish" and "bullish_divergence" in volume.flags:
-        return 0.0
-    if "low_volume" in volume.flags:
-        return 0.0
-    return 0.5
-
-
-def _support_resistance_proximity(
-    option_type: str, underlying_price: float, levels: list[SupportResistanceLevel]
-) -> float:
-    relevant_type = "support" if option_type == "call" else "resistance"
-    relevant = [lvl for lvl in levels if lvl.level_type == relevant_type]
-    if not relevant or underlying_price <= 0:
-        return 0.0
-    nearest = min(relevant, key=lambda lvl: abs(lvl.price - underlying_price))
-    distance_pct = abs(nearest.price - underlying_price) / underlying_price
-    return max(0.0, 1.0 - distance_pct / _SR_MAX_DISTANCE_PCT)
-
-
-def _liquidity(candidate: EvaluatedContract) -> float:
-    oi_score = min(candidate.contract.open_interest / _LIQUIDITY_OI_TARGET, 1.0)
-    spread_score = max(0.0, 1 - candidate.spread_pct / _LIQUIDITY_MAX_SPREAD_PCT)
-    return 0.5 * oi_score + 0.5 * spread_score
-
-
-def _risk_reward(reward_risk_ratio: float | None) -> float:
-    if reward_risk_ratio is None:
-        return 1.0  # unlimited upside (e.g. long call) with defined risk
-    if reward_risk_ratio >= _RISK_REWARD_CEIL:
-        return 1.0
-    if reward_risk_ratio <= _RISK_REWARD_FLOOR:
-        return 0.0
-    return (reward_risk_ratio - _RISK_REWARD_FLOOR) / (_RISK_REWARD_CEIL - _RISK_REWARD_FLOOR)
+    return domain_scores
 
 
 def score_candidates(
@@ -99,6 +98,16 @@ def score_candidates(
     trend: TrendAssessment,
     volume: VolumeAssessment,
     levels: list[SupportResistanceLevel],
+    history: PriceHistory,
+    indicators: IndicatorSnapshot,
+    *,
+    fundamentals: FundamentalsSnapshot | None = None,
+    macro_observations: list[MacroObservation] | None = None,
+    news_articles: list[NewsArticle] | None = None,
+    benchmark_history: PriceHistory | None = None,
+    sector_history: PriceHistory | None = None,
+    past_runs: list[PastRunOutcome] | None = None,
+    weighting_profile: WeightingProfileId = "swing",
 ) -> list[ScoredCandidate]:
     risk_by_symbol = {rp.contract_symbol: rp for rp in risk_profiles}
 
@@ -110,16 +119,27 @@ def score_candidates(
         if risk is None:
             continue
 
-        breakdown = {
-            "trend_alignment": _trend_alignment(candidate.contract.option_type, trend),
-            "volume_confirmation": _volume_confirmation(candidate.contract.option_type, volume),
-            "support_resistance_proximity": _support_resistance_proximity(
-                candidate.contract.option_type, candidate.underlying_price, levels
-            ),
-            "liquidity": _liquidity(candidate),
-            "risk_reward": _risk_reward(risk.reward_risk_ratio),
-        }
-        score = 100 * sum(WEIGHTS[name] * value for name, value in breakdown.items())
+        domain_scores = _assemble_domain_scores(
+            candidate,
+            risk,
+            history,
+            indicators,
+            trend,
+            volume,
+            levels,
+            fundamentals,
+            macro_observations or [],
+            news_articles or [],
+            benchmark_history,
+            sector_history,
+            past_runs or [],
+        )
+        trade_quality = compute_composite_score(
+            domain_scores,
+            source="quant",
+            weighting_profile=weighting_profile,
+            contract_symbol=candidate.contract.contract_symbol,
+        )
 
         scored.append(
             ScoredCandidate(
@@ -132,13 +152,16 @@ def score_candidates(
                 theta=candidate.greeks.theta,
                 vega=candidate.greeks.vega,
                 rho=candidate.greeks.rho,
+                open_interest=candidate.contract.open_interest,
+                spread_pct=candidate.spread_pct,
+                volume=candidate.contract.volume,
                 max_loss=risk.max_loss,
                 max_gain=risk.max_gain,
                 breakeven=risk.breakeven,
                 reward_risk_ratio=risk.reward_risk_ratio,
                 probability_of_profit=risk.probability_of_profit,
-                score=score,
-                score_breakdown=breakdown,
+                score=trade_quality.composite_score,
+                domain_scores=domain_scores,
             )
         )
 
@@ -146,29 +169,38 @@ def score_candidates(
     return scored
 
 
-def _action_for_score(score: float) -> RecommendationAction:
-    for floor, action in ACTION_THRESHOLDS:
-        if score >= floor:
-            return action
-    return "AVOID"
-
-
-def build_recommendation(candidates: list[ScoredCandidate]) -> Recommendation:
+def build_recommendation(
+    candidates: list[ScoredCandidate],
+    weighting_profile: WeightingProfileId = "swing",
+) -> tuple[Recommendation, TradeQualityScore | None]:
+    """Returns (Recommendation, TradeQualityScore | None) — the latter is
+    the quant-side Trade Quality Score for the top candidate, None on
+    AVOID / no liquid candidates, mirroring Recommendation.contract_symbol."""
     if not candidates:
-        return Recommendation(
-            action="AVOID",
-            contract_symbol=None,
-            confidence=0.0,
-            rationale="No liquid, scoreable candidates were found in the option chain.",
+        return (
+            Recommendation(
+                action="AVOID",
+                contract_symbol=None,
+                confidence=0.0,
+                rationale="No liquid, scoreable candidates were found in the option chain.",
+            ),
+            None,
         )
 
     top = max(candidates, key=lambda c: c.score)
-    factors = ", ".join(f"{name}={value:.2f}" for name, value in top.score_breakdown.items())
-    rationale = f"{top.contract_symbol} scored {top.score:.1f}/100 ({factors})."
-
-    return Recommendation(
-        action=_action_for_score(top.score),
+    trade_quality = compute_composite_score(
+        top.domain_scores,
+        source="quant",
+        weighting_profile=weighting_profile,
         contract_symbol=top.contract_symbol,
-        confidence=round(top.score / 100, 4),
+    )
+    explanation = "; ".join(trade_quality.explainability[:3])
+    rationale = f"{top.contract_symbol} scored {trade_quality.composite_score:.1f}/100 ({explanation})."
+
+    recommendation = Recommendation(
+        action=trade_quality.recommendation_action,
+        contract_symbol=top.contract_symbol,
+        confidence=round(trade_quality.confidence / 100, 4),
         rationale=rationale,
     )
+    return recommendation, trade_quality

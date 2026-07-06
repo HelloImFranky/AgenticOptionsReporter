@@ -18,7 +18,10 @@ from agentic_options_reporter.data.macro import (
     MacroProviderError,
     build_macro_provider,
 )
-from agentic_options_reporter.data.market_data import MarketDataError
+from agentic_options_reporter.data.market_data import (
+    MarketDataError,
+    build_market_data_provider,
+)
 from agentic_options_reporter.data.news import (
     NewsProvider,
     NewsProviderError,
@@ -36,6 +39,7 @@ from agentic_options_reporter.models.schemas import (
     AnalysisRunSummary,
     CatalystFinding,
     CatalystItem,
+    DomainScore,
     FinancialResearchFinding,
     FundamentalsSnapshot,
     IndicatorSnapshot,
@@ -44,13 +48,17 @@ from agentic_options_reporter.models.schemas import (
     NewsResearchFinding,
     QuantInterpretation,
     Recommendation,
+    RelativeStrengthFinding,
     RiskAssessment,
     ScoredCandidate,
+    StatisticalEdgeFinding,
     StrategySuggestion,
     SupportResistanceLevel,
     ThesisGenerationRequest,
+    TradeQualityScore,
     TrendAssessment,
     VolumeAssessment,
+    WeightingProfileId,
 )
 from agentic_options_reporter.persistence import (
     delete_thesis,
@@ -93,6 +101,11 @@ def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
         if run.fundamentals is not None
         else None
     )
+    trade_quality = (
+        TradeQualityScore.model_validate(run.trade_quality_score, from_attributes=True)
+        if run.trade_quality_score is not None
+        else None
+    )
     return AnalysisResult(
         symbol=run.symbol,
         run_id=run.id,
@@ -103,6 +116,8 @@ def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
         support_resistance=levels,
         candidates=candidates,
         recommendation=recommendation,
+        trade_quality=trade_quality,
+        weighting_profile=run.weighting_profile,
         fundamentals=fundamentals,
         data_warnings=run.data_warnings or [],
     )
@@ -117,6 +132,7 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
             cash_flow=row.financial_cash_flow,
             analyst_consensus=row.financial_analyst_consensus or "",
             narrative=row.financial_narrative or "",
+            domain_score=DomainScore.model_validate(row.fundamental_domain_score),
         )
         if row.financial_company_health is not None
         else None
@@ -127,13 +143,17 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
             summary=row.news_summary or "",
             catalysts=row.news_catalysts or [],
             risks=row.news_risks or [],
+            domain_score=DomainScore.model_validate(row.sentiment_domain_score),
         )
         if row.news_sentiment is not None
         else None
     )
     macro = (
         MacroResearchFinding(
-            regime=row.macro_regime, outlook=row.macro_outlook or "", summary=row.macro_summary or ""
+            regime=row.macro_regime,
+            outlook=row.macro_outlook or "",
+            summary=row.macro_summary or "",
+            domain_score=DomainScore.model_validate(row.macro_domain_score),
         )
         if row.macro_regime is not None
         else None
@@ -147,17 +167,38 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
         if row.catalyst_net_bias is not None
         else None
     )
+    relative_strength = (
+        RelativeStrengthFinding(
+            narrative=row.relative_strength_narrative or "",
+            domain_score=DomainScore.model_validate(row.relative_strength_domain_score),
+        )
+        if row.relative_strength_narrative is not None
+        else None
+    )
+    statistical_edge = (
+        StatisticalEdgeFinding(
+            narrative=row.statistical_edge_narrative or "",
+            domain_score=DomainScore.model_validate(row.statistical_edge_domain_score),
+        )
+        if row.statistical_edge_narrative is not None
+        else None
+    )
     risk = (
         RiskAssessment(
             risk_level=row.risk_level,
             concerns=row.risk_concerns or [],
             position_sizing_note=row.risk_position_sizing_note or "",
+            domain_score=DomainScore.model_validate(row.risk_domain_score),
         )
         if row.risk_level is not None
         else None
     )
     strategy = (
-        StrategySuggestion(strategy=row.strategy, rationale=row.strategy_rationale or "")
+        StrategySuggestion(
+            strategy=row.strategy,
+            rationale=row.strategy_rationale or "",
+            domain_score=DomainScore.model_validate(row.liquidity_domain_score),
+        )
         if row.strategy is not None
         else None
     )
@@ -167,16 +208,23 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
         quant_interpretation=QuantInterpretation(
             narrative=row.quant_narrative,
             key_factors=row.quant_key_factors,
-            score_breakdown=row.quant_score_breakdown,
-            overall_score=row.quant_overall_score,
+            quant_trade_quality=TradeQualityScore.model_validate(row.quant_trade_quality),
+            technical_domain_score=DomainScore.model_validate(row.technical_domain_score),
         ),
         financial_research=financial,
         news_research=news,
         macro_research=macro,
         catalyst_research=catalyst,
+        relative_strength_research=relative_strength,
+        statistical_edge_research=statistical_edge,
         risk_assessment=risk,
         strategy_suggestion=strategy,
         investment_thesis=InvestmentThesis(thesis=row.thesis, consensus=row.consensus),
+        agent_trade_quality=(
+            TradeQualityScore.model_validate(row.agent_trade_quality)
+            if row.agent_trade_quality is not None
+            else None
+        ),
         pipeline_warnings=row.pipeline_warnings or [],
     )
 
@@ -217,13 +265,19 @@ def health() -> dict[str, str]:
 
 
 @app.get("/analyze/{symbol}", response_model=AnalysisResult)
-def analyze(symbol: str, lookback_days: int = 365, expiration: str | None = None) -> AnalysisResult:
+def analyze(
+    symbol: str,
+    lookback_days: int = 365,
+    expiration: str | None = None,
+    weighting_profile: WeightingProfileId = "swing",
+) -> AnalysisResult:
     try:
         return run_analysis(
             symbol=symbol,
             lookback_days=lookback_days,
             expiration=expiration,
             session_factory=_session_factory,
+            weighting_profile=weighting_profile,
         )
     except MarketDataError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -309,6 +363,7 @@ def generate_thesis(
         thesis_result = run_thesis_pipeline(
             analysis_result,
             _build_thesis_llm_client(request),
+            market_data_provider=build_market_data_provider(),
             financial_provider=_optional_financial_provider(),
             news_provider=_optional_news_provider(),
             macro_provider=_optional_macro_provider(),
@@ -352,6 +407,7 @@ def generate_thesis_stream(
         llm_client = _build_thesis_llm_client(request)
     except LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    market_data_provider = build_market_data_provider()
     financial_provider = _optional_financial_provider()
     news_provider = _optional_news_provider()
     macro_provider = _optional_macro_provider()
@@ -361,6 +417,7 @@ def generate_thesis_stream(
         return run_thesis_pipeline(
             analysis_result,
             llm_client,
+            market_data_provider=market_data_provider,
             financial_provider=financial_provider,
             news_provider=news_provider,
             macro_provider=macro_provider,

@@ -8,6 +8,7 @@ from agentic_options_reporter.models.schemas import (
     CatalystFinding,
     CatalystItem,
     CompanyProfile,
+    DomainScore,
     FinancialRatios,
     FinancialStatementSummary,
     IndicatorSnapshot,
@@ -35,6 +36,15 @@ from agentic_options_reporter.thesis.parsing import ThesisGenerationError
 
 from conftest import FakeLlmClient
 
+_DOMAIN_SCORE_FIELD = {"score": 72.0, "confidence": 85.0, "evidence": ["own read"]}
+
+
+def _domain_score(domain: str, score: float = 80.0, confidence: float = 90.0) -> DomainScore:
+    return DomainScore(
+        domain=domain, score=score, confidence=confidence, evidence=[], factors=[],
+        source="quant", generated_at=datetime(2026, 1, 1),
+    )
+
 
 def _indicators() -> IndicatorSnapshot:
     return IndicatorSnapshot(
@@ -54,12 +64,23 @@ def _volume() -> VolumeAssessment:
 
 
 def _candidate() -> ScoredCandidate:
+    from agentic_options_reporter.analysis.composite_score import compute_composite_score
+
+    domain_scores = {
+        "technical": _domain_score("technical", 91.0),
+        "risk": _domain_score("risk", 70.0),
+        "liquidity": _domain_score("liquidity", 74.0),
+    }
+    score = compute_composite_score(
+        domain_scores, source="quant", contract_symbol="TESTC00100000"
+    ).composite_score
     return ScoredCandidate(
         contract_symbol="TESTC00100000", option_type="call", strike=100.0, expiration=date(2026, 1, 16),
         delta=0.55, gamma=0.02, theta=-0.05, vega=0.1, rho=0.02,
+        open_interest=800, spread_pct=0.05, volume=100,
         max_loss=250.0, max_gain=None, breakeven=102.5, reward_risk_ratio=None,
-        probability_of_profit=0.6, score=78.5,
-        score_breakdown={"trend_alignment": 1.0, "liquidity": 0.8},
+        probability_of_profit=0.6, score=score,
+        domain_scores=domain_scores,
     )
 
 
@@ -71,27 +92,11 @@ def _recommendation() -> Recommendation:
     return Recommendation(action="BUY", contract_symbol="TESTC00100000", confidence=0.78, rationale="top pick")
 
 
-def test_quant_interpreter_passes_through_scores_not_llm_authored():
-    llm = FakeLlmClient(
-        {"quantitative markets analyst": json.dumps({"narrative": "Strong.", "key_factors": ["trend"]})}
-    )
-    candidate = _candidate()
-
-    result = quant_interpreter.run(llm, _indicators(), _trend(), _volume(), candidate)
-
-    assert result.narrative == "Strong."
-    assert result.key_factors == ["trend"]
-    # These must come from the candidate, never from the LLM response.
-    assert result.score_breakdown == candidate.score_breakdown
-    assert result.overall_score == candidate.score
-
-
-def test_quant_interpreter_ignores_llm_attempt_to_smuggle_scores():
-    """Even if the model tries to include score fields, they must be ignored."""
+def test_quant_interpreter_passes_through_composite_not_llm_authored():
     llm = FakeLlmClient(
         {
             "quantitative markets analyst": json.dumps(
-                {"narrative": "Strong.", "key_factors": ["trend"], "overall_score": 999.0}
+                {"narrative": "Strong.", "key_factors": ["trend"], "domain_score": _DOMAIN_SCORE_FIELD}
             )
         }
     )
@@ -99,8 +104,40 @@ def test_quant_interpreter_ignores_llm_attempt_to_smuggle_scores():
 
     result = quant_interpreter.run(llm, _indicators(), _trend(), _volume(), candidate)
 
-    assert result.overall_score == candidate.score
-    assert result.overall_score != 999.0
+    assert result.narrative == "Strong."
+    assert result.key_factors == ["trend"]
+    # The composite must come from the candidate's own domain_scores, never
+    # invented by the LLM response.
+    assert result.quant_trade_quality.contract_symbol == candidate.contract_symbol
+    assert result.quant_trade_quality.composite_score == candidate.score
+    assert result.quant_trade_quality.source == "quant"
+    # technical_domain_score IS the agent's own independent judgment.
+    assert result.technical_domain_score.score == 72.0
+    assert result.technical_domain_score.domain == "technical"
+    assert result.technical_domain_score.source == "agent"
+
+
+def test_quant_interpreter_ignores_llm_attempt_to_smuggle_composite_score():
+    """Even if the model tries to include a composite-looking field, it must
+    be ignored — only the domain_score sub-object is agent-authored."""
+    llm = FakeLlmClient(
+        {
+            "quantitative markets analyst": json.dumps(
+                {
+                    "narrative": "Strong.",
+                    "key_factors": ["trend"],
+                    "quant_trade_quality": {"composite_score": 999.0},
+                    "domain_score": _DOMAIN_SCORE_FIELD,
+                }
+            )
+        }
+    )
+    candidate = _candidate()
+
+    result = quant_interpreter.run(llm, _indicators(), _trend(), _volume(), candidate)
+
+    assert result.quant_trade_quality.composite_score == candidate.score
+    assert result.quant_trade_quality.composite_score != 999.0
 
 
 def test_quant_interpreter_raises_on_malformed_response():
@@ -113,20 +150,28 @@ def test_risk_challenger_parses_response():
     llm = FakeLlmClient(
         {
             "skeptical risk manager": json.dumps(
-                {"risk_level": "medium", "concerns": ["high IV"], "position_sizing_note": "Size at 2%."}
+                {
+                    "risk_level": "medium", "concerns": ["high IV"], "position_sizing_note": "Size at 2%.",
+                    "domain_score": _DOMAIN_SCORE_FIELD,
+                }
             )
         }
     )
     result = risk_challenger.run(llm, _candidate(), _trend(), _levels())
     assert result.risk_level == "medium"
     assert result.concerns == ["high IV"]
+    assert result.domain_score.domain == "risk"
+    assert result.domain_score.source == "agent"
 
 
 def test_risk_challenger_coerces_invalid_risk_level_to_medium():
     llm = FakeLlmClient(
         {
             "skeptical risk manager": json.dumps(
-                {"risk_level": "extreme", "concerns": [], "position_sizing_note": ""}
+                {
+                    "risk_level": "extreme", "concerns": [], "position_sizing_note": "",
+                    "domain_score": _DOMAIN_SCORE_FIELD,
+                }
             )
         }
     )
@@ -136,11 +181,35 @@ def test_risk_challenger_coerces_invalid_risk_level_to_medium():
 
 def test_options_strategy_parses_response():
     llm = FakeLlmClient(
-        {"options strategist": json.dumps({"strategy": "Bull Call Spread", "rationale": "Defined risk."})}
+        {
+            "options strategist": json.dumps(
+                {"strategy": "Bull Call Spread", "rationale": "Defined risk.", "domain_score": _DOMAIN_SCORE_FIELD}
+            )
+        }
     )
-    risk = RiskAssessment(risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.")
+    risk = RiskAssessment(
+        risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.",
+        domain_score=_domain_score("risk"),
+    )
     result = options_strategy.run(llm, _trend(), _candidate(), risk)
     assert result.strategy == "Bull Call Spread"
+    assert result.domain_score.domain == "liquidity"
+
+
+def _quant_interpretation(score: float = 78.5):
+    from agentic_options_reporter.analysis.composite_score import compute_composite_score
+    from agentic_options_reporter.models.schemas import QuantInterpretation
+
+    domain_scores = {"technical": _domain_score("technical", score)}
+    return QuantInterpretation(
+        narrative="Strong.",
+        key_factors=["trend"],
+        quant_trade_quality=compute_composite_score(domain_scores, source="quant", contract_symbol="TESTC00100000"),
+        technical_domain_score=DomainScore(
+            domain="technical", score=score, confidence=85.0, evidence=[], factors=[],
+            source="agent", generated_at=datetime(2026, 1, 1),
+        ),
+    )
 
 
 def test_investment_thesis_with_risk_and_strategy():
@@ -151,13 +220,16 @@ def test_investment_thesis_with_risk_and_strategy():
             )
         }
     )
-    from agentic_options_reporter.models.schemas import QuantInterpretation, StrategySuggestion
+    from agentic_options_reporter.models.schemas import StrategySuggestion
 
-    quant = QuantInterpretation(
-        narrative="Strong.", key_factors=["trend"], score_breakdown={"x": 1.0}, overall_score=78.5
+    quant = _quant_interpretation()
+    risk = RiskAssessment(
+        risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.",
+        domain_score=_domain_score("risk"),
     )
-    risk = RiskAssessment(risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.")
-    strategy = StrategySuggestion(strategy="Bull Call Spread", rationale="Defined risk.")
+    strategy = StrategySuggestion(
+        strategy="Bull Call Spread", rationale="Defined risk.", domain_score=_domain_score("liquidity")
+    )
 
     result = investment_thesis.run(
         llm, quant, None, None, None, None, risk, strategy, _recommendation(), _trend(), _volume()
@@ -171,26 +243,32 @@ def test_investment_thesis_synthesizes_all_research_findings():
         FinancialResearchFinding,
         MacroResearchFinding,
         NewsResearchFinding,
-        QuantInterpretation,
         StrategySuggestion,
     )
 
     llm = FakeLlmClient(
         {"portfolio manager": json.dumps({"thesis": "Bullish across the board.", "consensus": "bullish"})}
     )
-    quant = QuantInterpretation(
-        narrative="Strong.", key_factors=["trend"], score_breakdown={"x": 1.0}, overall_score=78.5
-    )
+    quant = _quant_interpretation()
     financial = FinancialResearchFinding(
         company_health="strong", growth="accelerating", profitability="high",
         cash_flow="positive", analyst_consensus="Buy", narrative="Fundamentals solid.",
+        domain_score=_domain_score("fundamental"),
     )
     news = NewsResearchFinding(
-        sentiment="bullish", summary="Positive coverage.", catalysts=["earnings beat"], risks=[]
+        sentiment="bullish", summary="Positive coverage.", catalysts=["earnings beat"], risks=[],
+        domain_score=_domain_score("sentiment"),
     )
-    macro = MacroResearchFinding(regime="risk_on", outlook="Favorable.", summary="Rates steady.")
-    risk = RiskAssessment(risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.")
-    strategy = StrategySuggestion(strategy="Bull Call Spread", rationale="Defined risk.")
+    macro = MacroResearchFinding(
+        regime="risk_on", outlook="Favorable.", summary="Rates steady.", domain_score=_domain_score("macro")
+    )
+    risk = RiskAssessment(
+        risk_level="medium", concerns=["high IV"], position_sizing_note="Size at 2%.",
+        domain_score=_domain_score("risk"),
+    )
+    strategy = StrategySuggestion(
+        strategy="Bull Call Spread", rationale="Defined risk.", domain_score=_domain_score("liquidity")
+    )
 
     catalyst = CatalystFinding(
         net_bias="bullish",
@@ -223,9 +301,18 @@ def test_investment_thesis_handles_missing_risk_and_strategy():
     llm = FakeLlmClient(
         {"portfolio manager": json.dumps({"thesis": "No position recommended.", "consensus": "neutral"})}
     )
+    from agentic_options_reporter.analysis.composite_score import compute_composite_score
     from agentic_options_reporter.models.schemas import QuantInterpretation
 
-    quant = QuantInterpretation(narrative="no candidates", key_factors=[], score_breakdown={}, overall_score=0.0)
+    quant = QuantInterpretation(
+        narrative="no candidates",
+        key_factors=[],
+        quant_trade_quality=compute_composite_score({}, source="quant", contract_symbol=None),
+        technical_domain_score=DomainScore(
+            domain="technical", score=0.0, confidence=0.0, evidence=[], factors=[],
+            source="agent", generated_at=datetime(2026, 1, 1),
+        ),
+    )
     recommendation = Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="no candidates")
 
     result = investment_thesis.run(
@@ -272,6 +359,7 @@ def test_financial_research_passes_through_analyst_consensus_not_llm_authored():
                     "profitability": "high",
                     "cash_flow": "positive",
                     "narrative": "Fundamentals look solid.",
+                    "domain_score": _DOMAIN_SCORE_FIELD,
                 }
             )
         }
@@ -280,6 +368,7 @@ def test_financial_research_passes_through_analyst_consensus_not_llm_authored():
     assert result.analyst_consensus == "Buy"
     assert result.company_health == "strong"
     assert result.narrative == "Fundamentals look solid."
+    assert result.domain_score.domain == "fundamental"
 
 
 def test_financial_research_ignores_llm_attempt_to_smuggle_consensus():
@@ -293,6 +382,7 @@ def test_financial_research_ignores_llm_attempt_to_smuggle_consensus():
                     "cash_flow": "positive",
                     "narrative": "Fundamentals look solid.",
                     "analyst_consensus": "Strong Sell",
+                    "domain_score": _DOMAIN_SCORE_FIELD,
                 }
             )
         }
@@ -312,6 +402,7 @@ def test_financial_research_coerces_invalid_health_to_stable():
                     "profitability": "high",
                     "cash_flow": "positive",
                     "narrative": "x",
+                    "domain_score": _DOMAIN_SCORE_FIELD,
                 }
             )
         }
@@ -339,6 +430,7 @@ def test_news_research_parses_response():
                     "summary": "Positive earnings momentum.",
                     "catalysts": ["earnings beat"],
                     "risks": ["supply chain"],
+                    "domain_score": _DOMAIN_SCORE_FIELD,
                 }
             )
         }
@@ -347,13 +439,17 @@ def test_news_research_parses_response():
     assert result.sentiment == "bullish"
     assert result.catalysts == ["earnings beat"]
     assert result.risks == ["supply chain"]
+    assert result.domain_score.domain == "sentiment"
 
 
 def test_news_research_handles_no_articles():
     llm = FakeLlmClient(
         {
             "news research analyst": json.dumps(
-                {"sentiment": "neutral", "summary": "No notable news.", "catalysts": [], "risks": []}
+                {
+                    "sentiment": "neutral", "summary": "No notable news.", "catalysts": [], "risks": [],
+                    "domain_score": _DOMAIN_SCORE_FIELD,
+                }
             )
         }
     )
@@ -366,7 +462,7 @@ def test_news_research_coerces_invalid_sentiment_to_neutral():
     llm = FakeLlmClient(
         {
             "news research analyst": json.dumps(
-                {"sentiment": "euphoric", "summary": "x", "catalysts": [], "risks": []}
+                {"sentiment": "euphoric", "summary": "x", "catalysts": [], "risks": [], "domain_score": _DOMAIN_SCORE_FIELD}
             )
         }
     )
@@ -399,6 +495,7 @@ def test_macro_research_parses_response():
                     "regime": "risk_on",
                     "outlook": "Conditions favor risk assets near-term.",
                     "summary": "Rates steady, inflation cooling, growth resilient.",
+                    "domain_score": _DOMAIN_SCORE_FIELD,
                 }
             )
         }
@@ -406,13 +503,14 @@ def test_macro_research_parses_response():
     result = macro_research.run(llm, _observations())
     assert result.regime == "risk_on"
     assert "risk assets" in result.outlook.lower()
+    assert result.domain_score.domain == "macro"
 
 
 def test_macro_research_coerces_invalid_regime_to_neutral():
     llm = FakeLlmClient(
         {
             "macroeconomic analyst": json.dumps(
-                {"regime": "goldilocks", "outlook": "x", "summary": "x"}
+                {"regime": "goldilocks", "outlook": "x", "summary": "x", "domain_score": _DOMAIN_SCORE_FIELD}
             )
         }
     )

@@ -130,7 +130,7 @@ def test_main_analyze_uses_base_url_and_symbol(monkeypatch, capsys):
 
     assert exit_code == 0
     assert captured["url"] == "http://example.com/analyze/AAPL"
-    assert captured["params"] == {"lookback_days": 365}
+    assert captured["params"] == {"lookback_days": 365, "weighting_profile": "swing"}
 
 
 def test_main_thesis_generates_by_default(monkeypatch):

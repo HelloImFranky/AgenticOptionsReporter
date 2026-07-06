@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 
+from agentic_options_reporter.analysis.composite_score import compute_composite_score
 from agentic_options_reporter.models.schemas import (
     AgentEvent,
     AgentThesisResult,
+    DomainScore,
     InvestmentThesis,
     QuantInterpretation,
 )
@@ -20,7 +22,13 @@ def _result() -> AgentThesisResult:
         run_id=1,
         generated_at=datetime.now(timezone.utc),
         quant_interpretation=QuantInterpretation(
-            narrative="x", key_factors=[], score_breakdown={}, overall_score=0.0
+            narrative="x",
+            key_factors=[],
+            quant_trade_quality=compute_composite_score({}, source="quant", contract_symbol=None),
+            technical_domain_score=DomainScore(
+                domain="technical", score=0.0, confidence=0.0, evidence=[], factors=[],
+                source="agent", generated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            ),
         ),
         risk_assessment=None,
         strategy_suggestion=None,

@@ -17,6 +17,45 @@ TrendDirection = Literal["bullish", "bearish", "neutral"]
 TrendStrength = Literal["weak", "moderate", "strong"]
 RecommendationAction = Literal["STRONG_BUY", "BUY", "HOLD", "AVOID"]
 
+# ---------------------------------------------------------------------------
+# Trade Quality Score (specs/scoring.yaml). Computed twice from the same
+# taxonomy/composite engine: once deterministically ("quant", during
+# /analyze) and once by the LLM agent pipeline ("agent", Agents tab).
+# ---------------------------------------------------------------------------
+
+DomainId = Literal[
+    "technical",
+    "risk",
+    "liquidity",
+    "fundamental",
+    "macro",
+    "sentiment",
+    "relative_strength",
+    "statistical_edge",
+]
+ScoreSource = Literal["quant", "agent"]
+WeightingProfileId = Literal["day_trade", "swing", "long_term"]
+
+
+def _clamp_0_100(value: Any) -> Any:
+    """Defensive coercion for an LLM-authored 0-100 field. Extends the
+    llm_output_resilience pattern (specs/agents.yaml _lenient_enum) to
+    numbers: strips a trailing '%', treats a value in (0, 1] as an
+    accidentally-fractional 0-1 score, then clamps to [0, 100]. A no-op for
+    quant-authored values, which are already well-formed."""
+    if isinstance(value, str):
+        value = value.strip().rstrip("%")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if 0.0 < number <= 1.0:
+        number *= 100
+    return max(0.0, min(100.0, number))
+
+
+Score0to100 = Annotated[float, BeforeValidator(_clamp_0_100)]
+
 
 class Bar(BaseModel):
     """A single OHLCV bar."""
@@ -145,6 +184,55 @@ class RiskProfile(BaseModel):
     probability_of_profit: float
 
 
+class DomainFactor(BaseModel):
+    """One named sub-factor inside a domain score, for drill-down
+    explainability. Quant scorers always populate this (analysis/
+    domain_scoring.py); agent scorers may leave it empty — an LLM isn't
+    asked to invent a sub-factor weight table, only the domain-level
+    score/confidence/evidence."""
+
+    name: str
+    value: float  # 0-1
+    weight: float  # 0-1, within-domain weight
+    detail: str = ""
+
+
+class DomainScore(BaseModel):
+    """One domain's contribution to a Trade Quality Score (specs/
+    scoring.yaml). `source` records whether this came from the
+    deterministic quant engine or an LLM agent's independent judgment;
+    the composite engine (analysis/composite_score.py) treats both
+    identically."""
+
+    domain: DomainId
+    score: Score0to100
+    confidence: Score0to100
+    evidence: list[str] = Field(default_factory=list)
+    factors: list[DomainFactor] = Field(default_factory=list)
+    source: ScoreSource
+    generated_at: datetime
+
+
+class TradeQualityScore(BaseModel):
+    """The composite engine's output: a weighted blend of whichever
+    DomainScores are present, coverage-discounted for confidence (see
+    analysis/composite_score.py). Produced twice per run — once with
+    source="quant" (during /analyze) and once with source="agent" (Agents
+    tab) — from the same weighting profile, so the two are comparable."""
+
+    contract_symbol: str | None
+    domain_scores: dict[str, DomainScore]
+    composite_score: float
+    confidence: float
+    recommendation_action: RecommendationAction
+    weighting_profile: WeightingProfileId
+    source: ScoreSource
+    generated_at: datetime
+    # Deterministic "led by X, held back by Y" bullets ranking the present
+    # domains — part of the persisted, API-visible record, not just UI text.
+    explainability: list[str] = Field(default_factory=list)
+
+
 class ScoredCandidate(BaseModel):
     contract_symbol: str
     option_type: OptionType
@@ -155,13 +243,16 @@ class ScoredCandidate(BaseModel):
     theta: float
     vega: float
     rho: float
+    open_interest: int = 0
+    spread_pct: float = 0.0
+    volume: int = 0
     max_loss: float
     max_gain: float | None
     breakeven: float
     reward_risk_ratio: float | None
     probability_of_profit: float
     score: float
-    score_breakdown: dict[str, float] = Field(default_factory=dict)
+    domain_scores: dict[str, DomainScore] = Field(default_factory=dict)
 
 
 class Recommendation(BaseModel):
@@ -181,6 +272,10 @@ class AnalysisResult(BaseModel):
     support_resistance: list[SupportResistanceLevel]
     candidates: list[ScoredCandidate]
     recommendation: Recommendation
+    # The quant-side Trade Quality Score for the recommended candidate; None
+    # on AVOID / no liquid candidates, mirroring recommendation.contract_symbol.
+    trade_quality: TradeQualityScore | None = None
+    weighting_profile: WeightingProfileId = "swing"
     # Cross-provider fundamentals gathered alongside the technicals (merged
     # across every configured source) and persisted with the run, so a run
     # reloaded via /runs/{id} carries the same snapshot. None on runs where
@@ -197,6 +292,19 @@ class AnalysisRunSummary(BaseModel):
     generated_at: datetime
     recommendation_action: str
     recommendation_confidence: float
+
+
+class PastRunOutcome(BaseModel):
+    """One past AnalysisRun's recommendation, read back for the Statistical
+    Edge domain scorer's historical hit-rate lookback (persistence.py
+    fetch_recent_runs_for_symbol / analysis/statistical_edge.py). Derived
+    fresh from existing rows each time; never persisted itself."""
+
+    run_id: int
+    generated_at: datetime
+    action: RecommendationAction
+    option_type: OptionType | None
+    contract_symbol: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -366,11 +474,13 @@ class SecFiling(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Investment-thesis agent pipeline (specs/agents.yaml). These are the only
-# models an LLM ever authors fields of; score_breakdown/overall_score on
-# QuantInterpretation are pass-throughs from the already-computed
-# ScoredCandidate, never LLM-derived. analyst_consensus on
+# Investment-thesis agent pipeline (specs/agents.yaml). quant_trade_quality
+# on QuantInterpretation is a pass-through from the already-computed
+# ScoredCandidate.domain_scores, never LLM-derived; analyst_consensus on
 # FinancialResearchFinding is likewise a pass-through from AnalystEstimates.
+# Since phase 3, most other models here ALSO carry an LLM-authored
+# `domain_score: DomainScore` field (specs/scoring.yaml) — the agent's own
+# independent judgment for one Trade Quality Score domain.
 # ---------------------------------------------------------------------------
 
 # -- Lenient enums for LLM-authored fields ---------------------------------
@@ -446,8 +556,13 @@ CatalystDirection = Annotated[
 class QuantInterpretation(BaseModel):
     narrative: str
     key_factors: list[str]
-    score_breakdown: dict[str, float]
-    overall_score: float
+    # Pass-through of the quant engine's own composite score, verbatim —
+    # unchanged contract, see specs/agents.yaml.
+    quant_trade_quality: TradeQualityScore
+    # This agent's OWN, independently-authored Technical domain score — a
+    # judgment call over the same indicators, not a copy of any quant
+    # sub-factor (see specs/agents.yaml phase_3 scoring relaxation).
+    technical_domain_score: DomainScore
 
 
 class FinancialResearchFinding(BaseModel):
@@ -457,6 +572,7 @@ class FinancialResearchFinding(BaseModel):
     cash_flow: CashFlowState
     analyst_consensus: str
     narrative: str
+    domain_score: DomainScore  # Fundamental domain, this agent's own judgment
 
 
 class NewsResearchFinding(BaseModel):
@@ -464,12 +580,14 @@ class NewsResearchFinding(BaseModel):
     summary: str
     catalysts: list[str]
     risks: list[str]
+    domain_score: DomainScore  # Sentiment domain, this agent's own judgment
 
 
 class MacroResearchFinding(BaseModel):
     regime: MacroRegime
     outlook: str
     summary: str
+    domain_score: DomainScore  # Macro domain, this agent's own judgment
 
 
 class CatalystItem(BaseModel):
@@ -522,11 +640,35 @@ class RiskAssessment(BaseModel):
     risk_level: RiskLevel
     concerns: list[str]
     position_sizing_note: str
+    domain_score: DomainScore  # Risk domain, this agent's own judgment
 
 
 class StrategySuggestion(BaseModel):
     strategy: str
     rationale: str
+    domain_score: DomainScore  # Liquidity domain, this agent's own judgment
+
+
+class RelativeStrengthFinding(BaseModel):
+    """New in phase 3 (specs/agents.yaml): the agent-side counterpart to
+    the quant Relative Strength domain scorer (analysis/domain_scoring.py).
+    Reasons over the same symbol-vs-benchmark return facts, fetched by the
+    orchestrator via MarketDataProvider."""
+
+    narrative: str
+    domain_score: DomainScore
+
+
+class StatisticalEdgeFinding(BaseModel):
+    """New in phase 3: the agent-side counterpart to the quant Statistical
+    Edge domain scorer (analysis/statistical_edge.py). Reasons over the
+    quant-computed win-rate/expectancy/Monte-Carlo numbers plus qualitative
+    pattern context — the one place an agent's prompt includes a quant
+    DomainScore as input, mirroring quant_interpreter's existing precedent
+    of receiving quant numbers as context."""
+
+    narrative: str
+    domain_score: DomainScore
 
 
 class InvestmentThesis(BaseModel):
@@ -542,9 +684,16 @@ class AgentThesisResult(BaseModel):
     news_research: NewsResearchFinding | None = None
     macro_research: MacroResearchFinding | None = None
     catalyst_research: CatalystFinding | None = None
+    relative_strength_research: RelativeStrengthFinding | None = None
+    statistical_edge_research: StatisticalEdgeFinding | None = None
     risk_assessment: RiskAssessment | None
     strategy_suggestion: StrategySuggestion | None
     investment_thesis: InvestmentThesis
+    # The agent-side Trade Quality Score: the same composite engine used by
+    # the quant path (analysis/composite_score.py), fed whichever agent
+    # DomainScores this run produced. None only if literally none did
+    # (e.g. every research provider unconfigured and no_candidate_short_circuit).
+    agent_trade_quality: TradeQualityScore | None = None
     # Non-fatal problems hit mid-pipeline (e.g. a configured research
     # provider rate-limited during the run). Each entry is prefixed with
     # the agent it affected, e.g. "news_research: ...". The affected
