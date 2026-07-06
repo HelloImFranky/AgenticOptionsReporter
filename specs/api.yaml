@@ -157,6 +157,10 @@ models:
     price_to_sales: float | null
     beta: float | null
     dividend_yield: float | null      # fraction, e.g. 0.012 for 1.2%
+    week1_high: float | null          # DERIVED from price history (~5 trading days); no provider serves it
+    week1_low: float | null
+    month1_high: float | null         # DERIVED from price history (~21 trading days)
+    month1_low: float | null
     week52_high: float | null
     week52_low: float | null
     gross_margin: float | null        # fraction

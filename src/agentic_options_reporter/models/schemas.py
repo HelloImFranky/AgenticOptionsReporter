@@ -253,9 +253,15 @@ class AnalystEstimates(BaseModel):
 
 
 class CompanyMetrics(BaseModel):
-    """Current valuation and quality key-stats snapshot for a ticker —
-    provider facts (Finnhub /stock/metric, yfinance .info), never computed
-    here. Every field is optional so a partial provider still contributes."""
+    """Current valuation and quality key-stats snapshot for a ticker.
+
+    Most fields are provider facts (Finnhub /stock/metric, yfinance .info).
+    The 1-week/1-month high/low are the exception — no provider exposes
+    them, so /analyze DERIVES them from the daily price history it already
+    fetches (see workflow._price_range_metrics); they stay null when no
+    price history is available (e.g. metrics built inside the thesis
+    pipeline). Every field is optional so a partial provider still
+    contributes."""
 
     ticker: str
     market_cap: float | None = None
@@ -266,6 +272,10 @@ class CompanyMetrics(BaseModel):
     price_to_sales: float | None = None
     beta: float | None = None
     dividend_yield: float | None = None      # as a fraction, e.g. 0.012 for 1.2%
+    week1_high: float | None = None          # derived from price history (~5 trading days)
+    week1_low: float | None = None
+    month1_high: float | None = None         # derived from price history (~21 trading days)
+    month1_low: float | None = None
     week52_high: float | None = None
     week52_low: float | None = None
     gross_margin: float | None = None        # fraction

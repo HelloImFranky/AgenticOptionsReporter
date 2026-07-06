@@ -18,9 +18,25 @@ from agentic_options_reporter.frontend.report_pdf import (
 
 
 def _paragraph_texts(flowables) -> str:
-    """Concatenate the raw text of every Paragraph in a flowable list, for
-    asserting on what the block renders."""
-    return " ".join(f.getPlainText() for f in flowables if isinstance(f, Paragraph))
+    """Concatenate the raw text of every Paragraph in a flowable list —
+    recursing into Table cells — for asserting on what the block renders."""
+    from reportlab.platypus import Table
+
+    parts: list[str] = []
+
+    def walk(item) -> None:
+        if isinstance(item, Paragraph):
+            parts.append(item.getPlainText())
+        elif isinstance(item, Table):
+            for row in item._cellvalues:
+                for cell in row:
+                    walk(cell)
+        elif isinstance(item, (list, tuple)):
+            for sub in item:
+                walk(sub)
+
+    walk(list(flowables))
+    return " ".join(parts)
 
 _FULL_REPORT = {
     "symbol": "AAPL",

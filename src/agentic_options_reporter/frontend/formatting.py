@@ -296,6 +296,10 @@ def fundamentals_metric_facts(metrics: dict[str, Any] | None) -> list[tuple[str,
         ("Op. margin", format_pct(metrics.get("operating_margin"))),
         ("Profit margin", format_pct(metrics.get("profit_margin"))),
         ("Rev. growth", format_pct(metrics.get("revenue_growth"))),
+        ("1w high", format_num(metrics.get("week1_high"))),
+        ("1w low", format_num(metrics.get("week1_low"))),
+        ("1m high", format_num(metrics.get("month1_high"))),
+        ("1m low", format_num(metrics.get("month1_low"))),
         ("52w high", format_num(metrics.get("week52_high"))),
         ("52w low", format_num(metrics.get("week52_low"))),
     ]
@@ -329,31 +333,51 @@ def earnings_surprise_facts(
     return facts
 
 
-def insider_activity_summary(
-    insider: dict[str, Any] | None, limit: int = 5
-) -> tuple[str, list[str]]:
-    """(header, entries) for insider activity. header describes net share
-    flow (buying/selling); entries are 'Name · sell 1,000' lines. Both
-    empty when there's nothing to show."""
+def insider_activity_header(insider: dict[str, Any] | None) -> str:
+    """The 'Insider activity — net buying/selling (N shares)' heading, or ''
+    when there's nothing to show."""
     if not insider:
-        return "", []
+        return ""
     transactions = insider.get("transactions") or []
     net = insider.get("net_shares")
     if not transactions and not isinstance(net, (int, float)):
-        return "", []
+        return ""
     header = "Insider activity"
     if isinstance(net, (int, float)) and net != 0:
         direction = "net buying" if net > 0 else "net selling"
         header += f" — {direction} ({abs(net):,.0f} shares)"
-    entries: list[str] = []
+    return header
+
+
+def insider_transaction_bars(
+    insider: dict[str, Any] | None, limit: int = 8
+) -> list[dict[str, Any]]:
+    """Recent insider transactions prepared for a bar chart: one dict per
+    transaction with `label`, `detail` ('sell 1,000'), `is_buy`, and `ratio`
+    (bar length 0..1, sized by |shares| relative to the largest shown). Sells
+    are is_buy=False (render red), buys True (green). Empty when no
+    transaction has a share count to size a bar."""
+    transactions = (insider or {}).get("transactions") or []
+    sized = []
     for t in transactions[:limit]:
-        label = t.get("name") or "Insider"
-        ttype = t.get("transaction_type") or "txn"
         shares = t.get("shares")
-        if isinstance(shares, (int, float)):
-            label += f" · {ttype} {abs(shares):,.0f}"
-        entries.append(label)
-    return header, entries
+        if not isinstance(shares, (int, float)) or shares == 0:
+            continue
+        ttype = t.get("transaction_type") or "txn"
+        sized.append(
+            {
+                "label": t.get("name") or "Insider",
+                "detail": f"{ttype} {abs(shares):,.0f}",
+                "is_buy": ttype != "sell",
+                "magnitude": abs(float(shares)),
+            }
+        )
+    if not sized:
+        return []
+    largest = max(item["magnitude"] for item in sized)
+    for item in sized:
+        item["ratio"] = item["magnitude"] / largest if largest else 0.0
+    return sized
 
 
 def format_trend_summary(trend: dict[str, Any]) -> str:
