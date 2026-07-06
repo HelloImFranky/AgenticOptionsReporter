@@ -32,6 +32,13 @@ def test_parse_response_invalid_json_raises():
         parse_response(_Simple, "{not valid json}", "agent")
 
 
+def test_parse_response_uses_first_complete_json_object_when_trailing_content_exists():
+    raw = '{"a": "hello", "b": 1}\n\nSome trailing text after the object.'
+    result = parse_response(_Simple, raw, "agent")
+    assert result.a == "hello"
+    assert result.b == 1
+
+
 def test_parse_response_schema_mismatch_raises():
     with pytest.raises(ThesisGenerationError):
         parse_response(_Simple, '{"a": "hello"}', "agent")
