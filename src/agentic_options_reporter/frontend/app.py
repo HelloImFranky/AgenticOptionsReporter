@@ -401,7 +401,6 @@ def _insider_timeseries_chart(series: list[dict]) -> ft.BarChart:
     return ft.BarChart(
         bar_groups=groups,
         bottom_axis=ft.ChartAxis(labels=labels, labels_size=30),
-        left_axis=ft.ChartAxis(labels_size=44),
         min_y=-max_mag * 1.15,
         max_y=max_mag * 1.15,
         # Recessive gridlines land one on the zero baseline (interval=max_mag).
@@ -409,8 +408,11 @@ def _insider_timeseries_chart(series: list[dict]) -> ft.BarChart:
             interval=max_mag, color=ft.Colors.OUTLINE_VARIANT, width=0.5
         ),
         interactive=True,
+        # A fixed height only — NO expand: this chart lives inside the
+        # scrolling results column, and an expanding child in an
+        # unbounded-height parent throws Flutter's "unbounded height" error,
+        # which blanks the whole result (recommendation/candidates included).
         height=180,
-        expand=True,
     )
 
 
@@ -822,11 +824,22 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         candidates_empty_state.visible = not rows
 
         # Cross-provider fundamentals (merged across every configured source).
+        # Supplementary — never let a problem building this card blank the
+        # core recommendation/candidates above it.
         fundamentals = result.get("fundamentals")
-        fundamentals_body.controls = _fundamentals_controls(
-            fundamentals, result.get("data_warnings")
-        )
-        fundamentals_card.visible = bool(fundamentals)
+        try:
+            fundamentals_body.controls = _fundamentals_controls(
+                fundamentals, result.get("data_warnings")
+            )
+            fundamentals_card.visible = bool(fundamentals)
+        except Exception:  # noqa: BLE001 — the analysis result must still render
+            fundamentals_body.controls = [
+                ft.Text(
+                    "Fundamentals could not be displayed for this run.",
+                    size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT,
+                )
+            ]
+            fundamentals_card.visible = bool(fundamentals)
 
     analyze_button.on_click = run_analysis
 
