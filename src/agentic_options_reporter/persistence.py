@@ -5,13 +5,36 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ALEMBIC_DIR = _PROJECT_ROOT / "alembic"
+
+
+def _add_missing_columns(engine) -> None:
+    """Reconcile any column an ORM model declares but the live table lacks.
+
+    Every add-column migration to date is a plain nullable column (see
+    alembic/versions/*), so a bare ALTER TABLE ADD COLUMN reproduces exactly
+    what upgrade() would have run — this exists only for the recovery path
+    below, where upgrade() aborted before it could apply them."""
+    inspector = inspect(engine)
+    missing = [
+        (table.name, column)
+        for table in Base.metadata.sorted_tables
+        if inspector.has_table(table.name)
+        for column in table.columns
+        if column.name not in {col["name"] for col in inspector.get_columns(table.name)}
+    ]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for table_name, column in missing:
+            ddl_type = column.type.compile(dialect=engine.dialect)
+            conn.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {ddl_type}'))
 
 
 def run_migrations(database_url: str) -> None:
@@ -30,13 +53,24 @@ def run_migrations(database_url: str) -> None:
         if database_url.startswith("sqlite") and (
             "already exists" in message or "table" in message and "exists" in message
         ):
-            # Under uvicorn --reload, multiple worker processes can race to apply
-            # the same initial migration. If that happens, repair any missing
-            # tables from the current ORM model and then stamp the revision so
-            # subsequent starts use the same schema state.
+            # Two different situations raise the same "table already
+            # exists" error here: (a) under uvicorn --reload, multiple
+            # worker processes racing to apply the same initial migration
+            # against an already-current database, and (b) a database
+            # created before Alembic tracking existed (or before a later
+            # add-column migration was written), where upgrade() aborts on
+            # the very first migration and every add-column migration after
+            # it — fundamentals/data_warnings, catalyst_research,
+            # pipeline_warnings — never runs. create_all() alone only
+            # handles (a): it fills in wholly-missing tables but can't add a
+            # missing column to a table that already exists, so before
+            # stamping the revision (which marks all of that as "already
+            # applied", whether or not it actually was) reconcile any
+            # columns the ORM model has that the live table doesn't.
             engine = create_engine(database_url, connect_args={"check_same_thread": False})
             try:
                 Base.metadata.create_all(engine)
+                _add_missing_columns(engine)
             finally:
                 engine.dispose()
             command.stamp(cfg, "head")
