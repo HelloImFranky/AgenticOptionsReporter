@@ -140,8 +140,8 @@ _FUNDAMENTALS = {
         {"period": "2025-12-31", "actual_eps": 2.1, "estimate_eps": 2.2, "surprise_percent": -0.045},
     ]},
     "insider_activity": {"net_shares": -500.0, "transactions": [
-        {"name": "Jane Doe", "transaction_type": "sell", "shares": 1000},
-        {"name": "John Roe", "transaction_type": "buy", "shares": 500},
+        {"name": "Jane Doe", "transaction_type": "sell", "shares": 1000, "filed_at": "2026-06-01"},
+        {"name": "John Roe", "transaction_type": "buy", "shares": 500, "filed_at": "2026-05-01"},
     ]},
 }
 
@@ -153,15 +153,36 @@ def test_build_full_report_returns_pdf_bytes():
 
 
 def test_fundamentals_blocks_render_metrics_earnings_and_insider():
+    from reportlab.graphics.shapes import Drawing
+
     styles = _styles()
     blocks = _fundamentals_blocks(_FUNDAMENTALS, ["statements: rate limited"], styles)
     text = _paragraph_texts(blocks)
     assert "Key metrics" in text
     assert "Next earnings: 2026-08-01" in text
     assert "Recent earnings" in text
-    assert "net selling" in text            # -500 net shares
-    assert "Jane Doe" in text and "sell 1,000" in text
+    assert "net selling" in text            # -500 net shares (insider header)
+    # The insider activity is drawn as a time-series chart (a Drawing).
+    assert any(isinstance(b, Drawing) for b in blocks)
     assert "statements: rate limited" in text   # data_warnings surfaced
+
+
+def test_insider_timeseries_chart_needs_datable_transactions():
+    from reportlab.graphics.shapes import Drawing
+
+    from agentic_options_reporter.frontend.report_pdf import _insider_timeseries_chart
+
+    styles = _styles()
+    drawn = _insider_timeseries_chart(
+        {"transactions": [{"transaction_type": "sell", "shares": 1000, "filed_at": "2026-06-01"}]},
+        styles,
+    )
+    assert any(isinstance(x, Drawing) for x in drawn)
+    # No filing dates -> nothing to place on the time axis.
+    assert _insider_timeseries_chart(
+        {"transactions": [{"transaction_type": "buy", "shares": 100}]}, styles
+    ) == []
+    assert _insider_timeseries_chart(None, styles) == []
 
 
 def test_fundamentals_blocks_omit_absent_sections():

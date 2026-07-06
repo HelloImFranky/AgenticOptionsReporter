@@ -349,35 +349,32 @@ def insider_activity_header(insider: dict[str, Any] | None) -> str:
     return header
 
 
-def insider_transaction_bars(
-    insider: dict[str, Any] | None, limit: int = 8
+def insider_activity_series(
+    insider: dict[str, Any] | None, limit: int = 10
 ) -> list[dict[str, Any]]:
-    """Recent insider transactions prepared for a bar chart: one dict per
-    transaction with `label`, `detail` ('sell 1,000'), `is_buy`, and `ratio`
-    (bar length 0..1, sized by |shares| relative to the largest shown). Sells
-    are is_buy=False (render red), buys True (green). Empty when no
-    transaction has a share count to size a bar."""
+    """Net insider share flow per date, in chronological order, for a
+    time-series column chart. One point per date that had activity:
+    {"date": "YYYY-MM-DD", "net": signed shares (buys +, sells −, summed
+    over that date), "is_buy": net >= 0}. A transaction needs a filing date
+    to sit on the time axis, so dateless ones are skipped; the series is
+    empty when nothing is datable. Keeps the most recent `limit` dates,
+    still oldest-first."""
     transactions = (insider or {}).get("transactions") or []
-    sized = []
-    for t in transactions[:limit]:
+    by_date: dict[str, float] = {}
+    for t in transactions:
         shares = t.get("shares")
-        if not isinstance(shares, (int, float)) or shares == 0:
+        filed = t.get("filed_at")
+        if not isinstance(shares, (int, float)) or shares == 0 or not filed:
             continue
-        ttype = t.get("transaction_type") or "txn"
-        sized.append(
-            {
-                "label": t.get("name") or "Insider",
-                "detail": f"{ttype} {abs(shares):,.0f}",
-                "is_buy": ttype != "sell",
-                "magnitude": abs(float(shares)),
-            }
-        )
-    if not sized:
-        return []
-    largest = max(item["magnitude"] for item in sized)
-    for item in sized:
-        item["ratio"] = item["magnitude"] / largest if largest else 0.0
-    return sized
+        magnitude = abs(float(shares))
+        signed = magnitude if t.get("transaction_type") != "sell" else -magnitude
+        key = str(filed)
+        by_date[key] = by_date.get(key, 0.0) + signed
+    points = [
+        {"date": day, "net": net, "is_buy": net >= 0}
+        for day, net in sorted(by_date.items())
+    ]
+    return points[-limit:] if limit else points
 
 
 def format_trend_summary(trend: dict[str, Any]) -> str:

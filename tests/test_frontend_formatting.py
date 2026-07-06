@@ -19,7 +19,7 @@ from agentic_options_reporter.frontend.formatting import (
     format_volume_summary,
     fundamentals_metric_facts,
     insider_activity_header,
-    insider_transaction_bars,
+    insider_activity_series,
     macro_regime_tone,
     recommendation_facts,
     recommendation_tone,
@@ -370,18 +370,28 @@ def test_insider_activity_header_describes_net_flow():
     assert insider_activity_header({"transactions": []}) == ""
 
 
-def test_insider_transaction_bars_scale_and_color_by_direction():
+def test_insider_activity_series_aggregates_net_by_date():
     insider = {"transactions": [
-        {"name": "Jane Doe", "transaction_type": "sell", "shares": 1000},
-        {"name": "John Roe", "transaction_type": "buy", "shares": 500},
-        {"name": "No Shares", "transaction_type": "buy", "shares": None},  # dropped
+        {"name": "A", "transaction_type": "sell", "shares": 1000, "filed_at": "2026-06-01"},
+        {"name": "B", "transaction_type": "buy", "shares": 400, "filed_at": "2026-06-01"},   # same date -> netted
+        {"name": "C", "transaction_type": "buy", "shares": 500, "filed_at": "2026-05-01"},
+        {"name": "D", "transaction_type": "buy", "shares": None, "filed_at": "2026-04-01"},   # no shares -> skip
+        {"name": "E", "transaction_type": "sell", "shares": 700},                              # no date -> skip
     ]}
-    bars = insider_transaction_bars(insider)
-    assert len(bars) == 2                       # the shareless row is skipped
-    assert bars[0]["is_buy"] is False           # sell -> red
-    assert bars[0]["ratio"] == 1.0              # largest magnitude -> full bar
-    assert bars[0]["detail"] == "sell 1,000"
-    assert bars[1]["is_buy"] is True            # buy -> green
-    assert bars[1]["ratio"] == 0.5              # 500 / 1000
-    assert insider_transaction_bars(None) == []
-    assert insider_transaction_bars({"transactions": []}) == []
+    series = insider_activity_series(insider)
+    # Chronological, one point per active date; same-date trades are netted.
+    assert [p["date"] for p in series] == ["2026-05-01", "2026-06-01"]
+    assert series[0]["net"] == 500 and series[0]["is_buy"] is True
+    assert series[1]["net"] == -600 and series[1]["is_buy"] is False   # 400 buy - 1000 sell
+    assert insider_activity_series(None) == []
+    assert insider_activity_series({"transactions": []}) == []
+
+
+def test_insider_activity_series_keeps_most_recent_within_limit():
+    txns = [
+        {"transaction_type": "buy", "shares": 100, "filed_at": f"2026-01-{d:02d}"}
+        for d in range(1, 8)
+    ]
+    series = insider_activity_series({"transactions": txns}, limit=3)
+    # Most recent 3 dates, still oldest-first.
+    assert [p["date"] for p in series] == ["2026-01-05", "2026-01-06", "2026-01-07"]

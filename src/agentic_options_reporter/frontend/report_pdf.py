@@ -19,6 +19,7 @@ from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.graphics.shapes import Drawing, Line, Rect, String
 from reportlab.platypus import (
     HRFlowable,
     KeepTogether,
@@ -37,7 +38,7 @@ from agentic_options_reporter.frontend.formatting import (
     format_timestamp,
     fundamentals_metric_facts,
     insider_activity_header,
-    insider_transaction_bars,
+    insider_activity_series,
     macro_regime_tone,
     quant_score_tone,
     recommendation_facts,
@@ -313,66 +314,61 @@ def _recommendation_block(
     return block
 
 
-def _insider_bar_chart(insider: dict[str, Any] | None, styles: dict[str, ParagraphStyle]) -> list[Any]:
-    """Horizontal bar graph of insider transactions: a fixed-width track per
-    row, filled proportionally to the share count and coloured green for buys
-    / red for sells (the print counterpart of the Analyze tab's chart)."""
-    bars = insider_transaction_bars(insider)
-    if not bars:
+def _short_date(value: str) -> str:
+    """'2026-06-01' -> '06/01' for compact time-axis ticks."""
+    parts = str(value).split("-")
+    return f"{parts[1]}/{parts[2]}" if len(parts) == 3 else str(value)
+
+
+def _insider_timeseries_chart(insider: dict[str, Any] | None, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    """Time series of net insider share flow: a signed column per date drawn
+    on a zero baseline — green above the line for net buying, red below for
+    net selling. Print counterpart of the Analyze tab's chart."""
+    series = insider_activity_series(insider)
+    if not series:
         return []
-    cell = styles.get("cell", styles["body"])
-    muted = styles.get("cellmuted", cell)
-    track_width = 1.9 * inch
-    bar_height = 8
-    rows: list[list[Any]] = []
-    for b in bars:
-        color = _TONE_COLORS["success"] if b.get("is_buy") else _TONE_COLORS["danger"]
-        ratio = max(0.0, min(1.0, float(b.get("ratio", 0.0))))
-        filled = track_width * ratio
-        meter = Table(
-            [["", ""]],
-            colWidths=[filled, track_width - filled],
-            rowHeights=[bar_height],
-            hAlign="LEFT",
+
+    width = 6.6 * inch
+    label_band = 16          # room for the date ticks under the plot
+    plot_half = 46           # column reach above / below the baseline
+    height = label_band + 2 * plot_half + 12
+    baseline_y = label_band + plot_half
+    left_pad, right_pad = 6, 6
+    plot_width = width - left_pad - right_pad
+    step = plot_width / len(series)
+    col_width = min(step * 0.5, 16)
+    max_mag = max(abs(p["net"]) for p in series) or 1.0
+    peak = max(range(len(series)), key=lambda i: abs(series[i]["net"]))
+
+    drawing = Drawing(width, height)
+    # Recessive zero baseline.
+    drawing.add(Line(left_pad, baseline_y, width - right_pad, baseline_y, strokeColor=_HAIRLINE, strokeWidth=0.75))
+    for i, p in enumerate(series):
+        cx = left_pad + step * i + step / 2
+        col_h = (abs(p["net"]) / max_mag) * plot_half
+        color = _TONE_COLORS["success"] if p["is_buy"] else _TONE_COLORS["danger"]
+        y = baseline_y if p["is_buy"] else baseline_y - col_h
+        drawing.add(
+            Rect(cx - col_width / 2, y, col_width, col_h, rx=2, ry=2, fillColor=color, strokeColor=None)
         )
-        meter.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (0, 0), color),
-                    ("BACKGROUND", (1, 0), (1, 0), _TABLE_HEADER_BG),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                    ("TOPPADDING", (0, 0), (-1, -1), 0),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ]
+        drawing.add(
+            String(cx, 4, _short_date(p["date"]), fontName="Helvetica", fontSize=6.5,
+                   fillColor=_MUTED, textAnchor="middle")
+        )
+        # Selective direct label: only the largest-magnitude column.
+        if i == peak:
+            ly = baseline_y + col_h + 3 if p["is_buy"] else baseline_y - col_h - 8
+            drawing.add(
+                String(cx, ly, f"{p['net']:+,.0f}", fontName="Helvetica-Bold", fontSize=6.5,
+                       fillColor=color, textAnchor="middle")
             )
-        )
-        rows.append(
-            [
-                Paragraph(escape(str(b.get("label", ""))), cell),
-                meter,
-                Paragraph(escape(str(b.get("detail", ""))), muted),
-            ]
-        )
-    table = Table(rows, colWidths=[1.5 * inch, track_width, 0.9 * inch], hAlign="LEFT")
-    table.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-            ]
-        )
-    )
+
     legend = Paragraph(
         '<font color="#2E7D32">■</font> Buy &nbsp;&nbsp; '
         '<font color="#C62828">■</font> Sell',
-        styles.get("cellmuted", cell),
+        styles.get("cellmuted", styles["body"]),
     )
-    return [table, Spacer(1, 2), legend]
+    return [drawing, Spacer(1, 2), legend]
 
 
 def _fundamentals_blocks(
@@ -404,7 +400,7 @@ def _fundamentals_blocks(
     if insider_header:
         blocks.append(Spacer(1, 4))
         blocks.append(Paragraph(escape(insider_header), styles["agent"]))
-        blocks.extend(_insider_bar_chart(fundamentals.get("insider_activity"), styles))
+        blocks.extend(_insider_timeseries_chart(fundamentals.get("insider_activity"), styles))
 
     if data_warnings:
         blocks.append(Spacer(1, 4))

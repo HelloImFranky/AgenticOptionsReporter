@@ -43,8 +43,9 @@ poetry run agentic-options-reporter --base-url http://localhost:8000 health
 `analyze` returns the technicals plus a **cross-provider fundamentals
 snapshot** — company metrics (P/E, margins, beta, and 1-week / 1-month /
 52-week high-low ranges), the next earnings date, recent earnings
-surprises, and insider transactions (shown as a red/green bar graph, sells
-vs. buys) — merged across every configured financial provider. Data is
+surprises, and insider transactions (shown as a time-series column chart —
+net shares per date, green above the zero line for buying, red below for
+selling) — merged across every configured financial provider. Data is
 gathered best-effort: a source failing never blocks the analysis, it just
 lands in `data_warnings`. Because Yahoo Finance is keyless, fundamentals
 are available out of the box with no API keys; adding FMP/Finnhub keys
