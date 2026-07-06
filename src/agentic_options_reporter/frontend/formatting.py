@@ -255,6 +255,107 @@ def technical_snapshot_facts(
     return facts
 
 
+def format_money(value: Any) -> str:
+    """Compact currency: $3.00T / $500.00M / $1,234. '—' for non-numbers."""
+    if not isinstance(value, (int, float)):
+        return "—"
+    v = float(value)
+    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(v) >= threshold:
+            return f"${v / threshold:.2f}{suffix}"
+    return f"${v:,.0f}"
+
+
+def format_pct(value: Any) -> str:
+    """A fraction (0.123) as a percentage (12.3%). '—' for non-numbers."""
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{float(value) * 100:.1f}%"
+
+
+def format_num(value: Any, digits: int = 2) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{float(value):.{digits}f}"
+
+
+def fundamentals_metric_facts(metrics: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """Company key-stats as (label, value) pairs, filtered to the ones a
+    provider actually returned — shared by the Analyze tab's Fundamentals
+    card and the PDF report so they can't drift."""
+    if not metrics:
+        return []
+    pairs = [
+        ("Market cap", format_money(metrics.get("market_cap"))),
+        ("P/E", format_num(metrics.get("pe_ratio"))),
+        ("Forward P/E", format_num(metrics.get("forward_pe"))),
+        ("PEG", format_num(metrics.get("peg_ratio"))),
+        ("Price/Book", format_num(metrics.get("price_to_book"))),
+        ("Beta", format_num(metrics.get("beta"))),
+        ("Div. yield", format_pct(metrics.get("dividend_yield"))),
+        ("Op. margin", format_pct(metrics.get("operating_margin"))),
+        ("Profit margin", format_pct(metrics.get("profit_margin"))),
+        ("Rev. growth", format_pct(metrics.get("revenue_growth"))),
+        ("52w high", format_num(metrics.get("week52_high"))),
+        ("52w low", format_num(metrics.get("week52_low"))),
+    ]
+    return [(label, value) for label, value in pairs if value != "—"]
+
+
+def format_next_earnings(calendar: dict[str, Any] | None) -> str | None:
+    """One-line 'next earnings' summary, or None when no date is known."""
+    if not calendar or not calendar.get("next_date"):
+        return None
+    line = f"Next earnings: {calendar['next_date']}"
+    eps = calendar.get("eps_estimate")
+    if isinstance(eps, (int, float)):
+        line += f"  ·  EPS est. {eps:.2f}"
+    return line
+
+
+def earnings_surprise_facts(
+    earnings: dict[str, Any] | None, limit: int = 4
+) -> list[tuple[str, str]]:
+    """Recent earnings surprises as (period, 'actual vs estimate · +7.1%')
+    pairs, most recent first, capped at `limit`."""
+    surprises = (earnings or {}).get("surprises") or []
+    facts: list[tuple[str, str]] = []
+    for s in surprises[:limit]:
+        value = f"{format_num(s.get('actual_eps'))} vs {format_num(s.get('estimate_eps'))} est"
+        pct = s.get("surprise_percent")
+        if isinstance(pct, (int, float)):
+            value += f"  ·  {format_pct(pct)}"
+        facts.append((str(s.get("period", "")), value))
+    return facts
+
+
+def insider_activity_summary(
+    insider: dict[str, Any] | None, limit: int = 5
+) -> tuple[str, list[str]]:
+    """(header, entries) for insider activity. header describes net share
+    flow (buying/selling); entries are 'Name · sell 1,000' lines. Both
+    empty when there's nothing to show."""
+    if not insider:
+        return "", []
+    transactions = insider.get("transactions") or []
+    net = insider.get("net_shares")
+    if not transactions and not isinstance(net, (int, float)):
+        return "", []
+    header = "Insider activity"
+    if isinstance(net, (int, float)) and net != 0:
+        direction = "net buying" if net > 0 else "net selling"
+        header += f" — {direction} ({abs(net):,.0f} shares)"
+    entries: list[str] = []
+    for t in transactions[:limit]:
+        label = t.get("name") or "Insider"
+        ttype = t.get("transaction_type") or "txn"
+        shares = t.get("shares")
+        if isinstance(shares, (int, float)):
+            label += f" · {ttype} {abs(shares):,.0f}"
+        entries.append(label)
+    return header, entries
+
+
 def format_trend_summary(trend: dict[str, Any]) -> str:
     direction = str(trend.get("direction", "?")).capitalize()
     strength = trend.get("strength", "?")

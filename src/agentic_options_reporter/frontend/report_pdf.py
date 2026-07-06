@@ -32,7 +32,11 @@ from reportlab.platypus import (
 from agentic_options_reporter.frontend.formatting import (
     company_health_tone,
     consensus_tone,
+    earnings_surprise_facts,
+    format_next_earnings,
     format_timestamp,
+    fundamentals_metric_facts,
+    insider_activity_summary,
     macro_regime_tone,
     quant_score_tone,
     recommendation_facts,
@@ -308,6 +312,52 @@ def _recommendation_block(
     return block
 
 
+def _fundamentals_blocks(
+    fundamentals: dict[str, Any], data_warnings: list[Any] | None, styles: dict[str, ParagraphStyle]
+) -> list[Any]:
+    """The cross-provider fundamentals snapshot (metrics, next earnings,
+    recent surprises, insider activity) — mirrors the Analyze tab's
+    Fundamentals card, sharing the same formatting helpers so the two can't
+    drift. Absent sections are simply omitted."""
+    blocks: list[Any] = []
+
+    metric_facts = fundamentals_metric_facts(fundamentals.get("metrics"))
+    if metric_facts:
+        blocks.append(Paragraph("Key metrics", styles["agent"]))
+        blocks.extend(_facts_table(metric_facts, styles, cols=3))
+
+    next_earnings = format_next_earnings(fundamentals.get("earnings_calendar"))
+    if next_earnings:
+        blocks.append(Spacer(1, 4))
+        blocks.append(Paragraph(escape(next_earnings), styles["body"]))
+
+    surprise_facts = earnings_surprise_facts(fundamentals.get("earnings_history"))
+    if surprise_facts:
+        blocks.append(Spacer(1, 4))
+        blocks.append(Paragraph("Recent earnings (actual vs. estimate)", styles["agent"]))
+        blocks.extend(_facts_table(surprise_facts, styles, cols=2))
+
+    header, entries = insider_activity_summary(fundamentals.get("insider_activity"))
+    if header:
+        blocks.append(Spacer(1, 4))
+        blocks.append(Paragraph(escape(header), styles["agent"]))
+        blocks.extend(_bullets(entries, styles))
+
+    if data_warnings:
+        blocks.append(Spacer(1, 4))
+        blocks.append(
+            Paragraph(
+                "Some sources were unavailable: "
+                + escape("; ".join(str(w) for w in data_warnings)),
+                styles["muted"],
+            )
+        )
+
+    if not blocks:
+        return [Paragraph("No fundamentals available for this symbol.", styles["muted"])]
+    return blocks
+
+
 def _candidates_table(candidates: list[dict[str, Any]], styles: dict[str, ParagraphStyle]) -> list[Any]:
     if not candidates:
         return [Paragraph("No scored candidates for this run.", styles["muted"])]
@@ -532,8 +582,9 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
 
     Expected keys (all optional except an implicit best-effort render):
       symbol, generated_at, recommendation, trend, volume, indicators,
-      candidates, and thesis (the investment-thesis result, or None if the
-      pipeline hasn't been run).
+      candidates, fundamentals (the cross-provider snapshot, or None),
+      data_warnings, and thesis (the investment-thesis result, or None if
+      the pipeline hasn't been run).
     """
     styles = _styles()
     story: list[Any] = []
@@ -563,6 +614,11 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
     if report.get("candidates") is not None:
         story.extend(_section_header("Scored candidates", styles))
         story.extend(_candidates_table(report.get("candidates") or [], styles))
+
+    fundamentals = report.get("fundamentals")
+    if fundamentals:
+        story.extend(_section_header("Fundamentals", styles))
+        story.extend(_fundamentals_blocks(fundamentals, report.get("data_warnings"), styles))
 
     thesis = report.get("thesis")
     if thesis:

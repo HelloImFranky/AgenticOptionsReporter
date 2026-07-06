@@ -7,11 +7,18 @@ from agentic_options_reporter.frontend.formatting import (
     TONE_WARNING,
     candidates_to_rows,
     consensus_tone,
+    earnings_surprise_facts,
     format_indicator_summary,
+    format_money,
+    format_next_earnings,
+    format_num,
+    format_pct,
     format_recommendation,
     format_timestamp,
     format_trend_summary,
     format_volume_summary,
+    fundamentals_metric_facts,
+    insider_activity_summary,
     macro_regime_tone,
     recommendation_facts,
     recommendation_tone,
@@ -287,3 +294,64 @@ def test_runs_to_rows_shapes_match_columns():
 def test_empty_lists_produce_no_rows():
     assert candidates_to_rows([]) == []
     assert runs_to_rows([]) == []
+
+
+# -- fundamentals formatting (shared by the Analyze tab card + PDF report) --
+
+
+def test_format_money_scales_by_magnitude():
+    assert format_money(3.0e12) == "$3.00T"
+    assert format_money(5.0e8) == "$500.00M"
+    assert format_money(1234) == "$1.23K"
+    assert format_money(500) == "$500"
+    assert format_money(None) == "—"
+
+
+def test_format_pct_and_num_handle_missing():
+    assert format_pct(0.123) == "12.3%"
+    assert format_pct(None) == "—"
+    assert format_num(30.5) == "30.50"
+    assert format_num("nope") == "—"
+
+
+def test_fundamentals_metric_facts_filters_absent_fields():
+    facts = fundamentals_metric_facts({"pe_ratio": 30.5, "beta": None, "market_cap": 3.0e12})
+    labels = {label for label, _ in facts}
+    assert ("P/E", "30.50") in facts
+    assert ("Market cap", "$3.00T") in facts
+    assert "Beta" not in labels          # None -> omitted
+    assert fundamentals_metric_facts(None) == []
+
+
+def test_format_next_earnings():
+    assert format_next_earnings({"next_date": "2026-08-01", "eps_estimate": 1.6}) == (
+        "Next earnings: 2026-08-01  ·  EPS est. 1.60"
+    )
+    assert format_next_earnings({"next_date": None}) is None
+    assert format_next_earnings(None) is None
+
+
+def test_earnings_surprise_facts_caps_and_formats():
+    earnings = {"surprises": [
+        {"period": "2026-03-31", "actual_eps": 1.5, "estimate_eps": 1.4, "surprise_percent": 0.071},
+        {"period": "2025-12-31", "actual_eps": 2.1, "estimate_eps": 2.2, "surprise_percent": -0.045},
+    ]}
+    facts = earnings_surprise_facts(earnings, limit=1)
+    assert len(facts) == 1
+    period, value = facts[0]
+    assert period == "2026-03-31"
+    assert "1.50 vs 1.40 est" in value and "7.1%" in value
+
+
+def test_insider_activity_summary_describes_net_flow():
+    header, entries = insider_activity_summary({
+        "net_shares": -500.0,
+        "transactions": [
+            {"name": "Jane Doe", "transaction_type": "sell", "shares": 1000},
+            {"name": "John Roe", "transaction_type": "buy", "shares": 500},
+        ],
+    })
+    assert "net selling" in header and "500 shares" in header
+    assert entries[0] == "Jane Doe · sell 1,000"
+    assert insider_activity_summary(None) == ("", [])
+    assert insider_activity_summary({"transactions": []}) == ("", [])
