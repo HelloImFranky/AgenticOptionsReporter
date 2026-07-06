@@ -8,7 +8,11 @@ from individual adapter modules.
 from agentic_options_reporter.data.financial.alphavantage import AlphaVantageFinancialProvider
 from agentic_options_reporter.data.financial.base import (
     ANALYST_ESTIMATES,
+    EARNINGS,
+    EARNINGS_CALENDAR,
     FINANCIAL_DATASETS,
+    INSIDER,
+    METRICS,
     PROFILE,
     RATIOS,
     STATEMENTS,
@@ -26,10 +30,15 @@ from agentic_options_reporter.data.financial.router import (
     FinancialProviderRouter,
     build_financial_provider,
 )
+from agentic_options_reporter.data.financial.yfinance_provider import YFinanceFinancialProvider
 
 __all__ = [
     "ANALYST_ESTIMATES",
+    "EARNINGS",
+    "EARNINGS_CALENDAR",
     "FINANCIAL_DATASETS",
+    "INSIDER",
+    "METRICS",
     "PROFILE",
     "RATIOS",
     "STATEMENTS",
@@ -44,5 +53,6 @@ __all__ = [
     "FinnhubFinancialProvider",
     "FmpFinancialProvider",
     "ProviderHealth",
+    "YFinanceFinancialProvider",
     "build_financial_provider",
 ]

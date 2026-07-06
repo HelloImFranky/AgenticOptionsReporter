@@ -19,8 +19,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from datetime import date, datetime
+
 from agentic_options_reporter.data.financial.base import (
     ANALYST_ESTIMATES,
+    EARNINGS,
+    EARNINGS_CALENDAR,
+    INSIDER,
+    METRICS,
     PROFILE,
     RATIOS,
     FinancialProviderUnsupported,
@@ -28,9 +34,15 @@ from agentic_options_reporter.data.financial.base import (
 )
 from agentic_options_reporter.models.schemas import (
     AnalystEstimates,
+    CompanyMetrics,
     CompanyProfile,
+    EarningsCalendar,
+    EarningsHistory,
+    EarningsSurprise,
     FinancialRatios,
     FinancialStatementSummary,
+    InsiderActivity,
+    InsiderTransaction,
 )
 
 # Ordered so ties break toward the more cautious label.
@@ -48,7 +60,10 @@ class FinnhubFinancialProvider(_HttpFinancialProvider):
     PROVIDER_LABEL = "Finnhub"
     API_KEY_ENV_VAR = "FINNHUB_API_KEY"
 
-    DATASETS = frozenset({PROFILE, RATIOS, ANALYST_ESTIMATES})  # no statements on the free tier
+    # Free tier: no raw statements, but rich metrics/earnings/insider data.
+    DATASETS = frozenset(
+        {PROFILE, RATIOS, ANALYST_ESTIMATES, METRICS, EARNINGS, EARNINGS_CALENDAR, INSIDER}
+    )
 
     async def _get(self, path: str, params: dict[str, Any]) -> Any:
         return await self._get_json(
@@ -120,3 +135,127 @@ class FinnhubFinancialProvider(_HttpFinancialProvider):
             price_target_low=None,
             num_analysts=num_analysts,
         )
+
+    async def get_company_metrics(self, ticker: str) -> CompanyMetrics:
+        data = await self._get("/stock/metric", {"symbol": ticker.upper(), "metric": "all"})
+        metric = data.get("metric") or {}
+        # Finnhub reports margins and dividend yield as percentages.
+        gross = self._to_float(metric.get("grossMarginTTM"))
+        operating = self._to_float(metric.get("operatingMarginTTM"))
+        net = self._to_float(metric.get("netProfitMarginTTM"))
+        div_yield = self._to_float(metric.get("dividendYieldIndicatedAnnual"))
+        market_cap = self._to_float(metric.get("marketCapitalization"))
+        return CompanyMetrics(
+            ticker=ticker.upper(),
+            market_cap=market_cap * 1_000_000 if market_cap is not None else None,
+            pe_ratio=self._to_float(metric.get("peTTM")),
+            forward_pe=self._to_float(metric.get("forwardPE")),
+            peg_ratio=self._to_float(metric.get("pegTTM")),
+            price_to_book=self._to_float(metric.get("pb")),
+            price_to_sales=self._to_float(metric.get("psTTM")),
+            beta=self._to_float(metric.get("beta")),
+            dividend_yield=div_yield / 100 if div_yield is not None else None,
+            week52_high=self._to_float(metric.get("52WeekHigh")),
+            week52_low=self._to_float(metric.get("52WeekLow")),
+            gross_margin=gross / 100 if gross is not None else None,
+            operating_margin=operating / 100 if operating is not None else None,
+            profit_margin=net / 100 if net is not None else None,
+            revenue_growth=self._to_float(metric.get("revenueGrowthTTMYoy")),
+            earnings_growth=self._to_float(metric.get("epsGrowthTTMYoy")),
+        )
+
+    async def get_earnings_history(self, ticker: str) -> EarningsHistory:
+        data = await self._get("/stock/earnings", {"symbol": ticker.upper()})
+        rows = data if isinstance(data, list) else []
+        surprises: list[EarningsSurprise] = []
+        for row in rows:
+            actual = self._to_float(row.get("actual"))
+            estimate = self._to_float(row.get("estimate"))
+            surprise = self._to_float(row.get("surprise"))
+            pct = self._to_float(row.get("surprisePercent"))
+            period = row.get("period") or (
+                f"Q{row.get('quarter')} {row.get('year')}" if row.get("year") else ""
+            )
+            surprises.append(
+                EarningsSurprise(
+                    period=str(period),
+                    actual_eps=actual,
+                    estimate_eps=estimate,
+                    surprise=surprise if surprise is not None
+                    else (actual - estimate if actual is not None and estimate is not None else None),
+                    surprise_percent=pct / 100 if pct is not None else None,
+                )
+            )
+        return EarningsHistory(ticker=ticker.upper(), surprises=surprises)
+
+    async def get_earnings_calendar(self, ticker: str) -> EarningsCalendar:
+        data = await self._get("/calendar/earnings", {"symbol": ticker.upper()})
+        entries = (data or {}).get("earningsCalendar") or []
+        # Prefer the nearest upcoming report; Finnhub returns most-recent
+        # first, so scan for the earliest date on/after today, else the first.
+        today = date.today()
+        chosen = None
+        for entry in entries:
+            entry_date = self._parse_date(entry.get("date"))
+            if entry_date is not None and entry_date >= today:
+                if chosen is None or entry_date < chosen[0]:
+                    chosen = (entry_date, entry)
+        if chosen is None and entries:
+            first = entries[0]
+            chosen = (self._parse_date(first.get("date")), first)
+        if chosen is None:
+            return EarningsCalendar(ticker=ticker.upper())
+        entry_date, entry = chosen
+        return EarningsCalendar(
+            ticker=ticker.upper(),
+            next_date=entry_date,
+            eps_estimate=self._to_float(entry.get("epsEstimate")),
+            revenue_estimate=self._to_float(entry.get("revenueEstimate")),
+        )
+
+    async def get_insider_activity(self, ticker: str) -> InsiderActivity:
+        data = await self._get("/stock/insider-transactions", {"symbol": ticker.upper()})
+        rows = (data or {}).get("data") or []
+        transactions: list[InsiderTransaction] = []
+        for row in rows:
+            shares = self._to_float(row.get("share") or row.get("change"))
+            price = self._to_float(row.get("transactionPrice"))
+            value = shares * price if shares is not None and price else None
+            code = str(row.get("transactionCode") or "")
+            transactions.append(
+                InsiderTransaction(
+                    name=row.get("name") or "",
+                    relationship="",  # not provided by this endpoint
+                    # Finnhub codes: S = sale, P = purchase; others passed through.
+                    transaction_type=("sell" if code == "S" else "buy" if code == "P" else code),
+                    shares=shares,
+                    value=value,
+                    filed_at=self._parse_date(row.get("filingDate") or row.get("transactionDate")),
+                )
+            )
+        net_shares = _net_shares(transactions)
+        return InsiderActivity(
+            ticker=ticker.upper(), transactions=transactions, net_shares=net_shares
+        )
+
+    @staticmethod
+    def _parse_date(value: object) -> date | None:
+        if not value:
+            return None
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+
+def _net_shares(transactions: list[InsiderTransaction]) -> float | None:
+    """Net insider share flow (buys positive, sells negative); None when no
+    transaction carries a share count."""
+    total = 0.0
+    seen = False
+    for tx in transactions:
+        if tx.shares is None:
+            continue
+        seen = True
+        total += tx.shares if tx.transaction_type != "sell" else -tx.shares
+    return total if seen else None

@@ -50,9 +50,10 @@ OnEvent = Callable[[AgentEvent], None]
 
 async def _fetch_financial_inputs(provider: FinancialProvider, ticker: str) -> tuple:
     """Fetch the company profile (the required anchor) plus whichever of
-    statements/ratios/estimates the configured providers actually serve,
-    concurrently. A dataset no provider covers (e.g. statements when only
-    Finnhub is configured) comes back None and the agent omits it."""
+    statements/ratios/estimates/metrics/earnings_calendar the configured
+    providers actually serve, concurrently — each dataset merged across
+    every provider that offers it. A dataset no provider covers comes back
+    None and the agent omits it."""
 
     async def optional(dataset: str, method: str):
         if not provider.supports(dataset):
@@ -64,6 +65,8 @@ async def _fetch_financial_inputs(provider: FinancialProvider, ticker: str) -> t
         optional(financial_data.STATEMENTS, "get_financial_statements"),
         optional(financial_data.RATIOS, "get_ratios"),
         optional(financial_data.ANALYST_ESTIMATES, "get_analyst_estimates"),
+        optional(financial_data.METRICS, "get_company_metrics"),
+        optional(financial_data.EARNINGS_CALENDAR, "get_earnings_calendar"),
     )
 
 
@@ -235,12 +238,13 @@ def run_thesis_pipeline(
             # FinancialProvider is async (specs/providers.yaml); this
             # pipeline is sync, so bridge with a private event loop and
             # fetch the four datasets concurrently.
-            profile, statements, ratios, estimates = asyncio.run(
+            profile, statements, ratios, estimates, metrics, calendar = asyncio.run(
                 _fetch_financial_inputs(financial_provider, ticker)
             )
             _reset_exchange()
             financial_finding = financial_research.run(
-                client, profile, statements, ratios, estimates
+                client, profile, statements, ratios, estimates,
+                metrics=metrics, earnings_calendar=calendar,
             )
         except FinancialProviderError as exc:
             pipeline_warnings.append(f"financial_research: provider failed during the run — {exc}")

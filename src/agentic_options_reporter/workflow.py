@@ -15,8 +15,19 @@ from agentic_options_reporter.analysis.support_resistance import detect_levels
 from agentic_options_reporter.analysis.trend import detect_trend
 from agentic_options_reporter.analysis.volume import analyze_volume
 from agentic_options_reporter.config import get_settings
+from agentic_options_reporter.data.financial import (
+    FinancialProvider,
+    FinancialProviderError,
+    build_financial_provider,
+)
+from agentic_options_reporter.data.financial.snapshot import gather_fundamentals
 from agentic_options_reporter.data.market_data import MarketDataProvider, build_market_data_provider
-from agentic_options_reporter.models.schemas import AnalysisResult, OptionChain, PriceHistory
+from agentic_options_reporter.models.schemas import (
+    AnalysisResult,
+    FundamentalsSnapshot,
+    OptionChain,
+    PriceHistory,
+)
 from agentic_options_reporter.persistence import make_session_factory, persist_analysis_run
 
 
@@ -32,21 +43,60 @@ async def _fetch_market_data(
     )
 
 
+async def _fetch_inputs(
+    market_provider: MarketDataProvider,
+    financial_provider: FinancialProvider | None,
+    symbol: str,
+    lookback_days: int,
+    expiration: str | None,
+) -> tuple[PriceHistory, OptionChain, FundamentalsSnapshot | None, list[str]]:
+    """Fetch the technical inputs (required) and the cross-provider
+    fundamentals (best-effort) together. Fundamentals never block the
+    analysis: any failure gathering them is returned as a warning and the
+    snapshot comes back with whatever succeeded (or None if no provider)."""
+
+    async def fundamentals() -> tuple[FundamentalsSnapshot | None, list[str]]:
+        if financial_provider is None:
+            return None, []
+        try:
+            return await gather_fundamentals(financial_provider, symbol)
+        except FinancialProviderError as exc:
+            return None, [f"fundamentals: {exc}"]
+
+    (history, chain), (snapshot, warnings) = await asyncio.gather(
+        _fetch_market_data(market_provider, symbol, lookback_days, expiration),
+        fundamentals(),
+    )
+    return history, chain, snapshot, warnings
+
+
+def _optional_financial_provider() -> FinancialProvider | None:
+    """The fundamentals router (keyless Yahoo is always available, so this
+    normally returns a live provider); None only if construction fails."""
+    try:
+        return build_financial_provider()
+    except FinancialProviderError:
+        return None
+
+
 def run_analysis(
     symbol: str,
     lookback_days: int = 365,
     expiration: str | None = None,
     provider: MarketDataProvider | None = None,
     session_factory: sessionmaker | None = None,
+    financial_provider: FinancialProvider | None = None,
 ) -> AnalysisResult:
     settings = get_settings()
     provider = provider or build_market_data_provider()
+    if financial_provider is None:
+        financial_provider = _optional_financial_provider()
     session_factory = session_factory or make_session_factory(settings.database_url)
 
-    # The MarketDataProvider is async; this pipeline is sync, so bridge
-    # with a private event loop and fetch the two inputs concurrently.
-    history, chain = asyncio.run(
-        _fetch_market_data(provider, symbol, lookback_days, expiration)
+    # The providers are async; this pipeline is sync, so bridge with a
+    # private event loop and fetch the technicals + fundamentals concurrently.
+    history, chain, fundamentals, data_warnings = asyncio.run(
+        _fetch_inputs(provider, financial_provider, symbol, lookback_days, expiration)
     )
 
     indicators = compute_indicators(history)
@@ -83,4 +133,9 @@ def run_analysis(
         support_resistance=levels,
         candidates=candidates,
         recommendation=recommendation,
+        # Cross-provider fundamentals, gathered best-effort alongside the
+        # technicals. Response-only (not persisted): a run reloaded from the
+        # database via /runs/{id} has these as None/[].
+        fundamentals=fundamentals,
+        data_warnings=data_warnings,
     )

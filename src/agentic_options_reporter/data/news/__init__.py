@@ -25,6 +25,7 @@ from agentic_options_reporter.data.news.hackernews import HackerNewsProvider
 from agentic_options_reporter.data.news.newsapi import NewsApiOrgProvider
 from agentic_options_reporter.data.news.newsdata import NewsDataProvider
 from agentic_options_reporter.data.news.router import NewsProviderRouter, build_news_provider
+from agentic_options_reporter.data.news.yfinance_provider import YFinanceNewsProvider
 
 __all__ = [
     "COMPANY_NEWS",
@@ -46,5 +47,6 @@ __all__ = [
     "NewsProviderUnavailable",
     "NewsProviderUnsupported",
     "ProviderHealth",
+    "YFinanceNewsProvider",
     "build_news_provider",
 ]

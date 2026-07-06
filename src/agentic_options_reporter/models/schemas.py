@@ -181,6 +181,13 @@ class AnalysisResult(BaseModel):
     support_resistance: list[SupportResistanceLevel]
     candidates: list[ScoredCandidate]
     recommendation: Recommendation
+    # Cross-provider fundamentals gathered alongside the technicals (merged
+    # across every configured source). Response-only: populated by /analyze,
+    # not persisted, so a run reloaded from the database has it as None.
+    fundamentals: FundamentalsSnapshot | None = None
+    # Non-fatal problems while gathering fundamentals (e.g. a provider rate
+    # limited); [] when clean. The technical analysis always completes.
+    data_warnings: list[str] = Field(default_factory=list)
 
 
 class AnalysisRunSummary(BaseModel):
@@ -242,6 +249,84 @@ class AnalystEstimates(BaseModel):
     price_target_high: float | None = None
     price_target_low: float | None = None
     num_analysts: int = 0
+
+
+class CompanyMetrics(BaseModel):
+    """Current valuation and quality key-stats snapshot for a ticker —
+    provider facts (Finnhub /stock/metric, yfinance .info), never computed
+    here. Every field is optional so a partial provider still contributes."""
+
+    ticker: str
+    market_cap: float | None = None
+    pe_ratio: float | None = None
+    forward_pe: float | None = None
+    peg_ratio: float | None = None
+    price_to_book: float | None = None
+    price_to_sales: float | None = None
+    beta: float | None = None
+    dividend_yield: float | None = None      # as a fraction, e.g. 0.012 for 1.2%
+    week52_high: float | None = None
+    week52_low: float | None = None
+    gross_margin: float | None = None        # fraction
+    operating_margin: float | None = None    # fraction
+    profit_margin: float | None = None       # fraction
+    revenue_growth: float | None = None      # YoY fraction
+    earnings_growth: float | None = None     # YoY fraction
+
+
+class EarningsSurprise(BaseModel):
+    """One past reporting period's actual EPS vs. the consensus estimate."""
+
+    period: str                     # e.g. "2026-03-31" or "Q1 2026"
+    actual_eps: float | None = None
+    estimate_eps: float | None = None
+    surprise: float | None = None          # actual - estimate
+    surprise_percent: float | None = None  # (actual - estimate) / |estimate|, fraction
+
+
+class EarningsHistory(BaseModel):
+    ticker: str
+    surprises: list[EarningsSurprise] = Field(default_factory=list)
+
+
+class EarningsCalendar(BaseModel):
+    """The next scheduled earnings report and its consensus estimate."""
+
+    ticker: str
+    next_date: date | None = None
+    eps_estimate: float | None = None
+    revenue_estimate: float | None = None
+
+
+class InsiderTransaction(BaseModel):
+    name: str
+    relationship: str = ""          # role/title where the provider gives one
+    transaction_type: str = ""      # e.g. "buy" | "sell" | raw provider code
+    shares: float | None = None
+    value: float | None = None      # transaction value where available
+    filed_at: date | None = None
+
+
+class InsiderActivity(BaseModel):
+    ticker: str
+    transactions: list[InsiderTransaction] = Field(default_factory=list)
+    net_shares: float | None = None   # sum of signed shares across transactions, when derivable
+
+
+class FundamentalsSnapshot(BaseModel):
+    """Everything the fundamentals layer could gather for a ticker, merged
+    across every configured provider. Surfaced by /analyze; each field is
+    optional so partial provider coverage still yields a useful snapshot."""
+
+    ticker: str
+    profile: CompanyProfile | None = None
+    statements: FinancialStatementSummary | None = None
+    ratios: FinancialRatios | None = None
+    estimates: AnalystEstimates | None = None
+    metrics: CompanyMetrics | None = None
+    earnings_history: EarningsHistory | None = None
+    earnings_calendar: EarningsCalendar | None = None
+    insider_activity: InsiderActivity | None = None
 
 
 class MacroObservation(BaseModel):

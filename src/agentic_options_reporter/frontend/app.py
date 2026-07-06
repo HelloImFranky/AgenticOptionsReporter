@@ -340,6 +340,153 @@ def _fact_box(label: str, value: str) -> ft.Container:
     )
 
 
+def _fmt_money(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    v = float(value)
+    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(v) >= threshold:
+            return f"${v / threshold:.2f}{suffix}"
+    return f"${v:,.0f}"
+
+
+def _fmt_pct(value: object) -> str:
+    """Format a fraction (0.123) as a percentage (12.3%)."""
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{float(value) * 100:.1f}%"
+
+
+def _fmt_num(value: object, digits: int = 2) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{float(value):.{digits}f}"
+
+
+def _fundamentals_controls(fundamentals: dict | None, warnings: list | None) -> list[ft.Control]:
+    """Render the cross-provider fundamentals snapshot (metrics, earnings,
+    calendar, insider activity) surfaced by /analyze into a compact set of
+    controls. Absent sections are simply omitted."""
+    if not fundamentals:
+        return [
+            ft.Text(
+                "No fundamentals available for this symbol.",
+                size=12,
+                italic=True,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+            )
+        ]
+
+    controls: list[ft.Control] = []
+
+    metrics = fundamentals.get("metrics")
+    if metrics:
+        pairs = [
+            ("Market cap", _fmt_money(metrics.get("market_cap"))),
+            ("P/E", _fmt_num(metrics.get("pe_ratio"))),
+            ("Forward P/E", _fmt_num(metrics.get("forward_pe"))),
+            ("PEG", _fmt_num(metrics.get("peg_ratio"))),
+            ("Price/Book", _fmt_num(metrics.get("price_to_book"))),
+            ("Beta", _fmt_num(metrics.get("beta"))),
+            ("Div. yield", _fmt_pct(metrics.get("dividend_yield"))),
+            ("Op. margin", _fmt_pct(metrics.get("operating_margin"))),
+            ("Profit margin", _fmt_pct(metrics.get("profit_margin"))),
+            ("Rev. growth", _fmt_pct(metrics.get("revenue_growth"))),
+            ("52w high", _fmt_num(metrics.get("week52_high"))),
+            ("52w low", _fmt_num(metrics.get("week52_low"))),
+        ]
+        shown = [(label, value) for label, value in pairs if value != "—"]
+        if shown:
+            controls.append(ft.Text("Key metrics", size=12, weight=ft.FontWeight.BOLD))
+            controls.append(ft.ResponsiveRow([_fact_box(k, v) for k, v in shown], spacing=8, run_spacing=8))
+
+    calendar = fundamentals.get("earnings_calendar")
+    if calendar and calendar.get("next_date"):
+        eps = calendar.get("eps_estimate")
+        detail = f"Next earnings: {calendar['next_date']}"
+        if isinstance(eps, (int, float)):
+            detail += f"  ·  EPS est. {eps:.2f}"
+        controls.append(
+            ft.Row(
+                [ft.Icon(ft.Icons.EVENT_OUTLINED, size=16, color=ft.Colors.AMBER_800),
+                 ft.Text(detail, size=12, selectable=True)],
+                spacing=8,
+            )
+        )
+
+    earnings = fundamentals.get("earnings_history")
+    surprises = (earnings or {}).get("surprises") or []
+    if surprises:
+        controls.append(ft.Text("Recent earnings (actual vs. estimate)", size=12, weight=ft.FontWeight.BOLD))
+        rows = []
+        for s in surprises[:4]:
+            actual, estimate = s.get("actual_eps"), s.get("estimate_eps")
+            pct = s.get("surprise_percent")
+            beat = isinstance(pct, (int, float)) and pct >= 0
+            tone_color = ft.Colors.GREEN_700 if beat else ft.Colors.RED_600
+            pct_text = _fmt_pct(pct) if isinstance(pct, (int, float)) else "—"
+            rows.append(
+                ft.Row(
+                    [
+                        ft.Text(str(s.get("period", "")), size=11, expand=True, selectable=True),
+                        ft.Text(f"{_fmt_num(actual)} / {_fmt_num(estimate)}", size=11,
+                                color=ft.Colors.ON_SURFACE_VARIANT),
+                        ft.Text(pct_text, size=11, weight=ft.FontWeight.W_600, color=tone_color),
+                    ],
+                    spacing=10,
+                )
+            )
+        controls.append(ft.Column(rows, spacing=2, tight=True))
+
+    insider = fundamentals.get("insider_activity")
+    txns = (insider or {}).get("transactions") or []
+    if insider and (txns or insider.get("net_shares") is not None):
+        net = insider.get("net_shares")
+        header = "Insider activity"
+        if isinstance(net, (int, float)) and net != 0:
+            direction = "net buying" if net > 0 else "net selling"
+            header += f" — {direction} ({abs(net):,.0f} shares)"
+        controls.append(ft.Text(header, size=12, weight=ft.FontWeight.BOLD))
+        chips = []
+        for t in txns[:5]:
+            ttype = t.get("transaction_type", "")
+            tone = ft.Colors.GREEN_700 if ttype != "sell" else ft.Colors.RED_600
+            shares = t.get("shares")
+            label = t.get("name") or "Insider"
+            if isinstance(shares, (int, float)):
+                label += f" · {ttype or 'txn'} {abs(shares):,.0f}"
+            chips.append(
+                ft.Container(
+                    content=ft.Text(label, size=11, color=ft.Colors.WHITE),
+                    bgcolor=tone,
+                    border_radius=12,
+                    padding=ft.padding.symmetric(vertical=3, horizontal=8),
+                )
+            )
+        if chips:
+            controls.append(ft.Row(chips, wrap=True, spacing=6, run_spacing=6))
+
+    if warnings:
+        controls.append(
+            ft.Text(
+                "Some sources were unavailable: " + "; ".join(str(w) for w in warnings),
+                size=11,
+                italic=True,
+                color=ft.Colors.AMBER_800,
+                selectable=True,
+            )
+        )
+
+    if not controls:
+        return [
+            ft.Text(
+                "No fundamentals available for this symbol.",
+                size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT,
+            )
+        ]
+    return controls
+
+
 def _section_title(text: str, icon: str | None = None) -> ft.Row:
     controls: list[ft.Control] = []
     if icon:
@@ -522,8 +669,15 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
     )
     candidates_table.visible = False
 
+    fundamentals_body = ft.Column([], spacing=12, tight=True)
+    fundamentals_card = _card(
+        _section_title("Fundamentals", ft.Icons.ACCOUNT_BALANCE_OUTLINED),
+        fundamentals_body,
+    )
+    fundamentals_card.visible = False
+
     results_column = ft.Column(
-        [recommendation_card, stat_row, candidates_card],
+        [recommendation_card, stat_row, candidates_card, fundamentals_card],
         spacing=16,
         visible=False,
     )
@@ -646,6 +800,13 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         ]
         candidates_table.visible = bool(rows)
         candidates_empty_state.visible = not rows
+
+        # Cross-provider fundamentals (merged across every configured source).
+        fundamentals = result.get("fundamentals")
+        fundamentals_body.controls = _fundamentals_controls(
+            fundamentals, result.get("data_warnings")
+        )
+        fundamentals_card.visible = bool(fundamentals)
 
     analyze_button.on_click = run_analysis
 

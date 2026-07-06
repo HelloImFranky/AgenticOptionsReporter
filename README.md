@@ -40,12 +40,21 @@ poetry run agentic-options-reporter run 1
 poetry run agentic-options-reporter --base-url http://localhost:8000 health
 ```
 
+`analyze` returns the technicals plus a **cross-provider fundamentals
+snapshot** — company metrics (P/E, margins, beta, 52-week range), the next
+earnings date, recent earnings surprises, and insider transactions —
+merged across every configured financial provider. Data is gathered
+best-effort: a source failing never blocks the analysis, it just lands in
+`data_warnings`. Because Yahoo Finance is keyless, fundamentals are
+available out of the box with no API keys; adding FMP/Finnhub keys
+enriches and cross-fills the same fields (see below).
+
 Or launch the Flet front end (a desktop window by default; see
 `src/agentic_options_reporter/frontend/app.py`), which drives the same API
 through the same `ApiClient` the CLI uses. It's a Material 3 UI with an
 Analyze tab (recommendation badge, trend/volume/indicator stat cards, a
-scored-candidates table), an Agents tab (see below), and a History tab,
-plus a light/dark mode toggle in the app bar:
+scored-candidates table, and a **Fundamentals** card), an Agents tab (see
+below), and a History tab, plus a light/dark mode toggle in the app bar:
 
 ```bash
 poetry run agentic-options-reporter-ui
@@ -80,13 +89,19 @@ export ALPHA_VANTAGE_API_KEY=... # alphavantage.co, daily price history
 export TWELVE_DATA_API_KEY=...   # twelvedata.com, daily price history
 export FINNHUB_API_KEY=...       # finnhub.io stock candles (may be premium-gated)
 
-# Financial Research — all free tier; FINNHUB_API_KEY/ALPHA_VANTAGE_API_KEY
-# do double duty for News Research below
-export FMP_API_KEY=...           # financialmodelingprep.com, full coverage
-export FINNHUB_API_KEY=...       # finnhub.io (profile/ratios/analyst consensus)
+# Fundamentals (/analyze + Financial Research) — Yahoo Finance is KEYLESS
+# and serves every dataset (profile, statements, ratios, estimates,
+# metrics, earnings history/calendar, insider transactions), so this works
+# with no keys. Each dataset is MERGED across all configured providers
+# (field-by-field for records, union+dedupe for lists — "try all providers
+# and get all the data"). These keys enrich and cross-fill the same fields;
+# FINNHUB_API_KEY/ALPHA_VANTAGE_API_KEY do double duty for News below:
+export FMP_API_KEY=...           # financialmodelingprep.com, full core coverage
+export FINNHUB_API_KEY=...       # finnhub.io (ratios, metrics, earnings, insider)
 export ALPHA_VANTAGE_API_KEY=... # alphavantage.co (25 req/day, last resort)
 
-# News Research — all free tier; Hacker News needs no key
+# News Research — all free tier; Yahoo and Hacker News need no key. A ticker
+# `search` fans out across every configured source and merges (dedup by URL)
 export FINNHUB_API_KEY=...       # finnhub.io, financial news
 export NEWSDATA_API_KEY=...      # newsdata.io, general news
 export GUARDIAN_API_KEY=...      # open-platform.theguardian.com

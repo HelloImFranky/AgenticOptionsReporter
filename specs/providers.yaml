@@ -104,19 +104,21 @@ provider_router:
       zero clients. main.py's _optional_<name>_provider() helpers call
       these and catch that error, same "unconfigured = skip the agent"
       contract as phase_2a.
-    news: build_news_provider() — AOR_NEWS_PROVIDER_FALLBACK_ORDER, default "finnhub,newsdata,guardian,gnews,alphavantage,newsapi,hackernews"
-    financial: build_financial_provider() — AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER, default "fmp,finnhub,alphavantage"
+    news: build_news_provider() — AOR_NEWS_PROVIDER_FALLBACK_ORDER, default "finnhub,yfinance,newsdata,guardian,gnews,alphavantage,newsapi,hackernews"
+    financial: build_financial_provider() — AOR_FINANCIAL_PROVIDER_FALLBACK_ORDER, default "fmp,finnhub,yfinance,alphavantage"
     macro: build_macro_provider() — AOR_MACRO_PROVIDER_FALLBACK_ORDER, default "fred,bls,bea,imf,worldbank"
     market_data: build_market_data_provider() — AOR_MARKET_DATA_PROVIDER_FALLBACK_ORDER, default "yfinance,alphavantage,twelvedata,finnhub"
   keyless_sources_are_always_available: >
-    HackerNewsProvider (news), ImfMacroProvider/WorldBankMacroProvider
-    (macro), and YFinanceProvider (market data) need no API key, so
-    build_news_provider()/build_macro_provider()/build_market_data_provider()
-    never return an empty router — News, Macro Research, and the core
-    /analyze pipeline effectively always run, at minimum against the
-    keyless sources alone. This is intentional, not a contract change: an
-    agent still only runs when its provider constructed successfully. Only
-    Financial Research still requires at least one configured key.
+    HackerNewsProvider + YFinanceNewsProvider (news),
+    ImfMacroProvider/WorldBankMacroProvider (macro), and YFinanceProvider +
+    YFinanceFinancialProvider (market data + fundamentals) need no API key,
+    so build_news_provider()/build_macro_provider()/build_market_data_provider()/
+    build_financial_provider() never return an empty router — News, Macro,
+    Financial Research, and the core /analyze pipeline (now including its
+    fundamentals snapshot) effectively always run, at minimum against the
+    keyless sources alone. Adding keyless Yahoo as a fundamentals source is
+    what makes Financial Research and /analyze fundamentals always available;
+    an agent still only runs when its provider constructed successfully.
 
 interfaces:
   MarketDataProvider:
@@ -206,19 +208,28 @@ interfaces:
       health() -> ProviderHealth   # {provider, healthy, latency_ms, detail, checked_at}; probes the source, never raises
     capability_model: >
       Providers declare capabilities (data.news.base.NEWS_CAPABILITIES:
-      company_news, general_news, top_headlines). Unlike macro/financial,
-      the router PRIORITIZES rather than FILTERS by capability
+      company_news, general_news, top_headlines). The router PRIORITIZES
+      rather than FILTERS by capability
       (data.provider_router.prioritize_supporting): `search` treats the
       query as a ticker/company, so it prefers company_news specialists
-      (Finnhub, Alpha Vantage — ticker-aware endpoints) but KEEPS
-      general-news providers as a valid fallback (they can still surface a
-      keyword match). This is the SOFT counterpart to macro's hard
-      filter_supporting — a general-news source genuinely can answer a
-      ticker query (just less precisely), whereas World Bank genuinely has
-      no policy rate. The router's own `capabilities` is the union across
-      configured adapters.
+      (Finnhub, Yahoo, Alpha Vantage — ticker-aware endpoints) but KEEPS
+      general-news providers too (they can still surface a keyword match).
+      This is the SOFT counterpart to macro's hard filter_supporting — a
+      general-news source genuinely can answer a ticker query (just less
+      precisely), whereas World Bank genuinely has no policy rate. The
+      router's own `capabilities` is the union across configured adapters.
+    routing_model: >
+      `search` FANS OUT + MERGES (data.provider_router.acall_and_merge):
+      it queries the prioritized providers concurrently and unions their
+      articles, de-duplicated by URL (merge_lists), then sorts newest-first
+      and trims to `limit` — so coverage is the union of every source
+      (Yahoo + Finnhub + …), not just the first that answers. A provider
+      failing simply doesn't contribute; it raises only if all fail.
+      `top_headlines` stays first-success failover (a single general feed,
+      nothing to merge).
     provider_capabilities:
       FinnhubNewsProvider: [company_news, top_headlines]        # /company-news is ticker-aware
+      YFinanceNewsProvider: [company_news]                      # keyless; Ticker(.news) is ticker-aware, no general feed
       AlphaVantageNewsProvider: [company_news, top_headlines]   # NEWS_SENTIMENT&tickers= is ticker-aware
       NewsDataProvider: [general_news, top_headlines]
       GuardianNewsProvider: [general_news, top_headlines]
@@ -242,6 +253,15 @@ interfaces:
           search: GET /company-news?symbol={query}&from={date}&to={date}   # query treated as a ticker
           top_headlines: GET /news?category={category|general}
         note: English-only source; `language` is ignored.
+      - name: YFinanceNewsProvider
+        api_key_env_var: null   # keyless — always available in the merge fan-out
+        interface_style: >
+          Synchronous `yfinance` wrapped via asyncio.to_thread (like the
+          Yahoo market-data/fundamentals adapters). Ticker-aware only:
+          serves company_news via Ticker(.news), handling both the legacy
+          flat item shape and the newer nested `content` object; has no
+          general headline feed, so top_headlines raises Unsupported
+          (retryable) and headline routing falls through to other sources.
       - name: NewsDataProvider
         api_key_env_var: NEWSDATA_API_KEY
         free_tier: ~200 requests/day
@@ -339,26 +359,43 @@ interfaces:
       get_financial_statements(ticker: str) -> FinancialStatementSummary
       get_ratios(ticker: str) -> FinancialRatios
       get_analyst_estimates(ticker: str) -> AnalystEstimates
+      get_company_metrics(ticker: str) -> CompanyMetrics                  # valuation/quality key stats
+      get_earnings_history(ticker: str) -> EarningsHistory               # past EPS surprises
+      get_earnings_calendar(ticker: str) -> EarningsCalendar             # next report + consensus
+      get_insider_activity(ticker: str) -> InsiderActivity               # recent insider buys/sells
       health() -> ProviderHealth   # probes get_company_profile("AAPL"); never raises
     capability_model: >
       Providers declare which datasets they serve
       (data.financial.base.FINANCIAL_DATASETS: profile, statements,
-      ratios, analyst_estimates). Like macro, the router FILTERS (hard)
-      by capability (data.provider_router.filter_supporting): a provider
-      that doesn't advertise a dataset is never asked for it — Finnhub's
-      free tier has no statements, so a statements request routes only to
-      FMP/Alpha Vantage. Per-dataset priority override
-      AOR_FINANCIAL_PRIORITY_<DATASET> reorders candidates for one
-      dataset (mirrors macro's AOR_MACRO_PRIORITY_<METRIC>). The
-      orchestrator fetches only the datasets the router supports; a
-      dataset no configured provider serves is simply absent (the
-      financial_research agent renders it "not available" and reasons over
-      the rest), not an error. The router's supported_datasets is the
-      union across configured adapters.
+      ratios, analyst_estimates, metrics, earnings, earnings_calendar,
+      insider). CORE_FINANCIAL_DATASETS is the original four every
+      full-coverage source (FMP, Alpha Vantage) serves; the newer four
+      arrived as concrete-with-default methods on the interface (default
+      raises Unsupported), so an adapter serves one only by advertising it,
+      and existing adapters needed no changes. Like macro, the router
+      FILTERS (hard) by capability before calling.
+    routing_model: >
+      FAN-OUT + MERGE, not first-success failover. For each dataset the
+      router calls EVERY supporting provider concurrently
+      (data.provider_router.acall_and_merge) and combines the successes:
+      record datasets (profile/ratios/estimates/metrics/earnings_calendar)
+      are unioned field-by-field in priority order (merge_models — first
+      PRESENT value wins per field, so Finnhub + Yahoo yields a record
+      richer than either alone), and list datasets (earnings/insider) are
+      unioned and de-duplicated (merge_lists). A provider that fails simply
+      doesn't contribute; the merge raises only if every provider failed —
+      "try all providers and get all the data." The ONE exception is
+      statements: period-bound, so merging across providers would mix
+      reporting periods — it stays first-success failover
+      (acall_with_fallback). Per-dataset priority override
+      AOR_FINANCIAL_PRIORITY_<DATASET> reorders the field-level tie-break.
+      The router's supported_datasets is the union across configured
+      adapters; a dataset no provider serves is simply absent, not an error.
     provider_capabilities:
-      FmpFinancialProvider: [profile, statements, ratios, analyst_estimates]        # full coverage
+      FmpFinancialProvider: [profile, statements, ratios, analyst_estimates]        # core coverage
       AlphaVantageFinancialProvider: [profile, statements, ratios, analyst_estimates]
-      FinnhubFinancialProvider: [profile, ratios, analyst_estimates]                # no statements on the free tier
+      FinnhubFinancialProvider: [profile, ratios, analyst_estimates, metrics, earnings, earnings_calendar, insider]  # no statements on the free tier
+      YFinanceFinancialProvider: [profile, statements, ratios, analyst_estimates, metrics, earnings, earnings_calendar, insider]  # keyless, broadest coverage
     implementations:
       - name: FmpFinancialProvider
         api_key_env_var: FMP_API_KEY
@@ -391,6 +428,27 @@ interfaces:
             more cautious label; num_analysts is the sum of counts.
             Price targets are a premium endpoint and stay null rather
             than being guessed.
+          get_company_metrics: GET /stock/metric?metric=all (valuation/margin/52-week key stats; percentages -> fractions)
+          get_earnings_history: GET /stock/earnings (actual vs. estimate EPS per period)
+          get_earnings_calendar: GET /calendar/earnings?symbol={ticker} (nearest upcoming report + consensus)
+          get_insider_activity: GET /stock/insider-transactions (S=sell / P=buy codes normalized; value = shares × price)
+      - name: YFinanceFinancialProvider
+        api_key_env_var: null   # keyless — always available, so the fundamentals router is never empty
+        free_tier: unofficial Yahoo Finance endpoints via the `yfinance` package (same library as the market-data Yahoo adapter)
+        interface_style: >
+          The odd one out, like the market-data Yahoo adapter: `yfinance`
+          is SYNCHRONOUS and pandas-returning, so it implements the async
+          FinancialProvider directly and offloads each blocking call to a
+          worker thread via asyncio.to_thread. The single `.info` dict backs
+          profile/metrics/ratios/estimates and is cached per ticker so those
+          four share one fetch; unexpected yfinance/network errors normalize
+          to FinancialProviderUnavailable for the router.
+        endpoints:
+          get_company_profile / get_company_metrics / get_ratios / get_analyst_estimates: Ticker(.info)
+          get_financial_statements: Ticker(.income_stmt / .cashflow)
+          get_earnings_history: Ticker(.earnings_dates)
+          get_earnings_calendar: Ticker(.calendar)
+          get_insider_activity: Ticker(.insider_transactions)
       - name: AlphaVantageFinancialProvider
         api_key_env_var: ALPHA_VANTAGE_API_KEY
         free_tier: ~25 requests/day (why it sits last in the default fallback order)
