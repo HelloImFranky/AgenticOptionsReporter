@@ -597,6 +597,36 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         error_banner.content.controls[1].value = message
         error_banner.visible = bool(message)
 
+    # ---- results: run issues (data warnings + render problems) --------
+    # Sits between "Run analysis" and "Recommendation": surfaces anything
+    # that went sideways for a request that otherwise still returned a
+    # result — a provider timing out or rate-limiting (data_warnings from
+    # the /analyze response) or a problem rendering the payload itself. A
+    # hard request failure (network error, non-2xx) still goes to
+    # error_banner above, since there's no result to show at all there.
+    analysis_warnings_column = ft.Column([], spacing=4, tight=True)
+    analysis_warnings_banner = ft.Container(
+        visible=False,
+        bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.AMBER),
+        border_radius=10,
+        padding=12,
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=ft.Colors.AMBER_800, size=18),
+                analysis_warnings_column,
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        ),
+    )
+
+    def set_analysis_warnings(messages: list[str]) -> None:
+        analysis_warnings_column.controls = [
+            ft.Text(message, color=ft.Colors.AMBER_800, size=13, selectable=True)
+            for message in messages
+        ]
+        analysis_warnings_banner.visible = bool(messages)
+
     # ---- results: recommendation card -------------------------------
     action_badge = ft.Container(
         content=ft.Text("—", size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
@@ -699,7 +729,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
     fundamentals_card.visible = False
 
     results_column = ft.Column(
-        [recommendation_card, stat_row, candidates_card, fundamentals_card],
+        [analysis_warnings_banner, recommendation_card, stat_row, candidates_card, fundamentals_card],
         spacing=16,
         visible=False,
     )
@@ -722,6 +752,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
 
     def run_analysis(_: ft.ControlEvent) -> None:
         set_error("")
+        set_analysis_warnings([])
         progress.visible = True
         analyze_button.disabled = True
         reset_agents_tab()
@@ -757,7 +788,16 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             page.update()
             return
 
-        _render_result(result)
+        # _render_result must never leave the page stuck: a problem partway
+        # through rendering the payload (rather than fetching it) still
+        # needs to release the spinner/button and surface *something*,
+        # instead of silently leaving the analyze button disabled forever.
+        try:
+            _render_result(result)
+            set_analysis_warnings(result.get("data_warnings") or [])
+        except Exception as exc:  # noqa: BLE001 — always resolve the run, never hang
+            set_analysis_warnings([f"This run's results could not be fully rendered: {exc}"])
+
         progress.visible = False
         analyze_button.disabled = False
         results_placeholder.visible = False
