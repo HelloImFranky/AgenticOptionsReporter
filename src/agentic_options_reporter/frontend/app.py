@@ -33,7 +33,7 @@ from agentic_options_reporter.frontend.formatting import (
     fundamentals_metric_facts,
     growth_tone,
     insider_activity_header,
-    insider_transaction_bars,
+    insider_activity_series,
     macro_regime_tone,
     profitability_tone,
     quant_score_tone,
@@ -357,38 +357,61 @@ def _legend_swatch(color: str, label: str) -> ft.Row:
     )
 
 
-def _insider_bar_chart(bars: list[dict]) -> ft.Column:
-    """Horizontal bar graph of recent insider transactions: bar length scales
-    with the share count, green for buys and red for sells."""
-    rows: list[ft.Control] = []
-    for b in bars:
-        tone = ft.Colors.GREEN_600 if b.get("is_buy") else ft.Colors.RED_600
-        rows.append(
-            ft.Row(
-                [
-                    ft.Text(
-                        b.get("label", ""), size=11, width=120, no_wrap=True,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
-                    ft.Container(
-                        expand=True,
-                        content=ft.ProgressBar(
-                            value=max(0.0, min(1.0, float(b.get("ratio", 0.0)))),
-                            color=tone,
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-                            bar_height=10,
-                        ),
-                    ),
-                    ft.Text(
-                        b.get("detail", ""), size=11, width=95, color=tone,
-                        weight=ft.FontWeight.W_600, text_align=ft.TextAlign.RIGHT,
-                    ),
+def _short_date(value: str) -> str:
+    """'2026-06-01' -> '06/01' for compact time-axis ticks."""
+    parts = str(value).split("-")
+    return f"{parts[1]}/{parts[2]}" if len(parts) == 3 else str(value)
+
+
+def _insider_timeseries_chart(series: list[dict]) -> ft.BarChart:
+    """Time series of net insider share flow: one signed column per date,
+    green above the zero line for net buying, red below for net selling —
+    so direction reads from position as well as colour."""
+    max_mag = max((abs(p.get("net", 0.0)) for p in series), default=0.0) or 1.0
+    groups: list[ft.BarChartGroup] = []
+    labels: list[ft.ChartAxisLabel] = []
+    for i, p in enumerate(series):
+        tone = ft.Colors.GREEN_600 if p.get("is_buy") else ft.Colors.RED_600
+        net = float(p.get("net", 0.0))
+        groups.append(
+            ft.BarChartGroup(
+                x=i,
+                bar_rods=[
+                    ft.BarChartRod(
+                        from_y=0,
+                        to_y=net,
+                        width=14,
+                        color=tone,
+                        border_radius=2,
+                        tooltip=f"{p.get('date', '')}\n{net:+,.0f} shares",
+                    )
                 ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
         )
-    return ft.Column(rows, spacing=6, tight=True)
+        labels.append(
+            ft.ChartAxisLabel(
+                value=i,
+                label=ft.Container(
+                    ft.Text(_short_date(p.get("date", "")), size=9,
+                            color=ft.Colors.ON_SURFACE_VARIANT),
+                    padding=ft.padding.only(top=6),
+                ),
+            )
+        )
+    return ft.BarChart(
+        bar_groups=groups,
+        bottom_axis=ft.ChartAxis(labels=labels, labels_size=30),
+        left_axis=ft.ChartAxis(labels_size=44),
+        min_y=-max_mag * 1.15,
+        max_y=max_mag * 1.15,
+        # Recessive gridlines land one on the zero baseline (interval=max_mag).
+        horizontal_grid_lines=ft.ChartGridLines(
+            interval=max_mag, color=ft.Colors.OUTLINE_VARIANT, width=0.5
+        ),
+        interactive=True,
+        height=180,
+        expand=True,
+    )
 
 
 def _fundamentals_controls(fundamentals: dict | None, warnings: list | None) -> list[ft.Control]:
@@ -450,9 +473,9 @@ def _fundamentals_controls(fundamentals: dict | None, warnings: list | None) -> 
     insider_header = insider_activity_header(insider)
     if insider_header:
         controls.append(ft.Text(insider_header, size=12, weight=ft.FontWeight.BOLD))
-        bars = insider_transaction_bars(insider)
-        if bars:
-            controls.append(_insider_bar_chart(bars))
+        series = insider_activity_series(insider)
+        if series:
+            controls.append(_insider_timeseries_chart(series))
             controls.append(
                 ft.Row(
                     [
