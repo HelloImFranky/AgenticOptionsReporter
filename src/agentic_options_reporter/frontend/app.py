@@ -42,6 +42,8 @@ from agentic_options_reporter.frontend.formatting import (
     recommendation_tone,
     risk_level_tone,
     runs_to_rows,
+    score_severity_label,
+    score_severity_tone,
     trade_quality_agreement_summary,
     trade_quality_summary,
     trade_quality_tone,
@@ -279,18 +281,27 @@ def _card(*controls: ft.Control, padding: int = 20, spacing: int = 12) -> ft.Car
 
 def _domain_score_row(label: str, score: float, confidence: float, evidence: list[str]) -> ft.Column:
     ratio = max(0.0, min(1.0, score / 100))
-    if ratio >= 0.75:
-        color = ft.Colors.GREEN_600
-    elif ratio >= 0.4:
-        color = ft.Colors.AMBER_700
-    else:
-        color = ft.Colors.RED_600
+    tone = score_severity_tone(score)
+    color, _ = _tone_colors(tone)
+    severity_label = score_severity_label(score)
 
     return ft.Column(
         [
             ft.Row(
                 [
                     ft.Text(label, size=11, weight=ft.FontWeight.W_600, expand=True),
+                    ft.Container(
+                        content=ft.Text(severity_label, size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                        bgcolor=color,
+                        border_radius=12,
+                        padding=ft.padding.symmetric(vertical=2, horizontal=8),
+                    ),
+                ],
+                spacing=8,
+            ),
+            ft.Row(
+                [
+                    ft.ProgressBar(value=ratio, width=220, color=color, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST),
                     ft.Text(
                         f"{score:.0f}/100 · {confidence:.0f}% conf.",
                         size=11,
@@ -298,8 +309,8 @@ def _domain_score_row(label: str, score: float, confidence: float, evidence: lis
                     ),
                 ],
                 spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            ft.ProgressBar(value=ratio, width=220, color=color, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST),
             ft.Text(
                 " · ".join(evidence[:2]), size=10, color=ft.Colors.ON_SURFACE_VARIANT
             ) if evidence else ft.Container(height=0),
@@ -346,6 +357,7 @@ def _trade_quality_panel(trade_quality: dict | None) -> ft.Container:
     rows.extend(_missing_domain_row(label) for label in missing_domain_labels(domain_scores))
 
     summary = trade_quality_summary(trade_quality)
+    overall_label = score_severity_label(composite)
 
     return ft.Container(
         content=ft.Column(
@@ -360,7 +372,19 @@ def _trade_quality_panel(trade_quality: dict | None) -> ft.Container:
                         ),
                         ft.Column(
                             [
-                                ft.Text(f"Trade Quality Score · {action}", size=12, weight=ft.FontWeight.W_600),
+                                ft.Row(
+                                    [
+                                        ft.Text(f"Trade Quality Score · {action}", size=12, weight=ft.FontWeight.W_600),
+                                        ft.Container(
+                                            content=ft.Text(overall_label, size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                                            bgcolor=color,
+                                            border_radius=12,
+                                            padding=ft.padding.symmetric(vertical=2, horizontal=8),
+                                        ),
+                                    ],
+                                    spacing=8,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
                                 ft.Text(f"Confidence {confidence:.0f}%", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
                             ],
                             spacing=2,
