@@ -182,8 +182,9 @@ class AnalysisResult(BaseModel):
     candidates: list[ScoredCandidate]
     recommendation: Recommendation
     # Cross-provider fundamentals gathered alongside the technicals (merged
-    # across every configured source). Response-only: populated by /analyze,
-    # not persisted, so a run reloaded from the database has it as None.
+    # across every configured source) and persisted with the run, so a run
+    # reloaded via /runs/{id} carries the same snapshot. None on runs where
+    # no provider returned fundamentals (or that predate the feature).
     fundamentals: FundamentalsSnapshot | None = None
     # Non-fatal problems while gathering fundamentals (e.g. a provider rate
     # limited); [] when clean. The technical analysis always completes.

@@ -121,6 +121,8 @@ def run_analysis(
             levels,
             candidates,
             recommendation,
+            fundamentals=fundamentals,
+            data_warnings=data_warnings,
         )
 
     return AnalysisResult(
@@ -134,8 +136,8 @@ def run_analysis(
         candidates=candidates,
         recommendation=recommendation,
         # Cross-provider fundamentals, gathered best-effort alongside the
-        # technicals. Response-only (not persisted): a run reloaded from the
-        # database via /runs/{id} has these as None/[].
+        # technicals and persisted with the run (see persist_analysis_run),
+        # so /runs/{id} replays the same snapshot.
         fundamentals=fundamentals,
         data_warnings=data_warnings,
     )

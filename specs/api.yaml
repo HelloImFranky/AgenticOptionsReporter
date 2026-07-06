@@ -20,8 +20,8 @@ endpoints:
       earnings calendar, insider activity) merged across every configured
       financial provider — best-effort, so a fundamentals failure never
       blocks the analysis (it lands in data_warnings instead). The
-      fundamentals are response-only: they are NOT persisted, so a run
-      reloaded via GET /runs/{id} has fundamentals=null.
+      fundamentals are persisted with the run (JSON column), so a run
+      reloaded via GET /runs/{id} carries the same snapshot.
     path_params:
       symbol: str
     query_params:
@@ -129,7 +129,7 @@ models:
     support_resistance: list[SupportResistanceLevel]
     candidates: list[ScoredCandidate]
     recommendation: Recommendation
-    fundamentals: FundamentalsSnapshot | null   # cross-provider fundamentals gathered by /analyze; response-only (NOT persisted, so null on /runs/{id} replay)
+    fundamentals: FundamentalsSnapshot | null   # cross-provider fundamentals gathered by /analyze; persisted with the run and returned on /runs/{id} replay
     data_warnings: list[str]                     # non-fatal problems gathering fundamentals; [] when clean
 
   # Cross-provider fundamentals surfaced by GET /analyze/{symbol}. Every

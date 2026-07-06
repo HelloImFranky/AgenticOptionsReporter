@@ -12,6 +12,8 @@ tables:
       generated_at: datetime
       lookback_days: int
       expiration: str | null
+      fundamentals: json | null    # FundamentalsSnapshot serialized to JSON (profile/metrics/earnings/insider merged across providers); null when no provider returned any
+      data_warnings: json | null   # list[str] of non-fatal problems gathering fundamentals; null when clean
     relationships:
       - indicator_snapshot: one-to-one
       - trend_assessment: one-to-one

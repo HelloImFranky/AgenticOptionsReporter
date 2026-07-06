@@ -56,6 +56,7 @@ from agentic_options_reporter.models.db import (
 )
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
+    FundamentalsSnapshot,
     IndicatorSnapshot,
     Recommendation,
     ScoredCandidate,
@@ -103,12 +104,18 @@ def persist_analysis_run(
     levels: list[SupportResistanceLevel],
     candidates: list[ScoredCandidate],
     recommendation: Recommendation,
+    fundamentals: FundamentalsSnapshot | None = None,
+    data_warnings: list[str] | None = None,
 ) -> int:
     run = AnalysisRun(
         symbol=symbol,
         generated_at=datetime.now(timezone.utc).replace(tzinfo=None),
         lookback_days=lookback_days,
         expiration=expiration,
+        # mode="json" so nested dates (earnings calendar, insider filings)
+        # serialize to ISO strings the JSON column can hold.
+        fundamentals=fundamentals.model_dump(mode="json") if fundamentals is not None else None,
+        data_warnings=data_warnings or None,
     )
     session.add(run)
     session.flush()  # populate run.id

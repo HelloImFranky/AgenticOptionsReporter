@@ -37,6 +37,7 @@ from agentic_options_reporter.models.schemas import (
     CatalystFinding,
     CatalystItem,
     FinancialResearchFinding,
+    FundamentalsSnapshot,
     IndicatorSnapshot,
     InvestmentThesis,
     MacroResearchFinding,
@@ -85,6 +86,13 @@ def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
         if run.recommendation
         else Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="")
     )
+    # Fundamentals were persisted as JSON; rehydrate them (null on runs that
+    # predate the column or where no provider returned any).
+    fundamentals = (
+        FundamentalsSnapshot.model_validate(run.fundamentals)
+        if run.fundamentals is not None
+        else None
+    )
     return AnalysisResult(
         symbol=run.symbol,
         run_id=run.id,
@@ -95,6 +103,8 @@ def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
         support_resistance=levels,
         candidates=candidates,
         recommendation=recommendation,
+        fundamentals=fundamentals,
+        data_warnings=run.data_warnings or [],
     )
 
 
