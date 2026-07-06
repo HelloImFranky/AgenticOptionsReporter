@@ -77,6 +77,30 @@ _settings = get_settings()
 _session_factory = make_session_factory(_settings.database_url)
 
 
+def _json_to_trade_quality(raw: object, *, generated_at, source: str = "quant") -> TradeQualityScore | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        payload = dict(raw)
+        payload.setdefault("source", source)
+        payload.setdefault("generated_at", generated_at)
+        payload.setdefault("explainability", [])
+        payload.setdefault("weighting_profile", "swing")
+        payload.setdefault("recommendation_action", "HOLD")
+        payload.setdefault("contract_symbol", None)
+        payload.setdefault("domain_scores", {})
+        payload.setdefault("composite_score", 0.0)
+        payload.setdefault("confidence", 0.0)
+        try:
+            return TradeQualityScore.model_validate(payload)
+        except Exception:  # noqa: BLE001 - preserve compatibility with legacy rows
+            return None
+    try:
+        return TradeQualityScore.model_validate(raw, from_attributes=True)
+    except Exception:  # noqa: BLE001 - preserve compatibility with legacy rows
+        return None
+
+
 def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
     indicators = IndicatorSnapshot.model_validate(run.indicator_snapshot, from_attributes=True)
     trend = TrendAssessment.model_validate(run.trend_assessment, from_attributes=True)
@@ -101,11 +125,11 @@ def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
         if run.fundamentals is not None
         else None
     )
-    trade_quality = (
-        TradeQualityScore.model_validate(run.trade_quality_score, from_attributes=True)
-        if run.trade_quality_score is not None
-        else None
-    )
+    trade_quality = _json_to_trade_quality(
+        run.trade_quality_score,
+        generated_at=run.generated_at,
+        source="quant",
+    ) if run.trade_quality_score is not None else None
     return AnalysisResult(
         symbol=run.symbol,
         run_id=run.id,
@@ -123,6 +147,35 @@ def _to_analysis_result(run: AnalysisRun) -> AnalysisResult:
     )
 
 
+def _json_to_domain_score(raw: object) -> DomainScore | None:
+    if not raw:
+        return None
+    try:
+        return DomainScore.model_validate(raw)
+    except Exception:  # noqa: BLE001 - preserve thesis replay even for malformed legacy rows
+        return None
+
+
+def _json_to_trade_quality(raw: object, *, generated_at, source: str = "agent") -> TradeQualityScore:
+    fallback = TradeQualityScore(
+        contract_symbol=None,
+        domain_scores={},
+        composite_score=0.0,
+        confidence=0.0,
+        recommendation_action="HOLD",
+        weighting_profile="swing",
+        source=source,
+        generated_at=generated_at,
+        explainability=[],
+    )
+    if not raw:
+        return fallback
+    try:
+        return TradeQualityScore.model_validate(raw)
+    except Exception:  # noqa: BLE001 - preserve thesis replay even for malformed legacy rows
+        return fallback
+
+
 def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
     financial = (
         FinancialResearchFinding(
@@ -132,7 +185,15 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
             cash_flow=row.financial_cash_flow,
             analyst_consensus=row.financial_analyst_consensus or "",
             narrative=row.financial_narrative or "",
-            domain_score=DomainScore.model_validate(row.fundamental_domain_score),
+            domain_score=_json_to_domain_score(row.fundamental_domain_score) or DomainScore(
+                domain="fundamental",
+                score=0.0,
+                confidence=0.0,
+                evidence=[],
+                factors=[],
+                source="agent",
+                generated_at=row.generated_at,
+            ),
         )
         if row.financial_company_health is not None
         else None
@@ -143,7 +204,15 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
             summary=row.news_summary or "",
             catalysts=row.news_catalysts or [],
             risks=row.news_risks or [],
-            domain_score=DomainScore.model_validate(row.sentiment_domain_score),
+            domain_score=_json_to_domain_score(row.sentiment_domain_score) or DomainScore(
+                domain="sentiment",
+                score=0.0,
+                confidence=0.0,
+                evidence=[],
+                factors=[],
+                source="agent",
+                generated_at=row.generated_at,
+            ),
         )
         if row.news_sentiment is not None
         else None
@@ -153,7 +222,15 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
             regime=row.macro_regime,
             outlook=row.macro_outlook or "",
             summary=row.macro_summary or "",
-            domain_score=DomainScore.model_validate(row.macro_domain_score),
+            domain_score=_json_to_domain_score(row.macro_domain_score) or DomainScore(
+                domain="macro",
+                score=0.0,
+                confidence=0.0,
+                evidence=[],
+                factors=[],
+                source="agent",
+                generated_at=row.generated_at,
+            ),
         )
         if row.macro_regime is not None
         else None
@@ -170,7 +247,15 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
     relative_strength = (
         RelativeStrengthFinding(
             narrative=row.relative_strength_narrative or "",
-            domain_score=DomainScore.model_validate(row.relative_strength_domain_score),
+            domain_score=_json_to_domain_score(row.relative_strength_domain_score) or DomainScore(
+                domain="relative_strength",
+                score=0.0,
+                confidence=0.0,
+                evidence=[],
+                factors=[],
+                source="agent",
+                generated_at=row.generated_at,
+            ),
         )
         if row.relative_strength_narrative is not None
         else None
@@ -178,7 +263,15 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
     statistical_edge = (
         StatisticalEdgeFinding(
             narrative=row.statistical_edge_narrative or "",
-            domain_score=DomainScore.model_validate(row.statistical_edge_domain_score),
+            domain_score=_json_to_domain_score(row.statistical_edge_domain_score) or DomainScore(
+                domain="statistical_edge",
+                score=0.0,
+                confidence=0.0,
+                evidence=[],
+                factors=[],
+                source="agent",
+                generated_at=row.generated_at,
+            ),
         )
         if row.statistical_edge_narrative is not None
         else None
@@ -188,7 +281,15 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
             risk_level=row.risk_level,
             concerns=row.risk_concerns or [],
             position_sizing_note=row.risk_position_sizing_note or "",
-            domain_score=DomainScore.model_validate(row.risk_domain_score),
+            domain_score=_json_to_domain_score(row.risk_domain_score) or DomainScore(
+                domain="risk",
+                score=0.0,
+                confidence=0.0,
+                evidence=[],
+                factors=[],
+                source="agent",
+                generated_at=row.generated_at,
+            ),
         )
         if row.risk_level is not None
         else None
@@ -197,7 +298,15 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
         StrategySuggestion(
             strategy=row.strategy,
             rationale=row.strategy_rationale or "",
-            domain_score=DomainScore.model_validate(row.liquidity_domain_score),
+            domain_score=_json_to_domain_score(row.liquidity_domain_score) or DomainScore(
+                domain="liquidity",
+                score=0.0,
+                confidence=0.0,
+                evidence=[],
+                factors=[],
+                source="agent",
+                generated_at=row.generated_at,
+            ),
         )
         if row.strategy is not None
         else None
@@ -208,8 +317,16 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
         quant_interpretation=QuantInterpretation(
             narrative=row.quant_narrative,
             key_factors=row.quant_key_factors,
-            quant_trade_quality=TradeQualityScore.model_validate(row.quant_trade_quality),
-            technical_domain_score=DomainScore.model_validate(row.technical_domain_score),
+            quant_trade_quality=_json_to_trade_quality(row.quant_trade_quality, generated_at=row.generated_at),
+            technical_domain_score=_json_to_domain_score(row.technical_domain_score) or DomainScore(
+                domain="technical",
+                score=0.0,
+                confidence=0.0,
+                evidence=[],
+                factors=[],
+                source="agent",
+                generated_at=row.generated_at,
+            ),
         ),
         financial_research=financial,
         news_research=news,
@@ -221,7 +338,7 @@ def _to_thesis_result(row: AgentThesisRow) -> AgentThesisResult:
         strategy_suggestion=strategy,
         investment_thesis=InvestmentThesis(thesis=row.thesis, consensus=row.consensus),
         agent_trade_quality=(
-            TradeQualityScore.model_validate(row.agent_trade_quality)
+            _json_to_trade_quality(row.agent_trade_quality, generated_at=row.generated_at)
             if row.agent_trade_quality is not None
             else None
         ),
