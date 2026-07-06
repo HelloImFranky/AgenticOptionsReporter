@@ -9,14 +9,11 @@ malformed LLM output differently.
 from __future__ import annotations
 
 import json
-import re
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
-
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class ThesisGenerationError(RuntimeError):
@@ -24,20 +21,32 @@ class ThesisGenerationError(RuntimeError):
 
 
 def parse_response(model_cls: type[ModelT], raw_text: str, agent_name: str) -> ModelT:
-    match = _JSON_OBJECT_RE.search(raw_text.strip())
-    if not match:
+    text = raw_text.strip()
+    if not text:
+        raise ThesisGenerationError(f"{agent_name}: no JSON object found in LLM response: {raw_text!r}")
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        try:
+            return model_cls.model_validate(data)
+        except ValidationError as exc:
+            raise ThesisGenerationError(
+                f"{agent_name}: LLM response did not match the expected schema: {exc}"
+            ) from exc
+
+    if "{" in text:
         raise ThesisGenerationError(
-            f"{agent_name}: no JSON object found in LLM response: {raw_text!r}"
+            f"{agent_name}: LLM response was not valid JSON: no complete JSON object could be parsed"
         )
-
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise ThesisGenerationError(f"{agent_name}: LLM response was not valid JSON: {exc}") from exc
-
-    try:
-        return model_cls.model_validate(data)
-    except ValidationError as exc:
-        raise ThesisGenerationError(
-            f"{agent_name}: LLM response did not match the expected schema: {exc}"
-        ) from exc
+    raise ThesisGenerationError(
+        f"{agent_name}: no JSON object found in LLM response: {raw_text!r}"
+    )
