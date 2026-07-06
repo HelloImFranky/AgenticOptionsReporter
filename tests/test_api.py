@@ -115,6 +115,52 @@ def test_get_run_and_list_runs(client):
     assert runs[0]["run_id"] == run_id
 
 
+def test_get_run_returns_persisted_fundamentals(client):
+    """A run analysed with fundamentals returns the same snapshot on replay
+    (they're persisted as JSON, not response-only)."""
+    from agentic_options_reporter.models.schemas import (
+        CompanyMetrics,
+        CompanyProfile,
+        FundamentalsSnapshot,
+    )
+
+    test_client, session_factory = client
+    recommendation = Recommendation(
+        action="BUY", contract_symbol="TESTC00100000", confidence=0.7, rationale="test"
+    )
+    fundamentals = FundamentalsSnapshot(
+        ticker="TEST",
+        profile=CompanyProfile(ticker="TEST", name="Test Corp"),
+        metrics=CompanyMetrics(ticker="TEST", pe_ratio=25.0, beta=1.1),
+    )
+    with session_factory() as session:
+        run_id = persist_analysis_run(
+            session, "TEST", 260, None, _indicator_snapshot(),
+            TrendAssessment(direction="bullish", strength="moderate", adx=25),
+            VolumeAssessment(relative_volume=1.2, flags=["normal_volume"]),
+            [SupportResistanceLevel(price=95.0, level_type="support", touches=3, last_touch_index=10)],
+            [_scored_candidate()], recommendation,
+            fundamentals=fundamentals, data_warnings=["statements: rate limited"],
+        )
+
+    body = test_client.get(f"/runs/{run_id}").json()
+    assert body["fundamentals"] is not None
+    assert body["fundamentals"]["profile"]["name"] == "Test Corp"
+    assert body["fundamentals"]["metrics"]["pe_ratio"] == 25.0
+    assert body["data_warnings"] == ["statements: rate limited"]
+
+
+def test_get_run_without_fundamentals_returns_null(client):
+    """Runs persisted without fundamentals (e.g. legacy rows) replay cleanly
+    with fundamentals=null and no warnings."""
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)  # helper omits fundamentals
+
+    body = test_client.get(f"/runs/{run_id}").json()
+    assert body["fundamentals"] is None
+    assert body["data_warnings"] == []
+
+
 def test_get_run_returns_real_trend_volume_and_levels(client):
     """Regression test: a replayed run must not fall back to placeholders."""
     test_client, session_factory = client

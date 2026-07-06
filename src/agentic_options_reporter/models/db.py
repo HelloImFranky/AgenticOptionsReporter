@@ -20,6 +20,12 @@ class AnalysisRun(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     lookback_days: Mapped[int] = mapped_column(Integer)
     expiration: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Cross-provider fundamentals snapshot (FundamentalsSnapshot serialized
+    # to JSON) gathered alongside the technicals, plus any non-fatal
+    # warnings from gathering it. Nullable: older runs predate the column,
+    # and a run where no provider returned fundamentals stores null.
+    fundamentals: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    data_warnings: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     indicator_snapshot: Mapped["IndicatorSnapshotRow"] = relationship(
         back_populates="run", uselist=False, cascade="all, delete-orphan"

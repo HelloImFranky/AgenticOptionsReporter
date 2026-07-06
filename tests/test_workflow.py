@@ -38,6 +38,26 @@ def test_run_analysis_surfaces_merged_fundamentals(fake_provider, fake_financial
     assert result.data_warnings == []
 
 
+def test_run_analysis_persists_fundamentals(fake_provider, fake_financial_provider):
+    session_factory = make_session_factory("sqlite:///:memory:")
+
+    result = run_analysis(
+        symbol="TEST",
+        provider=fake_provider,
+        session_factory=session_factory,
+        financial_provider=fake_financial_provider,
+    )
+
+    from agentic_options_reporter.models.db import AnalysisRun
+
+    with session_factory() as session:
+        run = session.get(AnalysisRun, result.run_id)
+        # Fundamentals are persisted as JSON alongside the run.
+        assert run.fundamentals is not None
+        assert run.fundamentals["profile"]["name"] == "Test Corp"
+        assert run.fundamentals["metrics"]["pe_ratio"] == 25.0
+
+
 def test_run_analysis_persists_run(fake_provider, fake_financial_provider):
     session_factory = make_session_factory("sqlite:///:memory:")
 
