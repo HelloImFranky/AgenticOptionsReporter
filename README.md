@@ -41,13 +41,16 @@ poetry run agentic-options-reporter --base-url http://localhost:8000 health
 ```
 
 `analyze` returns the technicals plus a **cross-provider fundamentals
-snapshot** — company metrics (P/E, margins, beta, 52-week range), the next
-earnings date, recent earnings surprises, and insider transactions —
-merged across every configured financial provider. Data is gathered
-best-effort: a source failing never blocks the analysis, it just lands in
-`data_warnings`. Because Yahoo Finance is keyless, fundamentals are
-available out of the box with no API keys; adding FMP/Finnhub keys
-enriches and cross-fills the same fields (see below).
+snapshot** — company metrics (P/E, margins, beta, and 1-week / 1-month /
+52-week high-low ranges), the next earnings date, recent earnings
+surprises, and insider transactions (shown as a red/green bar graph, sells
+vs. buys) — merged across every configured financial provider. Data is
+gathered best-effort: a source failing never blocks the analysis, it just
+lands in `data_warnings`. Because Yahoo Finance is keyless, fundamentals
+are available out of the box with no API keys; adding FMP/Finnhub keys
+enriches and cross-fills the same fields (see below). No provider serves
+the 1-week/1-month high-low, so those are derived from the price history
+`analyze` already fetches.
 
 Or launch the Flet front end (a desktop window by default; see
 `src/agentic_options_reporter/frontend/app.py`), which drives the same API

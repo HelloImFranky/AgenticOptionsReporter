@@ -24,6 +24,7 @@ from agentic_options_reporter.data.financial.snapshot import gather_fundamentals
 from agentic_options_reporter.data.market_data import MarketDataProvider, build_market_data_provider
 from agentic_options_reporter.models.schemas import (
     AnalysisResult,
+    CompanyMetrics,
     FundamentalsSnapshot,
     OptionChain,
     PriceHistory,
@@ -79,6 +80,47 @@ def _optional_financial_provider() -> FinancialProvider | None:
         return None
 
 
+# Trading-day windows for the derived price ranges (markets are closed
+# weekends/holidays, so count bars rather than calendar days).
+_WEEK_BARS = 5
+_MONTH_BARS = 21
+
+
+def _price_range_metrics(history: PriceHistory) -> dict[str, float]:
+    """1-week and 1-month high/low derived from the most recent daily bars.
+    Returns only the ranges the available history supports (a brand-new
+    listing with <5 bars yields nothing)."""
+    bars = history.bars
+    ranges: dict[str, float] = {}
+    if len(bars) >= _WEEK_BARS:
+        window = bars[-_WEEK_BARS:]
+        ranges["week1_high"] = max(b.high for b in window)
+        ranges["week1_low"] = min(b.low for b in window)
+    if len(bars) >= _MONTH_BARS:
+        window = bars[-_MONTH_BARS:]
+        ranges["month1_high"] = max(b.high for b in window)
+        ranges["month1_low"] = min(b.low for b in window)
+    return ranges
+
+
+def _augment_price_ranges(
+    fundamentals: FundamentalsSnapshot | None, history: PriceHistory, symbol: str
+) -> FundamentalsSnapshot | None:
+    """Fold the derived 1w/1m high/low into the snapshot's metrics. Creates
+    a metrics record if the providers returned none, so the ranges show
+    even when fundamentals coverage is otherwise thin."""
+    ranges = _price_range_metrics(history)
+    if not ranges:
+        return fundamentals
+    if fundamentals is None:
+        fundamentals = FundamentalsSnapshot(ticker=symbol.upper())
+    metrics = fundamentals.metrics or CompanyMetrics(ticker=symbol.upper())
+    fundamentals = fundamentals.model_copy(
+        update={"metrics": metrics.model_copy(update=ranges)}
+    )
+    return fundamentals
+
+
 def run_analysis(
     symbol: str,
     lookback_days: int = 365,
@@ -98,6 +140,9 @@ def run_analysis(
     history, chain, fundamentals, data_warnings = asyncio.run(
         _fetch_inputs(provider, financial_provider, symbol, lookback_days, expiration)
     )
+    # No provider serves 1w/1m high/low, but we already have the daily bars,
+    # so derive them and fold them into the fundamentals metrics snapshot.
+    fundamentals = _augment_price_ranges(fundamentals, history, symbol)
 
     indicators = compute_indicators(history)
     trend = detect_trend(history, indicators)

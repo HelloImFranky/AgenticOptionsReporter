@@ -18,7 +18,8 @@ from agentic_options_reporter.frontend.formatting import (
     format_trend_summary,
     format_volume_summary,
     fundamentals_metric_facts,
-    insider_activity_summary,
+    insider_activity_header,
+    insider_transaction_bars,
     macro_regime_tone,
     recommendation_facts,
     recommendation_tone,
@@ -323,6 +324,18 @@ def test_fundamentals_metric_facts_filters_absent_fields():
     assert fundamentals_metric_facts(None) == []
 
 
+def test_fundamentals_metric_facts_includes_derived_price_ranges():
+    facts = dict(fundamentals_metric_facts({
+        "week1_high": 160.0, "week1_low": 150.0,
+        "month1_high": 165.0, "month1_low": 148.0, "week52_high": 200.0,
+    }))
+    assert facts["1w high"] == "160.00"
+    assert facts["1w low"] == "150.00"
+    assert facts["1m high"] == "165.00"
+    assert facts["1m low"] == "148.00"
+    assert facts["52w high"] == "200.00"
+
+
 def test_format_next_earnings():
     assert format_next_earnings({"next_date": "2026-08-01", "eps_estimate": 1.6}) == (
         "Next earnings: 2026-08-01  ·  EPS est. 1.60"
@@ -343,15 +356,32 @@ def test_earnings_surprise_facts_caps_and_formats():
     assert "1.50 vs 1.40 est" in value and "7.1%" in value
 
 
-def test_insider_activity_summary_describes_net_flow():
-    header, entries = insider_activity_summary({
+def test_insider_activity_header_describes_net_flow():
+    insider = {
         "net_shares": -500.0,
         "transactions": [
             {"name": "Jane Doe", "transaction_type": "sell", "shares": 1000},
             {"name": "John Roe", "transaction_type": "buy", "shares": 500},
         ],
-    })
+    }
+    header = insider_activity_header(insider)
     assert "net selling" in header and "500 shares" in header
-    assert entries[0] == "Jane Doe · sell 1,000"
-    assert insider_activity_summary(None) == ("", [])
-    assert insider_activity_summary({"transactions": []}) == ("", [])
+    assert insider_activity_header(None) == ""
+    assert insider_activity_header({"transactions": []}) == ""
+
+
+def test_insider_transaction_bars_scale_and_color_by_direction():
+    insider = {"transactions": [
+        {"name": "Jane Doe", "transaction_type": "sell", "shares": 1000},
+        {"name": "John Roe", "transaction_type": "buy", "shares": 500},
+        {"name": "No Shares", "transaction_type": "buy", "shares": None},  # dropped
+    ]}
+    bars = insider_transaction_bars(insider)
+    assert len(bars) == 2                       # the shareless row is skipped
+    assert bars[0]["is_buy"] is False           # sell -> red
+    assert bars[0]["ratio"] == 1.0              # largest magnitude -> full bar
+    assert bars[0]["detail"] == "sell 1,000"
+    assert bars[1]["is_buy"] is True            # buy -> green
+    assert bars[1]["ratio"] == 0.5              # 500 / 1000
+    assert insider_transaction_bars(None) == []
+    assert insider_transaction_bars({"transactions": []}) == []

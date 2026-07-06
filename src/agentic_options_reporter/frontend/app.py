@@ -32,6 +32,8 @@ from agentic_options_reporter.frontend.formatting import (
     format_volume_summary,
     fundamentals_metric_facts,
     growth_tone,
+    insider_activity_header,
+    insider_transaction_bars,
     macro_regime_tone,
     profitability_tone,
     quant_score_tone,
@@ -344,6 +346,51 @@ def _fact_box(label: str, value: str) -> ft.Container:
     )
 
 
+def _legend_swatch(color: str, label: str) -> ft.Row:
+    return ft.Row(
+        [
+            ft.Container(width=10, height=10, bgcolor=color, border_radius=2),
+            ft.Text(label, size=10, color=ft.Colors.ON_SURFACE_VARIANT),
+        ],
+        spacing=4,
+        tight=True,
+    )
+
+
+def _insider_bar_chart(bars: list[dict]) -> ft.Column:
+    """Horizontal bar graph of recent insider transactions: bar length scales
+    with the share count, green for buys and red for sells."""
+    rows: list[ft.Control] = []
+    for b in bars:
+        tone = ft.Colors.GREEN_600 if b.get("is_buy") else ft.Colors.RED_600
+        rows.append(
+            ft.Row(
+                [
+                    ft.Text(
+                        b.get("label", ""), size=11, width=120, no_wrap=True,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    ft.Container(
+                        expand=True,
+                        content=ft.ProgressBar(
+                            value=max(0.0, min(1.0, float(b.get("ratio", 0.0)))),
+                            color=tone,
+                            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                            bar_height=10,
+                        ),
+                    ),
+                    ft.Text(
+                        b.get("detail", ""), size=11, width=95, color=tone,
+                        weight=ft.FontWeight.W_600, text_align=ft.TextAlign.RIGHT,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+        )
+    return ft.Column(rows, spacing=6, tight=True)
+
+
 def _fundamentals_controls(fundamentals: dict | None, warnings: list | None) -> list[ft.Control]:
     """Render the cross-provider fundamentals snapshot (metrics, earnings,
     calendar, insider activity) surfaced by /analyze into a compact set of
@@ -400,32 +447,21 @@ def _fundamentals_controls(fundamentals: dict | None, warnings: list | None) -> 
         controls.append(ft.Column(rows, spacing=2, tight=True))
 
     insider = fundamentals.get("insider_activity")
-    txns = (insider or {}).get("transactions") or []
-    if insider and (txns or insider.get("net_shares") is not None):
-        net = insider.get("net_shares")
-        header = "Insider activity"
-        if isinstance(net, (int, float)) and net != 0:
-            direction = "net buying" if net > 0 else "net selling"
-            header += f" — {direction} ({abs(net):,.0f} shares)"
-        controls.append(ft.Text(header, size=12, weight=ft.FontWeight.BOLD))
-        chips = []
-        for t in txns[:5]:
-            ttype = t.get("transaction_type", "")
-            tone = ft.Colors.GREEN_700 if ttype != "sell" else ft.Colors.RED_600
-            shares = t.get("shares")
-            label = t.get("name") or "Insider"
-            if isinstance(shares, (int, float)):
-                label += f" · {ttype or 'txn'} {abs(shares):,.0f}"
-            chips.append(
-                ft.Container(
-                    content=ft.Text(label, size=11, color=ft.Colors.WHITE),
-                    bgcolor=tone,
-                    border_radius=12,
-                    padding=ft.padding.symmetric(vertical=3, horizontal=8),
+    insider_header = insider_activity_header(insider)
+    if insider_header:
+        controls.append(ft.Text(insider_header, size=12, weight=ft.FontWeight.BOLD))
+        bars = insider_transaction_bars(insider)
+        if bars:
+            controls.append(_insider_bar_chart(bars))
+            controls.append(
+                ft.Row(
+                    [
+                        _legend_swatch(ft.Colors.GREEN_600, "Buy"),
+                        _legend_swatch(ft.Colors.RED_600, "Sell"),
+                    ],
+                    spacing=14,
                 )
             )
-        if chips:
-            controls.append(ft.Row(chips, wrap=True, spacing=6, run_spacing=6))
 
     if warnings:
         controls.append(

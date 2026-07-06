@@ -36,7 +36,8 @@ from agentic_options_reporter.frontend.formatting import (
     format_next_earnings,
     format_timestamp,
     fundamentals_metric_facts,
-    insider_activity_summary,
+    insider_activity_header,
+    insider_transaction_bars,
     macro_regime_tone,
     quant_score_tone,
     recommendation_facts,
@@ -312,6 +313,68 @@ def _recommendation_block(
     return block
 
 
+def _insider_bar_chart(insider: dict[str, Any] | None, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    """Horizontal bar graph of insider transactions: a fixed-width track per
+    row, filled proportionally to the share count and coloured green for buys
+    / red for sells (the print counterpart of the Analyze tab's chart)."""
+    bars = insider_transaction_bars(insider)
+    if not bars:
+        return []
+    cell = styles.get("cell", styles["body"])
+    muted = styles.get("cellmuted", cell)
+    track_width = 1.9 * inch
+    bar_height = 8
+    rows: list[list[Any]] = []
+    for b in bars:
+        color = _TONE_COLORS["success"] if b.get("is_buy") else _TONE_COLORS["danger"]
+        ratio = max(0.0, min(1.0, float(b.get("ratio", 0.0))))
+        filled = track_width * ratio
+        meter = Table(
+            [["", ""]],
+            colWidths=[filled, track_width - filled],
+            rowHeights=[bar_height],
+            hAlign="LEFT",
+        )
+        meter.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (0, 0), color),
+                    ("BACKGROUND", (1, 0), (1, 0), _TABLE_HEADER_BG),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ]
+            )
+        )
+        rows.append(
+            [
+                Paragraph(escape(str(b.get("label", ""))), cell),
+                meter,
+                Paragraph(escape(str(b.get("detail", ""))), muted),
+            ]
+        )
+    table = Table(rows, colWidths=[1.5 * inch, track_width, 0.9 * inch], hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    legend = Paragraph(
+        '<font color="#2E7D32">■</font> Buy &nbsp;&nbsp; '
+        '<font color="#C62828">■</font> Sell',
+        styles.get("cellmuted", cell),
+    )
+    return [table, Spacer(1, 2), legend]
+
+
 def _fundamentals_blocks(
     fundamentals: dict[str, Any], data_warnings: list[Any] | None, styles: dict[str, ParagraphStyle]
 ) -> list[Any]:
@@ -337,11 +400,11 @@ def _fundamentals_blocks(
         blocks.append(Paragraph("Recent earnings (actual vs. estimate)", styles["agent"]))
         blocks.extend(_facts_table(surprise_facts, styles, cols=2))
 
-    header, entries = insider_activity_summary(fundamentals.get("insider_activity"))
-    if header:
+    insider_header = insider_activity_header(fundamentals.get("insider_activity"))
+    if insider_header:
         blocks.append(Spacer(1, 4))
-        blocks.append(Paragraph(escape(header), styles["agent"]))
-        blocks.extend(_bullets(entries, styles))
+        blocks.append(Paragraph(escape(insider_header), styles["agent"]))
+        blocks.extend(_insider_bar_chart(fundamentals.get("insider_activity"), styles))
 
     if data_warnings:
         blocks.append(Spacer(1, 4))
