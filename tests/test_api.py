@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from agentic_options_reporter import main as main_module
 from agentic_options_reporter.analysis.composite_score import compute_composite_score
+from agentic_options_reporter.models.db import AgentThesisRow
 from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
     CatalystFinding,
@@ -330,6 +331,39 @@ def test_generate_thesis_stream_emits_agent_events_then_result(client):
     assert persisted.status_code == 200
 
 
+def test_generate_thesis_stream_handles_legacy_trade_quality_rows(client):
+    test_client, session_factory = client
+    trade_quality = compute_composite_score(
+        {"technical": _domain_score("technical", 87.0)},
+        source="quant",
+        contract_symbol="TESTC00100000",
+    )
+    with session_factory() as session:
+        run_id = persist_analysis_run(
+            session,
+            "TEST",
+            260,
+            None,
+            _indicator_snapshot(),
+            TrendAssessment(direction="bullish", strength="moderate", adx=25),
+            VolumeAssessment(relative_volume=1.2, flags=["normal_volume"]),
+            [SupportResistanceLevel(price=95.0, level_type="support", touches=3, last_touch_index=10)],
+            [_scored_candidate()],
+            Recommendation(action="BUY", contract_symbol="TESTC00100000", confidence=0.7, rationale="test"),
+            trade_quality,
+            "swing",
+        )
+
+    fake_result = _fake_thesis_result(run_id)
+    with patch("agentic_options_reporter.main.build_llm_client", return_value=MagicMock()), patch(
+        "agentic_options_reporter.main.run_thesis_pipeline", return_value=fake_result
+    ):
+        response = test_client.post(f"/runs/{run_id}/thesis/stream")
+
+    assert response.status_code == 200
+    assert "event: result" in response.text
+
+
 def test_generate_thesis_stream_emits_error_frame_on_fatal_failure(client):
     from agentic_options_reporter.thesis.llm_client import LlmError
 
@@ -524,6 +558,34 @@ def test_get_thesis_after_generation(client):
     response = test_client.get(f"/runs/{run_id}/thesis")
     assert response.status_code == 200
     assert response.json()["quant_interpretation"]["narrative"] == "Strong trend."
+
+
+def test_get_thesis_handles_legacy_or_partial_rows(client):
+    test_client, session_factory = client
+    run_id = _persist_full_run(session_factory)
+
+    with session_factory() as session:
+        session.add(
+            AgentThesisRow(
+                run_id=run_id,
+                generated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                quant_narrative="Legacy thesis row",
+                quant_key_factors=[],
+                quant_trade_quality={},
+                technical_domain_score={},
+                thesis="Legacy thesis",
+                consensus="neutral",
+            )
+        )
+        session.commit()
+
+    response = test_client.get(f"/runs/{run_id}/thesis")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["quant_interpretation"]["narrative"] == "Legacy thesis row"
+    assert body["investment_thesis"]["thesis"] == "Legacy thesis"
+    assert body["risk_assessment"] is None
+    assert body["strategy_suggestion"] is None
 
 
 def test_generate_thesis_no_candidate_short_circuit(client):
