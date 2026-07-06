@@ -25,8 +25,12 @@ from agentic_options_reporter.frontend.formatting import (
     company_health_tone,
     consensus_tone,
     format_indicator_summary,
+    format_next_earnings,
+    format_num,
+    format_pct,
     format_trend_summary,
     format_volume_summary,
+    fundamentals_metric_facts,
     growth_tone,
     macro_regime_tone,
     profitability_tone,
@@ -340,29 +344,6 @@ def _fact_box(label: str, value: str) -> ft.Container:
     )
 
 
-def _fmt_money(value: object) -> str:
-    if not isinstance(value, (int, float)):
-        return "—"
-    v = float(value)
-    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if abs(v) >= threshold:
-            return f"${v / threshold:.2f}{suffix}"
-    return f"${v:,.0f}"
-
-
-def _fmt_pct(value: object) -> str:
-    """Format a fraction (0.123) as a percentage (12.3%)."""
-    if not isinstance(value, (int, float)):
-        return "—"
-    return f"{float(value) * 100:.1f}%"
-
-
-def _fmt_num(value: object, digits: int = 2) -> str:
-    if not isinstance(value, (int, float)):
-        return "—"
-    return f"{float(value):.{digits}f}"
-
-
 def _fundamentals_controls(fundamentals: dict | None, warnings: list | None) -> list[ft.Control]:
     """Render the cross-provider fundamentals snapshot (metrics, earnings,
     calendar, insider activity) surfaced by /analyze into a compact set of
@@ -379,37 +360,17 @@ def _fundamentals_controls(fundamentals: dict | None, warnings: list | None) -> 
 
     controls: list[ft.Control] = []
 
-    metrics = fundamentals.get("metrics")
-    if metrics:
-        pairs = [
-            ("Market cap", _fmt_money(metrics.get("market_cap"))),
-            ("P/E", _fmt_num(metrics.get("pe_ratio"))),
-            ("Forward P/E", _fmt_num(metrics.get("forward_pe"))),
-            ("PEG", _fmt_num(metrics.get("peg_ratio"))),
-            ("Price/Book", _fmt_num(metrics.get("price_to_book"))),
-            ("Beta", _fmt_num(metrics.get("beta"))),
-            ("Div. yield", _fmt_pct(metrics.get("dividend_yield"))),
-            ("Op. margin", _fmt_pct(metrics.get("operating_margin"))),
-            ("Profit margin", _fmt_pct(metrics.get("profit_margin"))),
-            ("Rev. growth", _fmt_pct(metrics.get("revenue_growth"))),
-            ("52w high", _fmt_num(metrics.get("week52_high"))),
-            ("52w low", _fmt_num(metrics.get("week52_low"))),
-        ]
-        shown = [(label, value) for label, value in pairs if value != "—"]
-        if shown:
-            controls.append(ft.Text("Key metrics", size=12, weight=ft.FontWeight.BOLD))
-            controls.append(ft.ResponsiveRow([_fact_box(k, v) for k, v in shown], spacing=8, run_spacing=8))
+    shown = fundamentals_metric_facts(fundamentals.get("metrics"))
+    if shown:
+        controls.append(ft.Text("Key metrics", size=12, weight=ft.FontWeight.BOLD))
+        controls.append(ft.ResponsiveRow([_fact_box(k, v) for k, v in shown], spacing=8, run_spacing=8))
 
-    calendar = fundamentals.get("earnings_calendar")
-    if calendar and calendar.get("next_date"):
-        eps = calendar.get("eps_estimate")
-        detail = f"Next earnings: {calendar['next_date']}"
-        if isinstance(eps, (int, float)):
-            detail += f"  ·  EPS est. {eps:.2f}"
+    next_earnings = format_next_earnings(fundamentals.get("earnings_calendar"))
+    if next_earnings:
         controls.append(
             ft.Row(
                 [ft.Icon(ft.Icons.EVENT_OUTLINED, size=16, color=ft.Colors.AMBER_800),
-                 ft.Text(detail, size=12, selectable=True)],
+                 ft.Text(next_earnings, size=12, selectable=True)],
                 spacing=8,
             )
         )
@@ -424,12 +385,12 @@ def _fundamentals_controls(fundamentals: dict | None, warnings: list | None) -> 
             pct = s.get("surprise_percent")
             beat = isinstance(pct, (int, float)) and pct >= 0
             tone_color = ft.Colors.GREEN_700 if beat else ft.Colors.RED_600
-            pct_text = _fmt_pct(pct) if isinstance(pct, (int, float)) else "—"
+            pct_text = format_pct(pct) if isinstance(pct, (int, float)) else "—"
             rows.append(
                 ft.Row(
                     [
                         ft.Text(str(s.get("period", "")), size=11, expand=True, selectable=True),
-                        ft.Text(f"{_fmt_num(actual)} / {_fmt_num(estimate)}", size=11,
+                        ft.Text(f"{format_num(actual)} / {format_num(estimate)}", size=11,
                                 color=ft.Colors.ON_SURFACE_VARIANT),
                         ft.Text(pct_text, size=11, weight=ft.FontWeight.W_600, color=tone_color),
                     ],
@@ -965,6 +926,8 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             "volume": analysis.get("volume"),
             "indicators": analysis.get("indicators"),
             "candidates": analysis.get("candidates"),
+            "fundamentals": analysis.get("fundamentals"),
+            "data_warnings": analysis.get("data_warnings"),
             "thesis": report_state.get("thesis"),
         }
 

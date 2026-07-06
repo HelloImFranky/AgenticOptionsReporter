@@ -9,6 +9,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph
 
 from agentic_options_reporter.frontend.report_pdf import (
+    _fundamentals_blocks,
     _recommendation_block,
     _styles,
     build_report_pdf,
@@ -111,10 +112,65 @@ def _is_pdf(data: bytes) -> bool:
     return data[:5] == b"%PDF-"
 
 
+_FUNDAMENTALS = {
+    "ticker": "AAPL",
+    "metrics": {
+        "market_cap": 3.0e12, "pe_ratio": 30.5, "beta": 1.2, "dividend_yield": 0.005,
+        "operating_margin": 0.30, "profit_margin": 0.25, "week52_high": 200.0, "week52_low": 150.0,
+    },
+    "earnings_calendar": {"next_date": "2026-08-01", "eps_estimate": 1.6},
+    "earnings_history": {"surprises": [
+        {"period": "2026-03-31", "actual_eps": 1.5, "estimate_eps": 1.4, "surprise_percent": 0.071},
+        {"period": "2025-12-31", "actual_eps": 2.1, "estimate_eps": 2.2, "surprise_percent": -0.045},
+    ]},
+    "insider_activity": {"net_shares": -500.0, "transactions": [
+        {"name": "Jane Doe", "transaction_type": "sell", "shares": 1000},
+        {"name": "John Roe", "transaction_type": "buy", "shares": 500},
+    ]},
+}
+
+
 def test_build_full_report_returns_pdf_bytes():
     data = build_report_pdf(_FULL_REPORT)
     assert _is_pdf(data)
     assert len(data) > 1500  # a real multi-section document, not an empty shell
+
+
+def test_fundamentals_blocks_render_metrics_earnings_and_insider():
+    styles = _styles()
+    blocks = _fundamentals_blocks(_FUNDAMENTALS, ["statements: rate limited"], styles)
+    text = _paragraph_texts(blocks)
+    assert "Key metrics" in text
+    assert "Next earnings: 2026-08-01" in text
+    assert "Recent earnings" in text
+    assert "net selling" in text            # -500 net shares
+    assert "Jane Doe" in text and "sell 1,000" in text
+    assert "statements: rate limited" in text   # data_warnings surfaced
+
+
+def test_fundamentals_blocks_omit_absent_sections():
+    styles = _styles()
+    # Only metrics present — no earnings/insider headers should render.
+    blocks = _fundamentals_blocks({"ticker": "X", "metrics": {"pe_ratio": 12.0}}, None, styles)
+    text = _paragraph_texts(blocks)
+    assert "Key metrics" in text
+    assert "Recent earnings" not in text
+    assert "Insider activity" not in text
+
+
+def test_fundamentals_blocks_empty_snapshot_notes_none_available():
+    styles = _styles()
+    blocks = _fundamentals_blocks({"ticker": "X"}, None, styles)
+    assert "No fundamentals available" in _paragraph_texts(blocks)
+
+
+def test_build_report_includes_fundamentals_section():
+    payload = {**_FULL_REPORT, "fundamentals": _FUNDAMENTALS, "data_warnings": []}
+    with_fund = build_report_pdf(payload)
+    without_fund = build_report_pdf({**payload, "fundamentals": None})
+    assert _is_pdf(with_fund)
+    # The extra section makes for a larger document.
+    assert len(with_fund) > len(without_fund)
 
 
 def test_build_report_without_thesis():
