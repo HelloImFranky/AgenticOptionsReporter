@@ -28,6 +28,8 @@ from agentic_options_reporter.frontend.formatting import (
     recommended_candidate,
     risk_level_tone,
     runs_to_rows,
+    score_severity_label,
+    score_severity_tone,
     technical_snapshot_facts,
     trade_quality_agreement_summary,
     trade_quality_summary,
@@ -137,6 +139,17 @@ def test_trade_quality_tone_thresholds():
     assert trade_quality_tone(75) == TONE_SUCCESS
     assert trade_quality_tone(50) == TONE_WARNING
     assert trade_quality_tone(10) == TONE_DANGER
+
+
+def test_score_severity_label_and_tone_mapping():
+    assert score_severity_label(82) == "Excellent"
+    assert score_severity_label(64) == "Strong"
+    assert score_severity_label(46) == "Balanced"
+    assert score_severity_label(24) == "Cautious"
+    assert score_severity_label(8) == "Weak"
+    assert score_severity_tone(82) == TONE_SUCCESS
+    assert score_severity_tone(46) == TONE_WARNING
+    assert score_severity_tone(8) == TONE_DANGER
 
 
 def test_trade_quality_summary_uses_explainability():

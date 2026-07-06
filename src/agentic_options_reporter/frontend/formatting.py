@@ -137,6 +137,25 @@ def trade_quality_tone(score: float) -> str:
     return TONE_DANGER
 
 
+def score_severity_label(score: float) -> str:
+    """A human-readable severity label for a 0-100 score."""
+    if score >= 80:
+        return "Excellent"
+    if score >= 60:
+        return "Strong"
+    if score >= 40:
+        return "Balanced"
+    if score >= 20:
+        return "Cautious"
+    return "Weak"
+
+
+def score_severity_tone(score: float) -> str:
+    """Semantic tone for a 0-100 score using the same thresholds as the
+    recommendation layer: green for strong, amber for middle, red for weak."""
+    return trade_quality_tone(score)
+
+
 def format_recommendation(recommendation: dict[str, Any]) -> str:
     contract = recommendation.get("contract_symbol") or "—"
     rationale = recommendation.get("rationale", "")
