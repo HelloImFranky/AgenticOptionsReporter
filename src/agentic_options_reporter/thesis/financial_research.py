@@ -30,24 +30,33 @@ from agentic_options_reporter.models.schemas import (
     GrowthTrend,
     ProfitabilityLevel,
 )
+from agentic_options_reporter.thesis.agent_domain_score import (
+    DOMAIN_SCORE_PROMPT_FIELD,
+    DOMAIN_SCORE_PROMPT_RULE,
+    LlmDomainScoreFields,
+    assemble_domain_score,
+)
 from agentic_options_reporter.thesis.llm_client import LlmClient
 from agentic_options_reporter.thesis.parsing import parse_response
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT = f"""\
 You are a financial research analyst. You are given a company's profile
 and, where available, its financial statement summary, ratios, key
 valuation/quality metrics, analyst estimates, and next earnings date, all
 already retrieved (and merged across multiple data providers). Some
 sections may be marked unavailable — reason over what is present.
 Interpret them into qualitative labels and a narrative — do not recompute
-or contradict any number you are given.
+or contradict any number you are given. You ALSO independently score the
+Fundamental domain of a Trade Quality Score (0-100) from this same
+material — {DOMAIN_SCORE_PROMPT_RULE}
 
 Respond with a single JSON object with exactly these keys:
-{"company_health": "strong" | "stable" | "weak",
+{{"company_health": "strong" | "stable" | "weak",
  "growth": "accelerating" | "steady" | "decelerating",
  "profitability": "high" | "moderate" | "low",
  "cash_flow": "positive" | "neutral" | "negative",
- "narrative": "<2-4 sentence plain-language summary>"}
+ "narrative": "<2-4 sentence plain-language summary>",
+ {DOMAIN_SCORE_PROMPT_FIELD}}}
 
 Output ONLY the JSON object, no markdown fences, no extra text.
 """
@@ -59,6 +68,7 @@ class _LlmAuthoredFields(BaseModel):
     profitability: ProfitabilityLevel
     cash_flow: CashFlowState
     narrative: str
+    domain_score: LlmDomainScoreFields
 
 
 def _build_prompt(
@@ -140,4 +150,5 @@ def run(
         # no provider served analyst estimates.
         analyst_consensus=estimates.consensus_rating if estimates is not None else "N/A",
         narrative=parsed.narrative,
+        domain_score=assemble_domain_score("fundamental", parsed.domain_score),
     )

@@ -1,13 +1,14 @@
 workflow: options_analysis
-version: 1
+version: 2
 description: >
-  End-to-end pipeline that turns a ticker symbol into a scored,
-  persisted options recommendation.
+  End-to-end pipeline that turns a ticker symbol into a Trade Quality
+  Scored, persisted options recommendation (specs/scoring.yaml).
 entrypoint: agentic_options_reporter.workflow:run_analysis
 input:
   symbol: str
   lookback_days: int = 365
   expiration: str | null = null   # ISO date; null = nearest expiration
+  weighting_profile: "day_trade | swing | long_term" = swing   # NEW in v2, specs/scoring.yaml
 steps:
   - name: download_data
     module: agentic_options_reporter.data.market_data
@@ -21,6 +22,22 @@ steps:
       default provider is build_market_data_provider() — a
       capability-filtering failover router across yfinance (keyless, both
       capabilities) plus any configured HTTP price sources.
+  - name: gather_domain_signals
+    new_in: v2
+    module: agentic_options_reporter.workflow (_fetch_inputs)
+    function: >
+      best-effort, concurrent alongside download_data + fundamentals:
+      MacroProvider.fetch(*) for DEFAULT_MACRO_METRICS,
+      NewsProvider.search(symbol), and MarketDataProvider.get_price_history
+      for a SPY benchmark; a second, still best-effort fetch for a
+      sector-ETF benchmark once the fundamentals sector is known
+      (analysis.domain_scoring.SECTOR_ETF_MAP).
+    output: [list[MacroObservation], list[NewsArticle], PriceHistory | null (benchmark), PriceHistory | null (sector)]
+    note: >
+      None of these ever block or fail /analyze — a failure is recorded
+      in data_warnings and the corresponding Trade Quality Score domain
+      is simply omitted downstream (see score_opportunity below). Feeds
+      the Macro, Sentiment, and Relative Strength domain scorers.
   - name: compute_indicators
     module: agentic_options_reporter.analysis.indicators
     function: compute_indicators
@@ -51,6 +68,18 @@ steps:
     function: compute_risk
     input: [list[EvaluatedContract]]
     output: list[RiskProfile]
+  - name: fetch_past_runs
+    new_in: v2
+    module: agentic_options_reporter.persistence
+    function: fetch_recent_runs_for_symbol
+    input: [symbol]
+    output: list[PastRunOutcome]
+    note: >
+      Opened in the SAME db session that will later persist this run
+      (run_analysis now opens its session before scoring, not just before
+      persisting) so the Statistical Edge domain scorer can look up this
+      symbol's history before its own run exists. See
+      analysis/statistical_edge.py.
   - name: score_opportunity
     module: agentic_options_reporter.analysis.scoring
     function: score_candidates
@@ -60,12 +89,30 @@ steps:
       - TrendAssessment
       - VolumeAssessment
       - list[SupportResistanceLevel]
+      - PriceHistory
+      - IndicatorSnapshot
+      - FundamentalsSnapshot | null
+      - list[MacroObservation]
+      - list[NewsArticle]
+      - PriceHistory | null (benchmark)
+      - PriceHistory | null (sector)
+      - list[PastRunOutcome]
+      - weighting_profile
     output: list[ScoredCandidate]
+    note: >
+      Computes all 8 Trade Quality Score domains per candidate (three
+      candidate-level: technical/risk/liquidity; five run-level, shared
+      across candidates of the same option_type bias:
+      fundamental/macro/sentiment/relative_strength/statistical_edge —
+      see analysis/domain_scoring.py + analysis/statistical_edge.py) and
+      blends them via analysis/composite_score.py into each candidate's
+      `score`/`domain_scores`. Replaces v1's single flat weighted-sum
+      formula.
   - name: generate_recommendation
     module: agentic_options_reporter.analysis.scoring
     function: build_recommendation
-    input: [list[ScoredCandidate]]
-    output: Recommendation
+    input: [list[ScoredCandidate], weighting_profile]
+    output: [Recommendation, TradeQualityScore | null]
   - name: persist_results
     module: agentic_options_reporter.persistence
     function: persist_analysis_run
@@ -74,5 +121,7 @@ steps:
       - IndicatorSnapshot
       - list[ScoredCandidate]
       - Recommendation
+      - TradeQualityScore | null
+      - weighting_profile
     output: AnalysisRunId
-output: AnalysisResult
+output: AnalysisResult   # now carries trade_quality + weighting_profile (specs/api.yaml)

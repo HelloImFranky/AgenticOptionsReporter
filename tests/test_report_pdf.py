@@ -13,7 +13,7 @@ from agentic_options_reporter.frontend.report_pdf import (
     _recommendation_block,
     _styles,
     build_report_pdf,
-    score_breakdown_flowables,
+    trade_quality_flowables,
 )
 
 
@@ -38,6 +38,30 @@ def _paragraph_texts(flowables) -> str:
     walk(list(flowables))
     return " ".join(parts)
 
+
+def _domain_score(score: float, confidence: float = 90.0, evidence=None) -> dict:
+    return {"score": score, "confidence": confidence, "evidence": evidence or []}
+
+
+def _trade_quality(domain_scores: dict, composite_score: float = 82.4, action: str = "BUY") -> dict:
+    return {
+        "composite_score": composite_score,
+        "confidence": 88.0,
+        "recommendation_action": action,
+        "weighting_profile": "swing",
+        "domain_scores": domain_scores,
+        "explainability": ["Technical (weight 20%): 91/100 — strongest contributor"],
+    }
+
+
+_TRADE_QUALITY = _trade_quality(
+    {
+        "technical": _domain_score(91.0, evidence=["Trend alignment: 1.00"]),
+        "risk": _domain_score(69.0),
+        "liquidity": _domain_score(74.0),
+    }
+)
+
 _FULL_REPORT = {
     "symbol": "AAPL",
     "generated_at": "2026-07-04T12:30:00",
@@ -59,20 +83,15 @@ _FULL_REPORT = {
             "score": 82.4,
             "delta": 0.612,
             "probability_of_profit": 0.58,
-            "score_breakdown": {
-                "trend_alignment": 0.82,
-                "volume_confirmation": 0.76,
-                "support_resistance_proximity": 0.61,
-                "liquidity": 0.74,
-                "risk_reward": 0.69,
-            },
         }
     ],
+    "trade_quality": _TRADE_QUALITY,
     "thesis": {
         "quant_interpretation": {
             "narrative": "The score is driven mostly by trend & volume.",
             "key_factors": ["trend alignment", "elevated volume"],
-            "overall_score": 82.4,
+            "quant_trade_quality": _TRADE_QUALITY,
+            "technical_domain_score": _domain_score(88.0, evidence=["Own read of the trend"]),
         },
         "financial_research": {
             "company_health": "strong",
@@ -81,17 +100,20 @@ _FULL_REPORT = {
             "cash_flow": "positive",
             "analyst_consensus": "overweight",
             "narrative": "Balance sheet is robust with expanding margins.",
+            "domain_score": _domain_score(80.0),
         },
         "news_research": {
             "sentiment": "bullish",
             "summary": "Coverage skews positive into earnings.",
             "catalysts": ["product launch"],
             "risks": ["valuation stretch"],
+            "domain_score": _domain_score(70.0),
         },
         "macro_research": {
             "regime": "risk_on",
             "outlook": "Supportive liquidity backdrop.",
             "summary": "Rates stable, credit spreads tight.",
+            "domain_score": _domain_score(65.0),
         },
         "catalyst_research": {
             "net_bias": "bullish",
@@ -106,19 +128,42 @@ _FULL_REPORT = {
                 }
             ],
         },
+        "relative_strength_research": {
+            "narrative": "Outperforming both SPY and the sector ETF over the last month.",
+            "domain_score": _domain_score(78.0),
+        },
+        "statistical_edge_research": {
+            "narrative": "Thin sample size, but the Monte Carlo readout leans favorable.",
+            "domain_score": _domain_score(55.0, confidence=40.0),
+        },
         "risk_assessment": {
             "risk_level": "medium",
             "concerns": ["theta decay", "gap risk into earnings"],
             "position_sizing_note": "Size to 1% of book.",
+            "domain_score": _domain_score(60.0),
         },
         "strategy_suggestion": {
             "strategy": "Long call",
             "rationale": "Directional conviction with defined risk.",
+            "domain_score": _domain_score(74.0),
         },
         "investment_thesis": {
             "consensus": "bullish",
             "thesis": "The setup favours a measured long-call position.",
         },
+        "agent_trade_quality": _trade_quality(
+            {
+                "technical": _domain_score(88.0),
+                "fundamental": _domain_score(80.0),
+                "sentiment": _domain_score(70.0),
+                "macro": _domain_score(65.0),
+                "risk": _domain_score(60.0),
+                "liquidity": _domain_score(74.0),
+                "relative_strength": _domain_score(78.0),
+                "statistical_edge": _domain_score(55.0, confidence=40.0),
+            },
+            composite_score=74.1,
+        ),
         "pipeline_warnings": [],
     },
 }
@@ -218,8 +263,11 @@ def test_build_report_without_thesis():
 
 def test_build_report_with_skipped_agents():
     thesis = dict(_FULL_REPORT["thesis"])
-    for skipped in ("financial_research", "news_research", "macro_research",
-                    "catalyst_research", "risk_assessment", "strategy_suggestion"):
+    for skipped in (
+        "financial_research", "news_research", "macro_research", "catalyst_research",
+        "relative_strength_research", "statistical_edge_research",
+        "risk_assessment", "strategy_suggestion",
+    ):
         thesis[skipped] = None
     thesis["pipeline_warnings"] = ["news_research: provider timed out"]
     payload = {**_FULL_REPORT, "thesis": thesis}
@@ -239,7 +287,8 @@ def test_build_report_escapes_markup_in_text():
             "quant_interpretation": {
                 "narrative": "Spread <5% & liquidity > threshold",
                 "key_factors": ["a & b", "x < y"],
-                "overall_score": 40.0,
+                "quant_trade_quality": _trade_quality({"technical": _domain_score(40.0)}, composite_score=40.0),
+                "technical_domain_score": _domain_score(40.0),
             },
             "investment_thesis": {"consensus": "neutral", "thesis": "Hold & wait <for> signal"},
         },
@@ -248,43 +297,49 @@ def test_build_report_escapes_markup_in_text():
     assert _is_pdf(data)
 
 
-def test_score_breakdown_flowables_render_for_candidate_payload():
-    flowables = score_breakdown_flowables(
-        {"score_breakdown": {"trend_alignment": 0.82, "liquidity": 0.74}},
+def test_trade_quality_flowables_render_for_domain_scores():
+    flowables = trade_quality_flowables(
+        _trade_quality({"technical": _domain_score(82.0), "liquidity": _domain_score(74.0)}),
         styles={"body": getSampleStyleSheet()["BodyText"]},
     )
     assert len(flowables) > 0
 
 
+def test_trade_quality_flowables_note_missing_domains():
+    styles = {"body": getSampleStyleSheet()["BodyText"]}
+    flowables = trade_quality_flowables(_trade_quality({"technical": _domain_score(82.0)}), styles=styles)
+    text = _paragraph_texts(flowables)
+    assert "Not available" in text
+    assert "Macro" in text
+
+
 def test_recommendation_block_replaces_factor_dump_with_summary():
-    """When a score breakdown is present, the block captions the chart with a
-    plain-language summary and drops the deterministic factor-dump rationale
-    (now redundant with the visualization)."""
+    """When a Trade Quality Score is present, the block captions the chart
+    with the composite engine's own explainability bullet and drops the
+    deterministic rationale (now redundant with the visualization)."""
     rec = {
         "action": "BUY", "confidence": 0.82, "contract_symbol": "AAPL_C",
         "rationale": "AAPL_C scored 82.4/100 (trend_alignment=1.00, liquidity=0.00).",
     }
-    candidates = [{"contract_symbol": "AAPL_C", "score_breakdown": {"trend_alignment": 1.0, "liquidity": 0.0}}]
-    text = _paragraph_texts(_recommendation_block(rec, candidates, _styles()))
+    candidates = [{"contract_symbol": "AAPL_C"}]
+    text = _paragraph_texts(_recommendation_block(rec, candidates, _TRADE_QUALITY, _styles()))
 
-    assert "led by trend alignment" in text          # the summary caption
-    assert "scored 82.4/100" not in text             # the raw factor-dump is gone
-    assert "trend_alignment=1.00" not in text
+    assert "strongest contributor" in text          # the explainability caption
+    assert "scored 82.4/100 (trend_alignment" not in text  # the raw factor-dump rationale is gone
 
 
-def test_recommendation_block_keeps_rationale_without_breakdown():
+def test_recommendation_block_keeps_rationale_without_trade_quality():
     """AVOID / no-candidate: nothing to visualize, so the rationale stays."""
     rec = {"action": "AVOID", "confidence": 0.0, "contract_symbol": None,
            "rationale": "No liquid, scoreable candidates were found in the option chain."}
-    text = _paragraph_texts(_recommendation_block(rec, [], _styles()))
+    text = _paragraph_texts(_recommendation_block(rec, [], None, _styles()))
     assert "No liquid, scoreable candidates" in text
 
 
-def test_build_report_with_zero_and_tiny_score_breakdown_factors():
-    """Regression: a factor at 0.0 (or a sliver like 0.05) made the meter
-    bar a zero/sub-padding-width cell, and reportlab raised 'negative
-    availWidth' at build time. The report must build for any ratio in
-    [0, 1]."""
+def test_build_report_with_zero_and_tiny_domain_score_factors():
+    """Regression: a domain at 0 (or a sliver like 5) made the meter bar a
+    zero/sub-padding-width cell, and reportlab raised 'negative availWidth'
+    at build time. The report must build for any score in [0, 100]."""
     payload = {
         "symbol": "AAPL",
         "recommendation": {
@@ -296,32 +351,37 @@ def test_build_report_with_zero_and_tiny_score_breakdown_factors():
                 "contract_symbol": "AAPL260116C00150000",
                 "option_type": "call", "strike": 150.0, "expiration": "2026-01-16",
                 "score": 80.0, "delta": 0.6, "probability_of_profit": 0.55,
-                "score_breakdown": {
-                    "trend_alignment": 1.0,        # full bar
-                    "volume_confirmation": 0.5,    # half
-                    "liquidity": 0.0,              # empty — the crash case
-                    "support_resistance_proximity": 0.05,  # tiny sliver
-                },
             }
         ],
+        "trade_quality": _trade_quality(
+            {
+                "technical": _domain_score(100.0),    # full bar
+                "risk": _domain_score(50.0),           # half
+                "liquidity": _domain_score(0.0),       # empty — the crash case
+                "fundamental": _domain_score(5.0),     # tiny sliver
+            }
+        ),
     }
     data = build_report_pdf(payload)
     assert _is_pdf(data)
 
 
-def test_score_breakdown_flowables_handle_extreme_ratios():
+def test_trade_quality_flowables_handle_extreme_ratios():
     styles = {
         "body": getSampleStyleSheet()["BodyText"],
         "cell": getSampleStyleSheet()["BodyText"],
         "cellhead": getSampleStyleSheet()["BodyText"],
+        "muted": getSampleStyleSheet()["BodyText"],
     }
     # Building the whole doc is what actually wraps the flowables (and would
-    # have raised); do it with only-zero and only-full breakdowns.
-    for breakdown in ({"a": 0.0, "b": 0.0}, {"a": 1.0, "b": 1.0}):
-        assert score_breakdown_flowables({"score_breakdown": breakdown}, styles)
+    # have raised); do it with only-zero and only-full domain scores.
+    for score in (0.0, 100.0):
+        trade_quality = _trade_quality({"technical": _domain_score(score), "risk": _domain_score(score)})
+        assert trade_quality_flowables(trade_quality, styles)
         payload = {
             "symbol": "T",
             "recommendation": {"action": "BUY", "confidence": 0.5, "contract_symbol": "C", "rationale": ""},
-            "candidates": [{"contract_symbol": "C", "score_breakdown": breakdown}],
+            "candidates": [{"contract_symbol": "C"}],
+            "trade_quality": trade_quality,
         }
         assert _is_pdf(build_report_pdf(payload))

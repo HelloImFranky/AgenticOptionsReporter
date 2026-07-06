@@ -21,14 +21,17 @@ from agentic_options_reporter.frontend.formatting import (
     insider_activity_header,
     insider_activity_series,
     macro_regime_tone,
+    domain_score_items,
+    missing_domain_labels,
     recommendation_facts,
     recommendation_tone,
     recommended_candidate,
     risk_level_tone,
-    score_breakdown_items,
-    score_breakdown_summary,
     runs_to_rows,
     technical_snapshot_facts,
+    trade_quality_agreement_summary,
+    trade_quality_summary,
+    trade_quality_tone,
     trend_tone,
 )
 
@@ -101,35 +104,76 @@ def test_recommendation_facts_avoid_shows_only_contract_dash():
     assert facts == [("Contract", "—")]
 
 
-def test_score_breakdown_items_formats_factor_names_and_values():
-    items = score_breakdown_items(
+def _domain_score(score: float, confidence: float = 90.0, evidence=None) -> dict:
+    return {"score": score, "confidence": confidence, "evidence": evidence or []}
+
+
+def test_domain_score_items_formats_labels_in_canonical_order():
+    items = domain_score_items(
         {
-            "trend_alignment": 1.0,
-            "support_resistance_proximity": 0.2,
+            "liquidity": _domain_score(74.0, evidence=["Spread tight"]),
+            "technical": _domain_score(91.0, evidence=["Strong uptrend"]),
         }
     )
-    assert items == [("Trend Alignment", 1.0), ("Support Resistance Proximity", 0.2)]
+    assert items == [
+        ("Technical", 91.0, 90.0, ["Strong uptrend"]),
+        ("Liquidity", 74.0, 90.0, ["Spread tight"]),
+    ]
 
 
-def test_score_breakdown_summary_names_leader_and_laggard():
-    summary = score_breakdown_summary(
-        {"trend_alignment": 1.0, "volume_confirmation": 0.55, "liquidity": 0.0}
+def test_domain_score_items_empty_for_no_domains():
+    assert domain_score_items({}) == []
+    assert domain_score_items(None) == []
+
+
+def test_missing_domain_labels_lists_absent_domains():
+    missing = missing_domain_labels({"technical": _domain_score(80.0)})
+    assert "Technical" not in missing
+    assert "Macro" in missing
+    assert "Statistical Edge" in missing
+
+
+def test_trade_quality_tone_thresholds():
+    assert trade_quality_tone(75) == TONE_SUCCESS
+    assert trade_quality_tone(50) == TONE_WARNING
+    assert trade_quality_tone(10) == TONE_DANGER
+
+
+def test_trade_quality_summary_uses_explainability():
+    summary = trade_quality_summary(
+        {"explainability": ["Technical (weight 30%): 91/100 — strongest contributor", "Macro: 40/100"]}
     )
-    assert summary == "Score is led by trend alignment (1.00) and held back by liquidity (0.00)."
+    assert "Technical" in summary
 
 
-def test_score_breakdown_summary_balanced_when_factors_are_close():
-    summary = score_breakdown_summary({"a": 0.70, "b": 0.72, "c": 0.68})
-    assert "balanced across 3 factors" in summary
+def test_trade_quality_summary_empty_is_blank():
+    assert trade_quality_summary({}) == ""
+    assert trade_quality_summary(None) == ""
 
 
-def test_score_breakdown_summary_single_factor():
-    assert score_breakdown_summary({"liquidity": 0.4}) == "Score reflects liquidity (0.40)."
+def test_trade_quality_agreement_summary_names_diverging_domain():
+    quant = {
+        "composite_score": 72.0,
+        "domain_scores": {"technical": _domain_score(90.0), "risk": _domain_score(60.0)},
+    }
+    agent = {
+        "composite_score": 48.0,
+        "domain_scores": {"technical": _domain_score(88.0), "risk": _domain_score(20.0)},
+    }
+    summary = trade_quality_agreement_summary(quant, agent)
+    assert "Risk" in summary
+    assert "diverge" in summary
 
 
-def test_score_breakdown_summary_empty_is_blank():
-    assert score_breakdown_summary({}) == ""
-    assert score_breakdown_summary(None) == ""
+def test_trade_quality_agreement_summary_broadly_aligned():
+    quant = {"composite_score": 70.0, "domain_scores": {"technical": _domain_score(70.0)}}
+    agent = {"composite_score": 72.0, "domain_scores": {"technical": _domain_score(72.0)}}
+    assert "broadly aligned" in trade_quality_agreement_summary(quant, agent)
+
+
+def test_trade_quality_agreement_summary_empty_without_both_sources():
+    assert trade_quality_agreement_summary(None, {"composite_score": 1}) == ""
+    assert trade_quality_agreement_summary({"composite_score": 1}, None) == ""
 
 
 def test_recommendation_facts_omits_absent_candidate_fields():

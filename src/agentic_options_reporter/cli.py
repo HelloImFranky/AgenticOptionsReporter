@@ -20,7 +20,12 @@ def cmd_health(client: ApiClient, args: argparse.Namespace) -> Any:
 
 
 def cmd_analyze(client: ApiClient, args: argparse.Namespace) -> Any:
-    return client.analyze(args.symbol, lookback_days=args.lookback_days, expiration=args.expiration)
+    return client.analyze(
+        args.symbol,
+        lookback_days=args.lookback_days,
+        expiration=args.expiration,
+        weighting_profile=args.weighting_profile,
+    )
 
 
 def cmd_runs(client: ApiClient, args: argparse.Namespace) -> Any:
@@ -92,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--expiration",
         default=None,
         help="Option expiration date (YYYY-MM-DD); defaults to the nearest expiration",
+    )
+    analyze_parser.add_argument(
+        "--weighting-profile",
+        choices=["day_trade", "swing", "long_term"],
+        default="swing",
+        help="Trade Quality Score weighting profile (default: swing)",
     )
     analyze_parser.set_defaults(func=cmd_analyze)
 

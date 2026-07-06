@@ -33,7 +33,7 @@ def test_price_range_metrics_partial_history():
     assert _price_range_metrics(_history([(10, 5)] * 3)) == {}
 
 
-def test_run_analysis_end_to_end(fake_provider, fake_financial_provider):
+def test_run_analysis_end_to_end(fake_provider, fake_financial_provider, fake_noop_macro_provider, fake_news_provider):
     session_factory = make_session_factory("sqlite:///:memory:")
 
     result = run_analysis(
@@ -42,6 +42,8 @@ def test_run_analysis_end_to_end(fake_provider, fake_financial_provider):
         provider=fake_provider,
         session_factory=session_factory,
         financial_provider=fake_financial_provider,
+        macro_provider=fake_noop_macro_provider,
+        news_provider=fake_news_provider,
     )
 
     assert result.symbol == "TEST"
@@ -51,7 +53,7 @@ def test_run_analysis_end_to_end(fake_provider, fake_financial_provider):
     assert result.indicators.sma_20 > 0
 
 
-def test_run_analysis_surfaces_merged_fundamentals(fake_provider, fake_financial_provider):
+def test_run_analysis_surfaces_merged_fundamentals(fake_provider, fake_financial_provider, fake_noop_macro_provider, fake_news_provider):
     session_factory = make_session_factory("sqlite:///:memory:")
 
     result = run_analysis(
@@ -59,6 +61,8 @@ def test_run_analysis_surfaces_merged_fundamentals(fake_provider, fake_financial
         provider=fake_provider,
         session_factory=session_factory,
         financial_provider=fake_financial_provider,
+        macro_provider=fake_noop_macro_provider,
+        news_provider=fake_news_provider,
     )
 
     assert result.fundamentals is not None
@@ -69,7 +73,7 @@ def test_run_analysis_surfaces_merged_fundamentals(fake_provider, fake_financial
     assert result.data_warnings == []
 
 
-def test_run_analysis_derives_1w_and_1m_price_ranges(fake_provider, fake_financial_provider):
+def test_run_analysis_derives_1w_and_1m_price_ranges(fake_provider, fake_financial_provider, fake_noop_macro_provider, fake_news_provider):
     """No provider serves 1w/1m high/low, so /analyze derives them from the
     price history and folds them into the fundamentals metrics."""
     session_factory = make_session_factory("sqlite:///:memory:")
@@ -79,6 +83,8 @@ def test_run_analysis_derives_1w_and_1m_price_ranges(fake_provider, fake_financi
         provider=fake_provider,
         session_factory=session_factory,
         financial_provider=fake_financial_provider,
+        macro_provider=fake_noop_macro_provider,
+        news_provider=fake_news_provider,
     )
 
     metrics = result.fundamentals.metrics
@@ -92,7 +98,7 @@ def test_run_analysis_derives_1w_and_1m_price_ranges(fake_provider, fake_financi
     assert metrics.pe_ratio == 25.0
 
 
-def test_run_analysis_persists_fundamentals(fake_provider, fake_financial_provider):
+def test_run_analysis_persists_fundamentals(fake_provider, fake_financial_provider, fake_noop_macro_provider, fake_news_provider):
     session_factory = make_session_factory("sqlite:///:memory:")
 
     result = run_analysis(
@@ -100,6 +106,8 @@ def test_run_analysis_persists_fundamentals(fake_provider, fake_financial_provid
         provider=fake_provider,
         session_factory=session_factory,
         financial_provider=fake_financial_provider,
+        macro_provider=fake_noop_macro_provider,
+        news_provider=fake_news_provider,
     )
 
     from agentic_options_reporter.models.db import AnalysisRun
@@ -112,7 +120,7 @@ def test_run_analysis_persists_fundamentals(fake_provider, fake_financial_provid
         assert run.fundamentals["metrics"]["pe_ratio"] == 25.0
 
 
-def test_run_analysis_persists_run(fake_provider, fake_financial_provider):
+def test_run_analysis_persists_run(fake_provider, fake_financial_provider, fake_noop_macro_provider, fake_news_provider):
     session_factory = make_session_factory("sqlite:///:memory:")
 
     result = run_analysis(
@@ -120,6 +128,8 @@ def test_run_analysis_persists_run(fake_provider, fake_financial_provider):
         provider=fake_provider,
         session_factory=session_factory,
         financial_provider=fake_financial_provider,
+        macro_provider=fake_noop_macro_provider,
+        news_provider=fake_news_provider,
     )
 
     from agentic_options_reporter.models.db import AnalysisRun
@@ -132,7 +142,7 @@ def test_run_analysis_persists_run(fake_provider, fake_financial_provider):
         assert len(run.scored_candidates) == len(result.candidates)
 
 
-def test_run_analysis_persists_trend_volume_and_levels(fake_provider, fake_financial_provider):
+def test_run_analysis_persists_trend_volume_and_levels(fake_provider, fake_financial_provider, fake_noop_macro_provider, fake_news_provider):
     """Regression test: these were previously placeholder-only on replay."""
     session_factory = make_session_factory("sqlite:///:memory:")
 
@@ -141,6 +151,8 @@ def test_run_analysis_persists_trend_volume_and_levels(fake_provider, fake_finan
         provider=fake_provider,
         session_factory=session_factory,
         financial_provider=fake_financial_provider,
+        macro_provider=fake_noop_macro_provider,
+        news_provider=fake_news_provider,
     )
 
     from agentic_options_reporter.models.db import AnalysisRun

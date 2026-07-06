@@ -1,10 +1,14 @@
 """Orchestrates the investment-thesis agent pipeline (specs/agents.yaml).
 
 Coordination only — no LLM calls of its own. Runs quant_interpreter, then
-the optional financial/news/macro research agents (each skipped with a
-null finding if its provider wasn't supplied — see specs/providers.yaml
-provider_availability), then (unless short-circuited) risk_challenger and
-options_strategy, then investment_thesis, and assembles the result.
+the optional financial/news/macro/catalyst research agents (each skipped
+with a null finding if its provider wasn't supplied — see
+specs/providers.yaml provider_availability), then (unless short-circuited)
+risk_challenger, options_strategy, relative_strength_research, and
+statistical_edge_research, then investment_thesis, and assembles the
+result — including the agent-side composite Trade Quality Score, blended
+from whichever agent DomainScores this run produced by the same
+analysis/composite_score.py engine the quant path uses.
 """
 
 from __future__ import annotations
@@ -13,6 +17,8 @@ import asyncio
 from collections.abc import Callable
 from datetime import datetime, timezone
 
+from agentic_options_reporter.analysis.composite_score import compute_composite_score
+from agentic_options_reporter.analysis.domain_scoring import SECTOR_ETF_MAP
 from agentic_options_reporter.data import financial as financial_data
 from agentic_options_reporter.data.financial import FinancialProvider, FinancialProviderError
 from agentic_options_reporter.data.macro import (
@@ -20,6 +26,7 @@ from agentic_options_reporter.data.macro import (
     MacroProvider,
     MacroProviderError,
 )
+from agentic_options_reporter.data.market_data import MarketDataError, MarketDataProvider
 from agentic_options_reporter.data.news import NewsProvider, NewsProviderError
 from agentic_options_reporter.data.sec_provider import SECProvider, SecProviderError
 from agentic_options_reporter.models.schemas import (
@@ -27,6 +34,8 @@ from agentic_options_reporter.models.schemas import (
     AgentExchange,
     AgentThesisResult,
     AnalysisResult,
+    DomainScore,
+    PriceHistory,
     QuantInterpretation,
 )
 from agentic_options_reporter.thesis import (
@@ -37,7 +46,9 @@ from agentic_options_reporter.thesis import (
     news_research,
     options_strategy,
     quant_interpreter,
+    relative_strength_research,
     risk_challenger,
+    statistical_edge_research,
 )
 from agentic_options_reporter.thesis.llm_client import LlmClient, LlmError, RecordingLlmClient
 from agentic_options_reporter.thesis.parsing import ThesisGenerationError
@@ -46,6 +57,11 @@ from agentic_options_reporter.thesis.parsing import ThesisGenerationError
 # live view (thesis.streaming / the SSE endpoint). None = run silently, the
 # original non-streaming behavior.
 OnEvent = Callable[[AgentEvent], None]
+
+# Enough trading-day history to comfortably cover the 21-bar relative
+# strength lookback (analysis/domain_scoring.py _RS_LOOKBACK_BARS).
+_RELATIVE_STRENGTH_HISTORY_DAYS = 60
+_RELATIVE_STRENGTH_LOOKBACK_BARS = 21
 
 
 async def _fetch_financial_inputs(provider: FinancialProvider, ticker: str) -> tuple:
@@ -123,6 +139,49 @@ async def _fetch_catalyst_inputs(
     return a, f, o, errors
 
 
+def _trailing_return(history: PriceHistory | None) -> float | None:
+    """21-trading-day return from `history`, or None if unavailable —
+    kept independent from analysis/domain_scoring.py's identical helper so
+    the thesis layer doesn't reach into the analysis layer's internals."""
+    if history is None:
+        return None
+    closes = [b.close for b in history.bars]
+    if len(closes) <= _RELATIVE_STRENGTH_LOOKBACK_BARS:
+        return None
+    start, end = closes[-_RELATIVE_STRENGTH_LOOKBACK_BARS - 1], closes[-1]
+    if start <= 0:
+        return None
+    return (end - start) / start
+
+
+async def _fetch_relative_strength_inputs(
+    market_data_provider: MarketDataProvider, symbol: str, sector: str | None
+) -> tuple[float | None, float | None, float | None, str | None]:
+    """Best-effort symbol/SPY/sector-ETF trailing returns for
+    relative_strength_research — reuses MarketDataProvider, no new
+    provider interface. A failed fetch for any one ticker just omits that
+    return, never raises."""
+    sector_etf = SECTOR_ETF_MAP.get(sector) if sector else None
+
+    async def fetch(ticker: str | None) -> PriceHistory | None:
+        if ticker is None:
+            return None
+        try:
+            return await market_data_provider.get_price_history(ticker, _RELATIVE_STRENGTH_HISTORY_DAYS)
+        except MarketDataError:
+            return None
+
+    symbol_history, benchmark_history, sector_history = await asyncio.gather(
+        fetch(symbol), fetch("SPY"), fetch(sector_etf)
+    )
+    return (
+        _trailing_return(symbol_history),
+        _trailing_return(benchmark_history),
+        _trailing_return(sector_history),
+        sector_etf,
+    )
+
+
 def _run_fatal_agent(emit, reset_exchange, agent: str, run):
     """Run a required agent (quant / risk / strategy / investment_thesis)
     whose failure is fatal to the whole run: emit started → completed, or
@@ -142,6 +201,7 @@ def _run_fatal_agent(emit, reset_exchange, agent: str, run):
 def run_thesis_pipeline(
     analysis_result: AnalysisResult,
     llm_client: LlmClient,
+    market_data_provider: MarketDataProvider,
     financial_provider: FinancialProvider | None = None,
     news_provider: NewsProvider | None = None,
     macro_provider: MacroProvider | None = None,
@@ -191,26 +251,46 @@ def run_thesis_pipeline(
     )
 
     if top_candidate is None:
-        # No liquid candidate to assess or size — skip risk/strategy agents
-        # entirely rather than asking an LLM to reason about data that
-        # doesn't exist (see specs/agents.yaml: no_candidate_short_circuit).
+        # No liquid candidate to assess or size — skip risk/strategy/
+        # relative-strength/statistical-edge agents entirely rather than
+        # asking an LLM to reason about data that doesn't exist (see
+        # specs/agents.yaml: no_candidate_short_circuit).
+        empty_trade_quality = compute_composite_score(
+            {},
+            source="quant",
+            weighting_profile=analysis_result.weighting_profile,
+            contract_symbol=None,
+        )
+        placeholder_technical = DomainScore(
+            domain="technical",
+            score=0.0,
+            confidence=0.0,
+            evidence=["No candidate contract to assess."],
+            factors=[],
+            source="quant",
+            generated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
         quant = QuantInterpretation(
             narrative=recommendation.rationale,
             key_factors=[],
-            score_breakdown={},
-            overall_score=0.0,
+            quant_trade_quality=empty_trade_quality,
+            technical_domain_score=placeholder_technical,
         )
         _emit("quant_interpreter", "completed", output=quant.model_dump())  # deterministic, no LLM call
         risk = None
         strategy = None
+        relative_strength_finding = None
+        statistical_edge_finding = None
         _emit("risk_challenger", "skipped", detail="No candidate contract to assess.")
         _emit("options_strategy", "skipped", detail="No candidate contract to build a strategy around.")
+        _emit("relative_strength_research", "skipped", detail="No candidate contract to assess.")
+        _emit("statistical_edge_research", "skipped", detail="No candidate contract to assess.")
     else:
         quant = _run_fatal_agent(
             _emit, _reset_exchange, "quant_interpreter",
             lambda: quant_interpreter.run(
                 client, analysis_result.indicators, analysis_result.trend,
-                analysis_result.volume, top_candidate,
+                analysis_result.volume, top_candidate, analysis_result.weighting_profile,
             ),
         )
         risk = _run_fatal_agent(
@@ -231,6 +311,7 @@ def run_thesis_pipeline(
     pipeline_warnings: list[str] = []
 
     financial_finding = None
+    company_sector: str | None = None
     if financial_provider is not None:
         _emit("financial_research", "started")
         ticker = analysis_result.symbol
@@ -241,6 +322,7 @@ def run_thesis_pipeline(
             profile, statements, ratios, estimates, metrics, calendar = asyncio.run(
                 _fetch_financial_inputs(financial_provider, ticker)
             )
+            company_sector = profile.sector or None
             _reset_exchange()
             financial_finding = financial_research.run(
                 client, profile, statements, ratios, estimates,
@@ -341,12 +423,85 @@ def run_thesis_pipeline(
     else:
         _emit("catalyst_research", "skipped", detail="No news, SEC, or macro provider configured.")
 
+    if top_candidate is not None:
+        _emit("relative_strength_research", "started")
+        try:
+            symbol_return, benchmark_return, sector_return, sector_etf = asyncio.run(
+                _fetch_relative_strength_inputs(market_data_provider, analysis_result.symbol, company_sector)
+            )
+            _reset_exchange()
+            relative_strength_finding = relative_strength_research.run(
+                client,
+                top_candidate.option_type,
+                analysis_result.symbol,
+                symbol_return,
+                benchmark_return,
+                sector_return,
+                sector_etf,
+            )
+        except ThesisGenerationError as exc:
+            pipeline_warnings.append(f"relative_strength_research: unusable model response — {exc}")
+            _emit("relative_strength_research", "failed", detail=str(exc))
+        else:
+            _emit(
+                "relative_strength_research", "completed",
+                output=relative_strength_finding.model_dump(), with_exchange=True,
+            )
+
+        _emit("statistical_edge_research", "started")
+        quant_statistical_edge = top_candidate.domain_scores.get("statistical_edge")
+        try:
+            _reset_exchange()
+            statistical_edge_finding = statistical_edge_research.run(
+                client, quant_statistical_edge, analysis_result.trend, top_candidate
+            )
+        except ThesisGenerationError as exc:
+            pipeline_warnings.append(f"statistical_edge_research: unusable model response — {exc}")
+            _emit("statistical_edge_research", "failed", detail=str(exc))
+        else:
+            _emit(
+                "statistical_edge_research", "completed",
+                output=statistical_edge_finding.model_dump(), with_exchange=True,
+            )
+
     thesis = _run_fatal_agent(
         _emit, _reset_exchange, "investment_thesis",
         lambda: investment_thesis.run(
             client, quant, financial_finding, news_finding, macro_finding, catalyst_finding,
             risk, strategy, recommendation, analysis_result.trend, analysis_result.volume,
         ),
+    )
+
+    # Agent-side composite Trade Quality Score: the same engine the quant
+    # path uses (analysis/composite_score.py), fed whichever agent
+    # DomainScores this run actually produced.
+    agent_domain_scores: dict[str, DomainScore] = {}
+    if top_candidate is not None:
+        agent_domain_scores["technical"] = quant.technical_domain_score
+    if financial_finding is not None:
+        agent_domain_scores["fundamental"] = financial_finding.domain_score
+    if news_finding is not None:
+        agent_domain_scores["sentiment"] = news_finding.domain_score
+    if macro_finding is not None:
+        agent_domain_scores["macro"] = macro_finding.domain_score
+    if risk is not None:
+        agent_domain_scores["risk"] = risk.domain_score
+    if strategy is not None:
+        agent_domain_scores["liquidity"] = strategy.domain_score
+    if relative_strength_finding is not None:
+        agent_domain_scores["relative_strength"] = relative_strength_finding.domain_score
+    if statistical_edge_finding is not None:
+        agent_domain_scores["statistical_edge"] = statistical_edge_finding.domain_score
+
+    agent_trade_quality = (
+        compute_composite_score(
+            agent_domain_scores,
+            source="agent",
+            weighting_profile=analysis_result.weighting_profile,
+            contract_symbol=recommendation.contract_symbol,
+        )
+        if agent_domain_scores
+        else None
     )
 
     return AgentThesisResult(
@@ -357,8 +512,11 @@ def run_thesis_pipeline(
         news_research=news_finding,
         macro_research=macro_finding,
         catalyst_research=catalyst_finding,
+        relative_strength_research=relative_strength_finding,
+        statistical_edge_research=statistical_edge_finding,
         risk_assessment=risk,
         strategy_suggestion=strategy,
         investment_thesis=thesis,
+        agent_trade_quality=agent_trade_quality,
         pipeline_warnings=pipeline_warnings,
     )

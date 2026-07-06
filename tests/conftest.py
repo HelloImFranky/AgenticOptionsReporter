@@ -7,9 +7,13 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from agentic_options_reporter.data.macro import MacroProvider
 from agentic_options_reporter.data.market_data import MarketDataProvider
+from agentic_options_reporter.data.news import NewsProvider
 from agentic_options_reporter.models.schemas import (
     Bar,
+    MacroObservation,
+    NewsArticle,
     OptionChain,
     OptionContract,
     PriceHistory,
@@ -151,6 +155,108 @@ class FakeFundamentalsProvider:
 @pytest.fixture
 def fake_financial_provider() -> FakeFundamentalsProvider:
     return FakeFundamentalsProvider()
+
+
+class FakeMacroProvider(MacroProvider):
+    """Offline MacroProvider stub for workflow/analyze tests: serves a
+    canned policy_rate/cpi observation with no network, so the Trade
+    Quality Score Macro domain scorer has something deterministic to
+    read. Advertises only the two metrics it fills."""
+
+    @property
+    def supported_metrics(self) -> frozenset[str]:
+        return frozenset({"policy_rate", "cpi"})
+
+    def supports(self, metric_id: str) -> bool:
+        return metric_id in self.supported_metrics
+
+    async def fetch(self, metric_id: str) -> MacroObservation:
+        values = {
+            "policy_rate": MacroObservation(
+                metric_id="policy_rate", label="Federal funds rate", value=5.0,
+                unit="percent", as_of=date(2026, 6, 1), source="fake", yoy_change_pct=-2.0,
+            ),
+            "cpi": MacroObservation(
+                metric_id="cpi", label="Consumer Price Index", value=310.0,
+                unit="index", as_of=date(2026, 6, 1), source="fake", yoy_change_pct=2.5,
+            ),
+        }
+        return values[metric_id]
+
+    async def health(self):
+        from agentic_options_reporter.data.macro import ProviderHealth
+
+        return ProviderHealth(provider="fake", healthy=True, checked_at=datetime.now(timezone.utc))
+
+
+@pytest.fixture
+def fake_macro_provider() -> FakeMacroProvider:
+    return FakeMacroProvider()
+
+
+class FakeNoOpMacroProvider(MacroProvider):
+    """Offline MacroProvider stub serving NO metrics — for tests asserting
+    the Macro domain (and macro_research) are cleanly omitted, with no
+    network I/O either way."""
+
+    @property
+    def supported_metrics(self) -> frozenset[str]:
+        return frozenset()
+
+    def supports(self, metric_id: str) -> bool:
+        return False
+
+    async def fetch(self, metric_id: str) -> MacroObservation:
+        raise NotImplementedError("FakeNoOpMacroProvider serves no metrics")
+
+    async def health(self):
+        from agentic_options_reporter.data.macro import ProviderHealth
+
+        return ProviderHealth(provider="fake", healthy=True, checked_at=datetime.now(timezone.utc))
+
+
+@pytest.fixture
+def fake_noop_macro_provider() -> FakeNoOpMacroProvider:
+    return FakeNoOpMacroProvider()
+
+
+class FakeNewsProvider(NewsProvider):
+    """Offline NewsProvider stub for workflow/analyze tests: serves a
+    canned article with no network."""
+
+    def __init__(self, articles: list[NewsArticle] | None = None) -> None:
+        self._articles = articles if articles is not None else [
+            NewsArticle(
+                headline="Company beats on earnings",
+                source="fake",
+                url="https://example.com/1",
+                published_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                summary="Solid quarter with raised guidance.",
+            )
+        ]
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return frozenset({"company_news"})
+
+    def supports(self, capability: str) -> bool:
+        return capability in self.capabilities
+
+    async def search(self, query, start_date=None, end_date=None, language="en", limit=20):
+        return list(self._articles)
+
+    async def top_headlines(self, category=None, limit=20):
+        return list(self._articles)
+
+    async def health(self):
+        from agentic_options_reporter.data.news import ProviderHealth
+
+        return ProviderHealth(provider="fake", healthy=True, checked_at=datetime.now(timezone.utc))
+
+
+@pytest.fixture
+def fake_news_provider() -> FakeNewsProvider:
+    return FakeNewsProvider()
 
 
 class FakeLlmClient(LlmClient):

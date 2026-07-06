@@ -27,6 +27,7 @@ endpoints:
     query_params:
       lookback_days: int = 365
       expiration: str | null = null
+      weighting_profile: "day_trade | swing | long_term" = swing   # specs/scoring.yaml; persisted on the run, invalid values 422 automatically (Literal type)
     response: AnalysisResult
     errors:
       404: symbol not found / no data returned by provider
@@ -129,6 +130,8 @@ models:
     support_resistance: list[SupportResistanceLevel]
     candidates: list[ScoredCandidate]
     recommendation: Recommendation
+    trade_quality: TradeQualityScore | null   # quant-side Trade Quality Score for the recommended candidate; null on AVOID (specs/scoring.yaml)
+    weighting_profile: str                     # day_trade | swing | long_term; persisted so GET /runs/{id} replays the same profile
     fundamentals: FundamentalsSnapshot | null   # cross-provider fundamentals gathered by /analyze; persisted with the run and returned on /runs/{id} replay
     data_warnings: list[str]                     # non-fatal problems gathering fundamentals; [] when clean
 
@@ -215,16 +218,46 @@ models:
     news_research: NewsResearchFinding | null
     macro_research: MacroResearchFinding | null
     catalyst_research: CatalystFinding | null
+    relative_strength_research: RelativeStrengthFinding | null
+    statistical_edge_research: StatisticalEdgeFinding | null
     risk_assessment: RiskAssessment | null
     strategy_suggestion: StrategySuggestion | null
     investment_thesis: InvestmentThesis
+    agent_trade_quality: TradeQualityScore | null   # agent-side composite, see specs/scoring.yaml + specs/agents.yaml composite_step
     pipeline_warnings: list[str]   # non-fatal mid-run problems, e.g. a research provider rate limited; [] when clean
+
+  # See specs/scoring.yaml for the full domain-scoring/composite-engine contract.
+  DomainFactor:
+    name: str
+    value: float    # 0-1
+    weight: float    # 0-1
+    detail: str
+
+  DomainScore:
+    domain: str        # technical | risk | liquidity | fundamental | macro | sentiment | relative_strength | statistical_edge
+    score: float        # 0-100
+    confidence: float    # 0-100
+    evidence: list[str]
+    factors: list[DomainFactor]
+    source: str          # quant | agent
+    generated_at: datetime
+
+  TradeQualityScore:
+    contract_symbol: str | null
+    domain_scores: dict[str, DomainScore]
+    composite_score: float
+    confidence: float
+    recommendation_action: str   # STRONG_BUY | BUY | HOLD | AVOID
+    weighting_profile: str        # day_trade | swing | long_term
+    source: str                   # quant | agent
+    generated_at: datetime
+    explainability: list[str]
 
   QuantInterpretation:
     narrative: str
     key_factors: list[str]
-    score_breakdown: dict[str, float]
-    overall_score: float
+    quant_trade_quality: TradeQualityScore
+    technical_domain_score: DomainScore
 
   FinancialResearchFinding:
     company_health: str      # strong | stable | weak
@@ -233,17 +266,20 @@ models:
     cash_flow: str             # positive | neutral | negative
     analyst_consensus: str
     narrative: str
+    domain_score: DomainScore
 
   NewsResearchFinding:
     sentiment: str    # bullish | bearish | neutral
     summary: str
     catalysts: list[str]
     risks: list[str]
+    domain_score: DomainScore
 
   MacroResearchFinding:
     regime: str   # risk_on | risk_off | neutral
     outlook: str
     summary: str
+    domain_score: DomainScore
 
   CatalystItem:
     title: str
@@ -257,14 +293,24 @@ models:
     summary: str
     net_bias: str   # bullish | bearish | neutral | mixed
 
+  RelativeStrengthFinding:
+    narrative: str
+    domain_score: DomainScore
+
+  StatisticalEdgeFinding:
+    narrative: str
+    domain_score: DomainScore
+
   RiskAssessment:
     risk_level: str   # low | medium | high
     concerns: list[str]
     position_sizing_note: str
+    domain_score: DomainScore
 
   StrategySuggestion:
     strategy: str
     rationale: str
+    domain_score: DomainScore
 
   InvestmentThesis:
     thesis: str
@@ -283,7 +329,7 @@ models:
     raw_response: str      # the model's raw text response, before parsing
 
   AgentEvent:
-    agent: str            # quant_interpreter | financial_research | news_research | macro_research | catalyst_research | risk_challenger | options_strategy | investment_thesis
+    agent: str            # quant_interpreter | financial_research | news_research | macro_research | catalyst_research | relative_strength_research | statistical_edge_research | risk_challenger | options_strategy | investment_thesis
     phase: str            # started | completed | skipped | failed
     at: datetime
     exchange: AgentExchange | null   # the raw prompt/response for an LLM-backed agent; null for deterministic or non-run phases

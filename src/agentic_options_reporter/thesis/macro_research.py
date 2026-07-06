@@ -11,24 +11,42 @@ and GDP but no policy rate).
 
 from __future__ import annotations
 
-from agentic_options_reporter.models.schemas import MacroObservation, MacroResearchFinding
+from pydantic import BaseModel
+
+from agentic_options_reporter.models.schemas import MacroObservation, MacroRegime, MacroResearchFinding
+from agentic_options_reporter.thesis.agent_domain_score import (
+    DOMAIN_SCORE_PROMPT_FIELD,
+    DOMAIN_SCORE_PROMPT_RULE,
+    LlmDomainScoreFields,
+    assemble_domain_score,
+)
 from agentic_options_reporter.thesis.llm_client import LlmClient
 from agentic_options_reporter.thesis.parsing import parse_response
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT = f"""\
 You are a macroeconomic analyst. You are given a set of recent
 macroeconomic indicators, all already retrieved from data providers.
 Some indicators may be absent — reason over what is present, and do not
 invent figures. Characterize the overall regime and outlook for risk
-assets; do not recompute or contradict any figure you are given.
+assets; do not recompute or contradict any figure you are given. You ALSO
+independently score the Macro domain of a Trade Quality Score (0-100)
+from this same material — {DOMAIN_SCORE_PROMPT_RULE}
 
 Respond with a single JSON object with exactly these keys:
-{"regime": "risk_on" | "risk_off" | "neutral",
+{{"regime": "risk_on" | "risk_off" | "neutral",
  "outlook": "<1-3 sentence forward-looking view>",
- "summary": "<2-4 sentence plain-language summary of current conditions>"}
+ "summary": "<2-4 sentence plain-language summary of current conditions>",
+ {DOMAIN_SCORE_PROMPT_FIELD}}}
 
 Output ONLY the JSON object, no markdown fences, no extra text.
 """
+
+
+class _LlmAuthoredFields(BaseModel):
+    regime: MacroRegime
+    outlook: str
+    summary: str
+    domain_score: LlmDomainScoreFields
 
 
 def _format_observation(obs: MacroObservation) -> str:
@@ -52,4 +70,10 @@ Macroeconomic indicators:
 def run(llm_client: LlmClient, observations: list[MacroObservation]) -> MacroResearchFinding:
     user_prompt = _build_prompt(observations)
     raw = llm_client.complete(_SYSTEM_PROMPT, user_prompt)
-    return parse_response(MacroResearchFinding, raw, "macro_research")
+    parsed = parse_response(_LlmAuthoredFields, raw, "macro_research")
+    return MacroResearchFinding(
+        regime=parsed.regime,
+        outlook=parsed.outlook,
+        summary=parsed.summary,
+        domain_score=assemble_domain_score("macro", parsed.domain_score),
+    )

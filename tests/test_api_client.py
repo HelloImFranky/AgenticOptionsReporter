@@ -63,10 +63,12 @@ def test_analyze_passes_expiration_only_when_set(monkeypatch):
     client = ApiClient()
 
     client.analyze("AAPL", lookback_days=90)
-    assert captured["params"] == {"lookback_days": 90}
+    assert captured["params"] == {"lookback_days": 90, "weighting_profile": "swing"}
 
     client.analyze("AAPL", lookback_days=90, expiration="2026-01-16")
-    assert captured["params"] == {"lookback_days": 90, "expiration": "2026-01-16"}
+    assert captured["params"] == {
+        "lookback_days": 90, "weighting_profile": "swing", "expiration": "2026-01-16",
+    }
 
 
 def test_list_runs_passes_symbol_only_when_set(monkeypatch):

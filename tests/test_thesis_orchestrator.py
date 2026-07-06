@@ -3,17 +3,20 @@ from datetime import date, datetime, timezone
 
 from agentic_options_reporter.data.financial import FinancialProvider, ProviderHealth as FinancialProviderHealth
 from agentic_options_reporter.data.macro import MacroProvider
+from agentic_options_reporter.data.market_data import MarketDataProvider, ProviderHealth as MarketDataProviderHealth
 from agentic_options_reporter.data.news import NewsProvider, ProviderHealth
 from agentic_options_reporter.data.sec_provider import SECProvider
 from agentic_options_reporter.models.schemas import (
     AnalysisResult,
     AnalystEstimates,
     CompanyProfile,
+    DomainScore,
     FinancialRatios,
     FinancialStatementSummary,
     IndicatorSnapshot,
     MacroObservation,
     NewsArticle,
+    PriceHistory,
     Recommendation,
     ScoredCandidate,
     SecFiling,
@@ -23,14 +26,32 @@ from agentic_options_reporter.models.schemas import (
 )
 from agentic_options_reporter.thesis.orchestrator import run_thesis_pipeline
 
-from conftest import FakeLlmClient
+from conftest import FakeLlmClient, _make_bars
+
+_AGENT_DOMAIN_SCORE = {"score": 72.0, "confidence": 85.0, "evidence": ["own read"]}
 
 _ALL_RESPONSES = {
-    "quantitative markets analyst": json.dumps({"narrative": "Strong setup.", "key_factors": ["trend", "liquidity"]}),
-    "skeptical risk manager": json.dumps(
-        {"risk_level": "medium", "concerns": ["high IV"], "position_sizing_note": "Size at 2%."}
+    "quantitative markets analyst": json.dumps(
+        {"narrative": "Strong setup.", "key_factors": ["trend", "liquidity"], "domain_score": _AGENT_DOMAIN_SCORE}
     ),
-    "options strategist": json.dumps({"strategy": "Bull Call Spread", "rationale": "Defined risk given IV concern."}),
+    "skeptical risk manager": json.dumps(
+        {
+            "risk_level": "medium", "concerns": ["high IV"], "position_sizing_note": "Size at 2%.",
+            "domain_score": _AGENT_DOMAIN_SCORE,
+        }
+    ),
+    "options strategist": json.dumps(
+        {
+            "strategy": "Bull Call Spread", "rationale": "Defined risk given IV concern.",
+            "domain_score": _AGENT_DOMAIN_SCORE,
+        }
+    ),
+    "relative-strength analyst": json.dumps(
+        {"narrative": "Outperforming SPY and the sector.", "domain_score": _AGENT_DOMAIN_SCORE}
+    ),
+    "quantitative-pattern analyst": json.dumps(
+        {"narrative": "Thin sample size, leans favorable.", "domain_score": _AGENT_DOMAIN_SCORE}
+    ),
     "portfolio manager": json.dumps(
         {"thesis": "Bullish setup with defined-risk structure recommended.", "consensus": "bullish"}
     ),
@@ -45,13 +66,17 @@ _ALL_RESPONSES_WITH_RESEARCH = {
             "profitability": "high",
             "cash_flow": "positive",
             "narrative": "Fundamentals solid.",
+            "domain_score": _AGENT_DOMAIN_SCORE,
         }
     ),
     "news research analyst": json.dumps(
-        {"sentiment": "bullish", "summary": "Positive coverage.", "catalysts": ["earnings beat"], "risks": []}
+        {
+            "sentiment": "bullish", "summary": "Positive coverage.", "catalysts": ["earnings beat"], "risks": [],
+            "domain_score": _AGENT_DOMAIN_SCORE,
+        }
     ),
     "macroeconomic analyst": json.dumps(
-        {"regime": "risk_on", "outlook": "Favorable.", "summary": "Rates steady."}
+        {"regime": "risk_on", "outlook": "Favorable.", "summary": "Rates steady.", "domain_score": _AGENT_DOMAIN_SCORE}
     ),
     "catalyst analyst": json.dumps(
         {
@@ -73,6 +98,11 @@ _RESEARCH_KEYS = (
     "macroeconomic analyst",
     "catalyst analyst",
 )
+
+# quant, risk, strategy, relative_strength, statistical_edge, thesis — the
+# 6 LLM calls made whenever there's a candidate, regardless of which
+# optional research providers are configured.
+_BASE_CANDIDATE_CALL_COUNT = 6
 
 
 class FakeFinancialProvider(FinancialProvider):
@@ -182,13 +212,58 @@ class FakeSecProvider(SECProvider):
         )
 
 
+class FakeBenchmarkMarketDataProvider(MarketDataProvider):
+    """Offline MarketDataProvider for relative_strength_research's SPY/
+    sector-ETF benchmark fetch (thesis/orchestrator.py). Ignores the
+    requested symbol and always returns the same canned history — good
+    enough for TEST/SPY/XLK alike in these tests."""
+
+    def __init__(self, history: PriceHistory) -> None:
+        self._history = history
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return frozenset({"price_history"})
+
+    async def get_price_history(self, symbol: str, lookback_days: int = 365) -> PriceHistory:
+        return self._history
+
+    async def get_option_chain(self, symbol: str, expiration: str | None = None):
+        raise NotImplementedError("not used by the thesis orchestrator")
+
+    async def health(self) -> MarketDataProviderHealth:
+        return MarketDataProviderHealth(provider="fake", healthy=True, checked_at=datetime.now(timezone.utc))
+
+
+def _market_data_provider() -> FakeBenchmarkMarketDataProvider:
+    return FakeBenchmarkMarketDataProvider(PriceHistory(symbol="TEST", bars=_make_bars(60)))
+
+
+def _domain_score(domain: str, score: float = 85.0) -> DomainScore:
+    return DomainScore(
+        domain=domain, score=score, confidence=90.0, evidence=[], factors=[],
+        source="quant", generated_at=datetime(2026, 1, 1),
+    )
+
+
 def _candidate() -> ScoredCandidate:
+    from agentic_options_reporter.analysis.composite_score import compute_composite_score
+
+    domain_scores = {
+        "technical": _domain_score("technical", 90.0),
+        "risk": _domain_score("risk", 70.0),
+        "liquidity": _domain_score("liquidity", 74.0),
+    }
+    score = compute_composite_score(
+        domain_scores, source="quant", contract_symbol="TESTC00100000"
+    ).composite_score
     return ScoredCandidate(
         contract_symbol="TESTC00100000", option_type="call", strike=100.0, expiration=date(2026, 1, 16),
         delta=0.55, gamma=0.02, theta=-0.05, vega=0.1, rho=0.02,
+        open_interest=800, spread_pct=0.05, volume=100,
         max_loss=250.0, max_gain=None, breakeven=102.5, reward_risk_ratio=None,
-        probability_of_profit=0.6, score=78.5,
-        score_breakdown={"trend_alignment": 1.0, "liquidity": 0.8},
+        probability_of_profit=0.6, score=score,
+        domain_scores=domain_scores,
     )
 
 
@@ -219,17 +294,20 @@ def test_full_pipeline_runs_all_four_agents():
     )
     result = _analysis_result([candidate], recommendation)
 
-    thesis = run_thesis_pipeline(result, llm)
+    thesis = run_thesis_pipeline(result, llm, market_data_provider=_market_data_provider())
 
-    assert len(llm.calls) == 4
+    assert len(llm.calls) == _BASE_CANDIDATE_CALL_COUNT
     assert thesis.run_id == 1
     assert thesis.quant_interpretation.narrative == "Strong setup."
-    assert thesis.quant_interpretation.overall_score == candidate.score
-    assert thesis.quant_interpretation.score_breakdown == candidate.score_breakdown
+    assert thesis.quant_interpretation.quant_trade_quality.composite_score == candidate.score
+    assert thesis.quant_interpretation.technical_domain_score.score == 72.0
     assert thesis.risk_assessment.risk_level == "medium"
     assert thesis.strategy_suggestion.strategy == "Bull Call Spread"
+    assert thesis.relative_strength_research is not None
+    assert thesis.statistical_edge_research is not None
     assert thesis.investment_thesis.consensus == "bullish"
-    # No providers were passed in, so research findings must be absent.
+    assert thesis.agent_trade_quality is not None
+    # No research providers were passed in, so those findings must be absent.
     assert thesis.financial_research is None
     assert thesis.news_research is None
     assert thesis.macro_research is None
@@ -247,14 +325,14 @@ def test_pipeline_runs_research_agents_when_providers_configured():
     thesis = run_thesis_pipeline(
         result,
         llm,
+        market_data_provider=_market_data_provider(),
         financial_provider=FakeFinancialProvider(),
         news_provider=FakeNewsProvider(),
         macro_provider=FakeMacroProvider(),
         sec_provider=FakeSecProvider(),
     )
 
-    # quant, risk, strategy, financial, news, macro, catalyst, thesis
-    assert len(llm.calls) == 8
+    assert len(llm.calls) == _BASE_CANDIDATE_CALL_COUNT + 4
     assert thesis.financial_research.company_health == "strong"
     assert thesis.financial_research.analyst_consensus == "Buy"
     assert thesis.news_research.sentiment == "bullish"
@@ -262,6 +340,11 @@ def test_pipeline_runs_research_agents_when_providers_configured():
     assert thesis.catalyst_research is not None
     assert thesis.catalyst_research.net_bias == "bullish"
     assert thesis.catalyst_research.catalysts[0].category == "earnings"
+    # The agent composite should now include every domain that ran.
+    assert set(thesis.agent_trade_quality.domain_scores) == {
+        "technical", "risk", "liquidity", "fundamental", "sentiment", "macro",
+        "relative_strength", "statistical_edge",
+    }
 
 
 def test_pipeline_runs_only_configured_research_agents():
@@ -272,7 +355,9 @@ def test_pipeline_runs_only_configured_research_agents():
     )
     result = _analysis_result([candidate], recommendation)
 
-    thesis = run_thesis_pipeline(result, llm, news_provider=FakeNewsProvider())
+    thesis = run_thesis_pipeline(
+        result, llm, market_data_provider=_market_data_provider(), news_provider=FakeNewsProvider()
+    )
 
     assert thesis.financial_research is None
     assert thesis.news_research is not None
@@ -299,7 +384,9 @@ def test_financial_research_runs_with_partial_dataset_coverage():
     )
     result = _analysis_result([candidate], recommendation)
 
-    thesis = run_thesis_pipeline(result, llm, financial_provider=PartialFinancialProvider())
+    thesis = run_thesis_pipeline(
+        result, llm, market_data_provider=_market_data_provider(), financial_provider=PartialFinancialProvider()
+    )
 
     assert thesis.financial_research is not None
     assert thesis.financial_research.company_health == "strong"
@@ -320,7 +407,9 @@ def test_pipeline_records_no_warnings_when_research_succeeds():
     )
     result = _analysis_result([candidate], recommendation)
 
-    thesis = run_thesis_pipeline(result, llm, news_provider=FakeNewsProvider())
+    thesis = run_thesis_pipeline(
+        result, llm, market_data_provider=_market_data_provider(), news_provider=FakeNewsProvider()
+    )
 
     assert thesis.pipeline_warnings == []
 
@@ -361,6 +450,7 @@ def test_provider_failure_mid_run_records_warning_instead_of_crashing():
     thesis = run_thesis_pipeline(
         result,
         llm,
+        market_data_provider=_market_data_provider(),
         financial_provider=FakeFinancialProvider(),
         news_provider=RateLimitedNewsProvider(),
         macro_provider=FakeMacroProvider(),
@@ -400,6 +490,7 @@ def test_unusable_research_agent_response_records_warning_instead_of_502():
     thesis = run_thesis_pipeline(
         result,
         llm,
+        market_data_provider=_market_data_provider(),
         news_provider=FakeNewsProvider(),
         macro_provider=FakeMacroProvider(),
         sec_provider=FakeSecProvider(),
@@ -435,7 +526,11 @@ def test_dropped_catalyst_item_records_warning():
     result = _analysis_result([candidate], recommendation)
 
     thesis = run_thesis_pipeline(
-        result, llm, news_provider=FakeNewsProvider(), sec_provider=FakeSecProvider()
+        result,
+        llm,
+        market_data_provider=_market_data_provider(),
+        news_provider=FakeNewsProvider(),
+        sec_provider=FakeSecProvider(),
     )
 
     assert thesis.catalyst_research is not None
@@ -450,7 +545,8 @@ def test_dropped_catalyst_item_records_warning():
 def test_research_agents_run_even_without_candidate():
     """Research findings are ticker/market-wide, not contract-specific, so
     they should still run when there's no candidate to size (unlike
-    risk/strategy, which are legitimately skipped in that case)."""
+    risk/strategy/relative-strength/statistical-edge, which are legitimately
+    skipped in that case)."""
     llm = FakeLlmClient(
         {
             "portfolio manager": json.dumps({"thesis": "No position recommended.", "consensus": "neutral"}),
@@ -463,6 +559,7 @@ def test_research_agents_run_even_without_candidate():
     thesis = run_thesis_pipeline(
         result,
         llm,
+        market_data_provider=_market_data_provider(),
         financial_provider=FakeFinancialProvider(),
         news_provider=FakeNewsProvider(),
         macro_provider=FakeMacroProvider(),
@@ -471,10 +568,16 @@ def test_research_agents_run_even_without_candidate():
 
     assert thesis.risk_assessment is None
     assert thesis.strategy_suggestion is None
+    assert thesis.relative_strength_research is None
+    assert thesis.statistical_edge_research is None
     assert thesis.financial_research is not None
     assert thesis.news_research is not None
     assert thesis.macro_research is not None
     assert thesis.catalyst_research is not None
+    # The agent composite still blends whatever ran (research findings),
+    # even with no candidate to score technical/risk/liquidity for.
+    assert thesis.agent_trade_quality is not None
+    assert "technical" not in thesis.agent_trade_quality.domain_scores
 
 
 def test_on_event_emits_started_completed_with_exchange_for_all_agents():
@@ -492,6 +595,7 @@ def test_on_event_emits_started_completed_with_exchange_for_all_agents():
     thesis = run_thesis_pipeline(
         result,
         llm,
+        market_data_provider=_market_data_provider(),
         financial_provider=FakeFinancialProvider(),
         news_provider=FakeNewsProvider(),
         macro_provider=FakeMacroProvider(),
@@ -508,6 +612,7 @@ def test_on_event_emits_started_completed_with_exchange_for_all_agents():
 
     for agent in (
         "quant_interpreter", "risk_challenger", "options_strategy",
+        "relative_strength_research", "statistical_edge_research",
         "financial_research", "news_research", "macro_research",
         "catalyst_research", "investment_thesis",
     ):
@@ -535,11 +640,13 @@ def test_on_event_emits_skipped_for_unconfigured_and_no_candidate():
     result = _analysis_result([], recommendation)
 
     events = []
-    run_thesis_pipeline(result, llm, on_event=events.append)
+    run_thesis_pipeline(result, llm, market_data_provider=_market_data_provider(), on_event=events.append)
 
     phases = {e.agent: e.phase for e in events}
     assert phases["risk_challenger"] == "skipped"
     assert phases["options_strategy"] == "skipped"
+    assert phases["relative_strength_research"] == "skipped"
+    assert phases["statistical_edge_research"] == "skipped"
     assert phases["financial_research"] == "skipped"
     assert phases["news_research"] == "skipped"
     assert phases["macro_research"] == "skipped"
@@ -576,7 +683,7 @@ def test_on_event_emits_failed_then_reraises_for_fatal_agent():
     import pytest
 
     with pytest.raises(LlmUnavailable):
-        run_thesis_pipeline(result, llm, on_event=events.append)
+        run_thesis_pipeline(result, llm, market_data_provider=_market_data_provider(), on_event=events.append)
 
     assert [e.phase for e in events if e.agent == "quant_interpreter"] == ["started", "failed"]
     failed = next(e for e in events if e.phase == "failed")
@@ -593,10 +700,10 @@ def test_on_event_none_leaves_behavior_unchanged():
     )
     result = _analysis_result([candidate], recommendation)
 
-    thesis = run_thesis_pipeline(result, llm)
+    thesis = run_thesis_pipeline(result, llm, market_data_provider=_market_data_provider())
 
     assert thesis.investment_thesis.consensus == "bullish"
-    assert len(llm.calls) == 4
+    assert len(llm.calls) == _BASE_CANDIDATE_CALL_COUNT
 
 
 def test_no_candidate_short_circuit_skips_risk_and_strategy():
@@ -606,16 +713,19 @@ def test_no_candidate_short_circuit_skips_risk_and_strategy():
     recommendation = Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale="no candidates")
     result = _analysis_result([], recommendation)
 
-    thesis = run_thesis_pipeline(result, llm)
+    thesis = run_thesis_pipeline(result, llm, market_data_provider=_market_data_provider())
 
     # Only investment_thesis should have been called.
     assert len(llm.calls) == 1
     assert thesis.risk_assessment is None
     assert thesis.strategy_suggestion is None
+    assert thesis.relative_strength_research is None
+    assert thesis.statistical_edge_research is None
     assert thesis.quant_interpretation.narrative == "no candidates"
-    assert thesis.quant_interpretation.score_breakdown == {}
-    assert thesis.quant_interpretation.overall_score == 0.0
+    assert thesis.quant_interpretation.quant_trade_quality.domain_scores == {}
+    assert thesis.quant_interpretation.quant_trade_quality.composite_score == 0.0
     assert thesis.investment_thesis.consensus == "neutral"
+    assert thesis.agent_trade_quality is None
 
 
 def test_recommendation_contract_not_in_candidates_is_treated_as_no_candidate():
@@ -629,7 +739,7 @@ def test_recommendation_contract_not_in_candidates_is_treated_as_no_candidate():
     )
     result = _analysis_result([_candidate()], recommendation)
 
-    thesis = run_thesis_pipeline(result, llm)
+    thesis = run_thesis_pipeline(result, llm, market_data_provider=_market_data_provider())
 
     assert thesis.risk_assessment is None
     assert thesis.strategy_suggestion is None

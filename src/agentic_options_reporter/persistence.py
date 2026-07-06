@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, func, inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -85,6 +85,7 @@ from agentic_options_reporter.models.db import (
     RecommendationRow,
     ScoredCandidateRow,
     SupportResistanceLevelRow,
+    TradeQualityScoreRow,
     TrendAssessmentRow,
     VolumeAssessmentRow,
 )
@@ -92,9 +93,11 @@ from agentic_options_reporter.models.schemas import (
     AgentThesisResult,
     FundamentalsSnapshot,
     IndicatorSnapshot,
+    PastRunOutcome,
     Recommendation,
     ScoredCandidate,
     SupportResistanceLevel,
+    TradeQualityScore,
     TrendAssessment,
     VolumeAssessment,
 )
@@ -127,6 +130,12 @@ def make_session_factory(database_url: str) -> sessionmaker:
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
+def _dump(model) -> dict | None:
+    """model_dump(mode="json") so nested dates/datetimes serialize to ISO
+    strings the JSON column can hold; None passes through unchanged."""
+    return model.model_dump(mode="json") if model is not None else None
+
+
 def persist_analysis_run(
     session: Session,
     symbol: str,
@@ -138,6 +147,8 @@ def persist_analysis_run(
     levels: list[SupportResistanceLevel],
     candidates: list[ScoredCandidate],
     recommendation: Recommendation,
+    trade_quality: TradeQualityScore | None,
+    weighting_profile: str,
     fundamentals: FundamentalsSnapshot | None = None,
     data_warnings: list[str] | None = None,
 ) -> int:
@@ -146,6 +157,7 @@ def persist_analysis_run(
         generated_at=datetime.now(timezone.utc).replace(tzinfo=None),
         lookback_days=lookback_days,
         expiration=expiration,
+        weighting_profile=weighting_profile,
         # mode="json" so nested dates (earnings calendar, insider filings)
         # serialize to ISO strings the JSON column can hold.
         fundamentals=fundamentals.model_dump(mode="json") if fundamentals is not None else None,
@@ -166,8 +178,8 @@ def persist_analysis_run(
         session.add(
             ScoredCandidateRow(
                 run_id=run.id,
-                **candidate.model_dump(exclude={"score_breakdown"}),
-                score_breakdown=candidate.score_breakdown,
+                **candidate.model_dump(exclude={"domain_scores"}),
+                domain_scores={name: _dump(ds) for name, ds in candidate.domain_scores.items()},
             )
         )
 
@@ -181,8 +193,63 @@ def persist_analysis_run(
         )
     )
 
+    if trade_quality is not None:
+        session.add(
+            TradeQualityScoreRow(
+                run_id=run.id,
+                contract_symbol=trade_quality.contract_symbol,
+                composite_score=trade_quality.composite_score,
+                confidence=trade_quality.confidence,
+                recommendation_action=trade_quality.recommendation_action,
+                weighting_profile=trade_quality.weighting_profile,
+                domain_scores={name: _dump(ds) for name, ds in trade_quality.domain_scores.items()},
+                explainability=trade_quality.explainability,
+                generated_at=trade_quality.generated_at,
+            )
+        )
+
     session.commit()
     return run.id
+
+
+def fetch_recent_runs_for_symbol(
+    session: Session, symbol: str, limit: int = 20
+) -> list[PastRunOutcome]:
+    """This symbol's past AnalysisRuns, most recent first, for the
+    Statistical Edge domain scorer's historical hit-rate lookback
+    (analysis/statistical_edge.py). Called before the current run is
+    persisted, so it naturally only sees prior runs."""
+    rows = (
+        session.query(AnalysisRun, RecommendationRow)
+        .join(RecommendationRow, RecommendationRow.run_id == AnalysisRun.id)
+        .filter(func.upper(AnalysisRun.symbol) == symbol.upper())
+        .order_by(AnalysisRun.generated_at.desc())
+        .limit(limit)
+        .all()
+    )
+    outcomes: list[PastRunOutcome] = []
+    for run, rec in rows:
+        option_type = None
+        if rec.contract_symbol:
+            candidate = (
+                session.query(ScoredCandidateRow)
+                .filter(
+                    ScoredCandidateRow.run_id == run.id,
+                    ScoredCandidateRow.contract_symbol == rec.contract_symbol,
+                )
+                .one_or_none()
+            )
+            option_type = candidate.option_type if candidate else None
+        outcomes.append(
+            PastRunOutcome(
+                run_id=run.id,
+                generated_at=run.generated_at,
+                action=rec.action,
+                option_type=option_type,
+                contract_symbol=rec.contract_symbol,
+            )
+        )
+    return outcomes
 
 
 def persist_thesis(session: Session, thesis_result: AgentThesisResult) -> None:
@@ -191,6 +258,8 @@ def persist_thesis(session: Session, thesis_result: AgentThesisResult) -> None:
     news = thesis_result.news_research
     macro = thesis_result.macro_research
     catalyst = thesis_result.catalyst_research
+    relative_strength = thesis_result.relative_strength_research
+    statistical_edge = thesis_result.statistical_edge_research
     risk = thesis_result.risk_assessment
     strategy = thesis_result.strategy_suggestion
 
@@ -200,33 +269,47 @@ def persist_thesis(session: Session, thesis_result: AgentThesisResult) -> None:
             generated_at=thesis_result.generated_at,
             quant_narrative=quant.narrative,
             quant_key_factors=quant.key_factors,
-            quant_score_breakdown=quant.score_breakdown,
-            quant_overall_score=quant.overall_score,
+            quant_trade_quality=_dump(quant.quant_trade_quality),
+            technical_domain_score=_dump(quant.technical_domain_score),
             financial_company_health=financial.company_health if financial else None,
             financial_growth=financial.growth if financial else None,
             financial_profitability=financial.profitability if financial else None,
             financial_cash_flow=financial.cash_flow if financial else None,
             financial_analyst_consensus=financial.analyst_consensus if financial else None,
             financial_narrative=financial.narrative if financial else None,
+            fundamental_domain_score=_dump(financial.domain_score) if financial else None,
             news_sentiment=news.sentiment if news else None,
             news_summary=news.summary if news else None,
             news_catalysts=news.catalysts if news else None,
             news_risks=news.risks if news else None,
+            sentiment_domain_score=_dump(news.domain_score) if news else None,
             macro_regime=macro.regime if macro else None,
             macro_outlook=macro.outlook if macro else None,
             macro_summary=macro.summary if macro else None,
+            macro_domain_score=_dump(macro.domain_score) if macro else None,
             catalyst_net_bias=catalyst.net_bias if catalyst else None,
             catalyst_summary=catalyst.summary if catalyst else None,
             catalyst_items=(
                 [item.model_dump() for item in catalyst.catalysts] if catalyst else None
             ),
+            relative_strength_narrative=relative_strength.narrative if relative_strength else None,
+            relative_strength_domain_score=(
+                _dump(relative_strength.domain_score) if relative_strength else None
+            ),
+            statistical_edge_narrative=statistical_edge.narrative if statistical_edge else None,
+            statistical_edge_domain_score=(
+                _dump(statistical_edge.domain_score) if statistical_edge else None
+            ),
             risk_level=risk.risk_level if risk else None,
             risk_concerns=risk.concerns if risk else None,
             risk_position_sizing_note=risk.position_sizing_note if risk else None,
+            risk_domain_score=_dump(risk.domain_score) if risk else None,
             strategy=strategy.strategy if strategy else None,
             strategy_rationale=strategy.rationale if strategy else None,
+            liquidity_domain_score=_dump(strategy.domain_score) if strategy else None,
             thesis=thesis_result.investment_thesis.thesis,
             consensus=thesis_result.investment_thesis.consensus,
+            agent_trade_quality=_dump(thesis_result.agent_trade_quality),
             pipeline_warnings=thesis_result.pipeline_warnings,
         )
     )

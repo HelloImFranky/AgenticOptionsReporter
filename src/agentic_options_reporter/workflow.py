@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import sessionmaker
 
+from agentic_options_reporter.analysis.domain_scoring import SECTOR_ETF_MAP
 from agentic_options_reporter.analysis.indicators import compute_indicators
 from agentic_options_reporter.analysis.options import evaluate_chain
 from agentic_options_reporter.analysis.risk import compute_risk
@@ -21,15 +22,33 @@ from agentic_options_reporter.data.financial import (
     build_financial_provider,
 )
 from agentic_options_reporter.data.financial.snapshot import gather_fundamentals
-from agentic_options_reporter.data.market_data import MarketDataProvider, build_market_data_provider
+from agentic_options_reporter.data.macro import (
+    DEFAULT_MACRO_METRICS,
+    MacroProvider,
+    MacroProviderError,
+    build_macro_provider,
+)
+from agentic_options_reporter.data.market_data import (
+    MarketDataError,
+    MarketDataProvider,
+    build_market_data_provider,
+)
+from agentic_options_reporter.data.news import NewsProvider, NewsProviderError, build_news_provider
 from agentic_options_reporter.models.schemas import (
     AnalysisResult,
     CompanyMetrics,
     FundamentalsSnapshot,
+    MacroObservation,
+    NewsArticle,
     OptionChain,
     PriceHistory,
+    WeightingProfileId,
 )
-from agentic_options_reporter.persistence import make_session_factory, persist_analysis_run
+from agentic_options_reporter.persistence import (
+    fetch_recent_runs_for_symbol,
+    make_session_factory,
+    persist_analysis_run,
+)
 
 
 async def _fetch_market_data(
@@ -44,17 +63,53 @@ async def _fetch_market_data(
     )
 
 
+async def _fetch_macro_observations(provider: MacroProvider) -> list[MacroObservation]:
+    """Fetch every default metric the router can actually serve,
+    concurrently (mirrors thesis/orchestrator.py's identically-named
+    helper, kept independent so workflow.py doesn't depend on the thesis
+    layer)."""
+    wanted = [m for m in DEFAULT_MACRO_METRICS if provider.supports(m)]
+    if not wanted:
+        return []
+    return list(await asyncio.gather(*(provider.fetch(metric_id) for metric_id in wanted)))
+
+
+async def _fetch_benchmark_history(
+    provider: MarketDataProvider, symbol: str, lookback_days: int
+) -> PriceHistory | None:
+    """Best-effort SPY/sector-ETF price history for the Relative Strength
+    domain (analysis/domain_scoring.py) — reuses MarketDataProvider, no new
+    provider interface. A failure here never fails /analyze."""
+    try:
+        return await provider.get_price_history(symbol, lookback_days)
+    except MarketDataError:
+        return None
+
+
 async def _fetch_inputs(
     market_provider: MarketDataProvider,
     financial_provider: FinancialProvider | None,
+    macro_provider: MacroProvider | None,
+    news_provider: NewsProvider | None,
     symbol: str,
     lookback_days: int,
     expiration: str | None,
-) -> tuple[PriceHistory, OptionChain, FundamentalsSnapshot | None, list[str]]:
-    """Fetch the technical inputs (required) and the cross-provider
-    fundamentals (best-effort) together. Fundamentals never block the
-    analysis: any failure gathering them is returned as a warning and the
-    snapshot comes back with whatever succeeded (or None if no provider)."""
+) -> tuple[
+    PriceHistory,
+    OptionChain,
+    FundamentalsSnapshot | None,
+    list[MacroObservation],
+    list[NewsArticle],
+    PriceHistory | None,
+    PriceHistory | None,
+    list[str],
+]:
+    """Fetch the technical inputs (required) alongside every best-effort,
+    cross-provider signal the Trade Quality Score domains need: cross-
+    provider fundamentals, macro observations, news articles, and a SPY
+    benchmark price history. None of the best-effort fetches ever block or
+    fail the analysis — a failure is recorded as a warning and the
+    corresponding domain is simply omitted downstream (analysis/scoring.py)."""
 
     async def fundamentals() -> tuple[FundamentalsSnapshot | None, list[str]]:
         if financial_provider is None:
@@ -64,11 +119,54 @@ async def _fetch_inputs(
         except FinancialProviderError as exc:
             return None, [f"fundamentals: {exc}"]
 
-    (history, chain), (snapshot, warnings) = await asyncio.gather(
+    async def macro() -> tuple[list[MacroObservation], str | None]:
+        if macro_provider is None:
+            return [], None
+        try:
+            return await _fetch_macro_observations(macro_provider), None
+        except MacroProviderError as exc:
+            return [], f"macro: {exc}"
+
+    async def news() -> tuple[list[NewsArticle], str | None]:
+        if news_provider is None:
+            return [], None
+        try:
+            return await news_provider.search(symbol), None
+        except NewsProviderError as exc:
+            return [], f"news: {exc}"
+
+    (
+        (history, chain),
+        (snapshot, fund_warnings),
+        (macro_observations, macro_warning),
+        (articles, news_warning),
+        benchmark_history,
+    ) = await asyncio.gather(
         _fetch_market_data(market_provider, symbol, lookback_days, expiration),
         fundamentals(),
+        macro(),
+        news(),
+        _fetch_benchmark_history(market_provider, "SPY", lookback_days),
     )
-    return history, chain, snapshot, warnings
+
+    warnings = list(fund_warnings)
+    if macro_warning:
+        warnings.append(macro_warning)
+    if news_warning:
+        warnings.append(news_warning)
+
+    # The sector-ETF benchmark depends on the sector fundamentals just
+    # resolved, so it's a second, still best-effort round trip rather than
+    # part of the gather above.
+    sector = snapshot.profile.sector if snapshot and snapshot.profile else None
+    sector_etf = SECTOR_ETF_MAP.get(sector) if sector else None
+    sector_history = (
+        await _fetch_benchmark_history(market_provider, sector_etf, lookback_days)
+        if sector_etf
+        else None
+    )
+
+    return history, chain, snapshot, macro_observations, articles, benchmark_history, sector_history, warnings
 
 
 def _optional_financial_provider() -> FinancialProvider | None:
@@ -77,6 +175,24 @@ def _optional_financial_provider() -> FinancialProvider | None:
     try:
         return build_financial_provider()
     except FinancialProviderError:
+        return None
+
+
+def _optional_macro_provider() -> MacroProvider | None:
+    """Mirrors _optional_financial_provider: None only if construction
+    fails (e.g. no macro adapter configured at all)."""
+    try:
+        return build_macro_provider()
+    except MacroProviderError:
+        return None
+
+
+def _optional_news_provider() -> NewsProvider | None:
+    """Mirrors _optional_financial_provider: None only if construction
+    fails (e.g. no news adapter configured at all)."""
+    try:
+        return build_news_provider()
+    except NewsProviderError:
         return None
 
 
@@ -128,17 +244,36 @@ def run_analysis(
     provider: MarketDataProvider | None = None,
     session_factory: sessionmaker | None = None,
     financial_provider: FinancialProvider | None = None,
+    macro_provider: MacroProvider | None = None,
+    news_provider: NewsProvider | None = None,
+    weighting_profile: WeightingProfileId = "swing",
 ) -> AnalysisResult:
     settings = get_settings()
     provider = provider or build_market_data_provider()
     if financial_provider is None:
         financial_provider = _optional_financial_provider()
+    if macro_provider is None:
+        macro_provider = _optional_macro_provider()
+    if news_provider is None:
+        news_provider = _optional_news_provider()
     session_factory = session_factory or make_session_factory(settings.database_url)
 
     # The providers are async; this pipeline is sync, so bridge with a
-    # private event loop and fetch the technicals + fundamentals concurrently.
-    history, chain, fundamentals, data_warnings = asyncio.run(
-        _fetch_inputs(provider, financial_provider, symbol, lookback_days, expiration)
+    # private event loop and fetch the technicals + every best-effort
+    # Trade Quality Score signal concurrently.
+    (
+        history,
+        chain,
+        fundamentals,
+        macro_observations,
+        news_articles,
+        benchmark_history,
+        sector_history,
+        data_warnings,
+    ) = asyncio.run(
+        _fetch_inputs(
+            provider, financial_provider, macro_provider, news_provider, symbol, lookback_days, expiration
+        )
     )
     # No provider serves 1w/1m high/low, but we already have the daily bars,
     # so derive them and fold them into the fundamentals metrics snapshot.
@@ -151,10 +286,31 @@ def run_analysis(
 
     evaluated_contracts = evaluate_chain(chain, history)
     risk_profiles = compute_risk(evaluated_contracts)
-    candidates = score_candidates(evaluated_contracts, risk_profiles, trend, volume, levels)
-    recommendation = build_recommendation(candidates)
 
+    # Opened before scoring (not just before persisting) so the Statistical
+    # Edge domain scorer (analysis/statistical_edge.py) can look up this
+    # symbol's past runs in the same session that will persist this one.
     with session_factory() as session:
+        past_runs = fetch_recent_runs_for_symbol(session, symbol)
+
+        candidates = score_candidates(
+            evaluated_contracts,
+            risk_profiles,
+            trend,
+            volume,
+            levels,
+            history,
+            indicators,
+            fundamentals=fundamentals,
+            macro_observations=macro_observations,
+            news_articles=news_articles,
+            benchmark_history=benchmark_history,
+            sector_history=sector_history,
+            past_runs=past_runs,
+            weighting_profile=weighting_profile,
+        )
+        recommendation, trade_quality = build_recommendation(candidates, weighting_profile)
+
         run_id = persist_analysis_run(
             session,
             symbol,
@@ -166,6 +322,8 @@ def run_analysis(
             levels,
             candidates,
             recommendation,
+            trade_quality,
+            weighting_profile,
             fundamentals=fundamentals,
             data_warnings=data_warnings,
         )
@@ -180,6 +338,8 @@ def run_analysis(
         support_resistance=levels,
         candidates=candidates,
         recommendation=recommendation,
+        trade_quality=trade_quality,
+        weighting_profile=weighting_profile,
         # Cross-provider fundamentals, gathered best-effort alongside the
         # technicals and persisted with the run (see persist_analysis_run),
         # so /runs/{id} replays the same snapshot.

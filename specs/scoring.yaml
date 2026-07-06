@@ -1,44 +1,204 @@
-scoring_model: opportunity_score
-version: 1
+scoring_model: trade_quality_score
+version: 2
 description: >
-  Weighted-sum model producing a 0-100 opportunity score per option
-  candidate. Implemented in agentic_options_reporter.analysis.scoring.
-range: [0, 100]
-factors:
-  - name: trend_alignment
-    weight: 0.30
-    description: >
-      1.0 if the candidate's directional bias matches the detected trend
-      direction and strength is moderate+; 0.5 if trend is neutral;
-      0.0 if the candidate opposes the trend.
-  - name: volume_confirmation
-    weight: 0.15
-    description: >
-      1.0 if relative volume >= 1.5 in the direction of the trend,
-      0.5 for normal volume, 0.0 for low volume or bearish divergence
-      against a bullish candidate (and vice versa).
-  - name: support_resistance_proximity
-    weight: 0.15
-    description: >
-      Score decays linearly from 1.0 (price at a supporting level) to 0.0
-      at >5% away from the nearest relevant level.
-  - name: liquidity
-    weight: 0.20
-    description: >
-      Combination of normalized open interest and bid/ask spread
-      tightness: 0.5 * min(open_interest / 500, 1) +
-      0.5 * max(0, 1 - spread_pct / 0.10).
-  - name: risk_reward
-    weight: 0.20
-    description: >
-      Score decays from 1.0 at reward:risk >= 2.0 to 0.0 at
-      reward:risk <= 0.5, linear in between.
-thresholds:
+  An 8-domain Trade Quality Score, computed by a shared, provider-agnostic
+  composite engine (agentic_options_reporter.analysis.composite_score)
+  from a dict[domain_id, DomainScore]. The composite is produced TWICE per
+  run, from two independent sources, using the same weighting profile:
+  - source="quant": deterministic, no LLM — analysis/domain_scoring.py +
+    analysis/statistical_edge.py, invoked from analysis/scoring.py during
+    /analyze. This replaces the version-1 flat 5-factor opportunity_score.
+  - source="agent": LLM-authored, independent judgment per domain — the
+    Agents-tab pipeline (thesis/orchestrator.py), relaxing the historical
+    "agents never score" rule (see specs/agents.yaml phase_3). Never a
+    copy of the quant number for the same domain.
+  Both composites are shown together so a user can see where quant and
+  agent agree or diverge; neither is authoritative over the other.
+
+domains: [technical, risk, liquidity, fundamental, macro, sentiment, relative_strength, statistical_edge]
+
+domain_score_model: >
+  DomainScore(domain, score: 0-100, confidence: 0-100, evidence: list[str],
+  factors: list[DomainFactor] (quant only; agent scorers leave this
+  empty), source: "quant"|"agent", generated_at). DomainFactor(name,
+  value: 0-1, weight: 0-1, detail).
+
+completeness_convention: >
+  A sub-factor is None (not a fabricated neutral 0.5) whenever its
+  underlying data is unavailable; the domain-level weighted average
+  (analysis/domain_scoring._weighted_avg) excludes it from both the
+  numerator and the weight sum, and reduces that domain's own confidence
+  by the fraction of weight actually present. A whole domain is OMITTED
+  from a run's domain_scores dict entirely (not defaulted to 50) when its
+  data source is completely absent (e.g. no FundamentalsSnapshot, no
+  MacroObservations, no news articles AND no fundamentals-derived
+  sentiment signal). The composite engine applies the identical rule one
+  level up (see composite_engine below).
+
+quant_domain_scorers:
+  module: agentic_options_reporter.analysis.domain_scoring (+ analysis/statistical_edge.py for statistical_edge)
+  technical:
+    level: candidate (option_type-dependent bias)
+    reused_from_v1: [trend_alignment, volume_confirmation, support_resistance_proximity]
+    subfactors:
+      trend_alignment: {weight: 0.15, note: "1.0 if the candidate's bias matches detected trend + moderate/strong strength; 0.5 neutral; 0.0 opposed"}
+      market_structure: {weight: 0.10, note: "least-squares slope of the last 20 closes, normalized and bias-aligned"}
+      moving_averages: {weight: 0.15, note: "close/SMA20/SMA50/(SMA200 if present) stack fully aligned=1.0, partially=0.5, opposed=0.0"}
+      adx: {weight: 0.10, note: "min(adx/40,1), direction-aware: inverted if ADX confirms the OPPOSING trend"}
+      momentum: {weight: 0.15, note: "RSI band (bias-favorable zone) blended 50/50 with MACD histogram sign agreement"}
+      volume_confirmation: {weight: 0.10, note: "reused verbatim from v1"}
+      rvol: {weight: 0.05, note: "min(relative_volume/2.0, 1)"}
+      support_resistance_proximity: {weight: 0.10, note: "reused verbatim from v1"}
+      breakout_quality: {weight: 0.05, note: "1.0 if price is beyond the adverse S/R level with high_volume co-occurring, 0.6 without, else 0.0"}
+      candlestick_confirmation: {weight: 0.05, note: "last bar's close position within its H-L range, bias-aligned; a lightweight proxy, not a full candlestick-pattern library"}
+  risk:
+    level: candidate
+    reused_from_v1: [risk_reward]
+    subfactors:
+      risk_reward: {weight: 0.30, note: "reused verbatim from v1"}
+      stop_quality: {weight: 0.20, note: "1 - (distance to nearest adverse S/R level / distance to breakeven), clamped"}
+      expected_drawdown: {weight: 0.20, note: "1 - min(|theta|/mid_price / 0.02, 1) — daily theta decay as % of premium"}
+      volatility_risk: {weight: 0.15, note: "implied vol vs. an ATR-derived historical-vol proxy (atr_14/price*sqrt(252))"}
+      position_sizing: {weight: 0.15, note: "simplified Kelly fraction: PoP - (1-PoP)/reward_risk_ratio, clamped"}
+  liquidity:
+    level: candidate
+    reused_from_v1: [options_liquidity (was the whole v1 "liquidity" factor)]
+    subfactors:
+      options_liquidity: {weight: 0.30, note: "reused verbatim from v1 (0.5*OI_norm + 0.5*spread_tightness)"}
+      bid_ask_spread: {weight: 0.25, note: "max(0, 1 - spread_pct/0.10)"}
+      adv: {weight: 0.20, note: "underlying average-daily-volume proxy: min(volume_sma_20/500000, 1)"}
+      slippage: {weight: 0.15, note: "spread-based proxy with a tighter 0.05 ceiling — no Level-2/quote-depth data is available from any configured provider, documented approximation"}
+      market_impact: {weight: 0.10, note: "open-interest depth proxy: min(open_interest/2000, 1)"}
+  fundamental:
+    level: run (shared across candidates); OMITTED if FundamentalsSnapshot is null
+    subfactors:
+      revenue_growth: {weight: 0.12, source: CompanyMetrics.revenue_growth}
+      earnings_growth: {weight: 0.12, source: CompanyMetrics.earnings_growth}
+      eps_surprise: {weight: 0.10, source: "EarningsHistory.surprises[-1].surprise_percent"}
+      margins: {weight: 0.15, source: "CompanyMetrics.gross_margin / profit_margin, blended"}
+      fcf: {weight: 0.12, source: "FinancialStatementSummary.free_cash_flow, margin vs revenue when known"}
+      debt: {weight: 0.10, source: FinancialRatios.debt_to_equity}
+      roe: {weight: 0.12, source: FinancialRatios.return_on_equity}
+      valuation: {weight: 0.12, source: "CompanyMetrics.peg_ratio vs. a 1.0 fair-value anchor"}
+      analyst_revisions: {weight: 0.05, source: AnalystEstimates.consensus_rating}
+  macro:
+    level: run (bias-aligned per candidate's option_type); OMITTED if no MacroObservations were fetched
+    new_provider_wiring: >
+      /analyze now fetches macro observations best-effort (workflow.py
+      _optional_macro_provider + _fetch_macro_observations), mirroring the
+      existing best-effort fundamentals fetch. Previously MacroProvider
+      was thesis-pipeline-only; see specs/providers.yaml.
+    subfactors:
+      interest_rates: {weight: 0.30, source: policy_rate.yoy_change_pct}
+      inflation: {weight: 0.25, source: cpi.yoy_change_pct}
+      bond_yield_curve: {weight: 0.25, source: "treasury_10y.value - treasury_2y.value"}
+      gdp: {weight: 0.20, source: gdp.yoy_change_pct}
+    confidence_cap: 80   # macro -> single-stock is inherently a blunt instrument
+    deferred_subfactors: [employment, dollar_index, sector_rotation]   # no MacroMetric registry entry / provider exists yet
+  sentiment:
+    level: run (news_volume is direction-agnostic; the rest bias-aligned); OMITTED if there are no articles AND no fundamentals
+    new_provider_wiring: >
+      /analyze now fetches news articles best-effort (workflow.py
+      _optional_news_provider), mirroring fundamentals. Previously
+      NewsProvider was thesis-pipeline-only.
+    subfactors:
+      news_volume: {weight: 0.25, note: "min(article_count/10, 1) — attention/momentum proxy, deliberately direction-agnostic; judging bullish/bearish from article text stays the news_research agent's job (the quant engine stays non-LLM)"}
+      earnings_proximity: {weight: 0.25, source: EarningsCalendar.next_date, note: "event-risk penalty as earnings approaches, direction-agnostic"}
+      analyst_ratings: {weight: 0.30, source: AnalystEstimates.consensus_rating, note: bias-aligned}
+      insider_activity: {weight: 0.20, source: InsiderActivity.net_shares, note: bias-aligned}
+    deferred_subfactors: [options_flow, social_sentiment, short_interest]   # no provider exists for any of these
+  relative_strength:
+    level: run (bias-aligned); OMITTED if the symbol's own trailing return can't be computed
+    new_data_flow: >
+      NO new provider interface — reuses MarketDataProvider (already
+      depended on by /analyze) for a SPY benchmark and, when the sector
+      maps to analysis.domain_scoring.SECTOR_ETF_MAP, a sector-ETF price
+      history, fetched best-effort in workflow.py._fetch_inputs.
+    subfactors:
+      vs_market: {weight: 0.55, note: "21-trading-day return(symbol) - return(SPY), bias-aligned"}
+      vs_sector: {weight: 0.45, note: "same vs. the mapped sector ETF; omitted (weight folds into vs_market) if the sector isn't in SECTOR_ETF_MAP"}
+    deferred_subfactors: [vs_peers]   # no comparables/peer-list data source exists
+  statistical_edge:
+    level: run (bias-aligned); OMITTED below a 5-sample minimum for the historical sub-factors
+    module: agentic_options_reporter.analysis.statistical_edge
+    no_backtest_infra_note: >
+      No outcome-tracking/backtest infrastructure exists elsewhere in
+      this codebase; this domain combines two techniques implementable
+      now from data already in the DB or already fetched.
+    subfactors:
+      historical_win_rate: {weight: 0.35, note: "hit rate of this symbol's past AnalysisRuns (persistence.fetch_recent_runs_for_symbol), checked against price ~5 trading days later; requires >=5 qualifying past runs, else omitted (not fabricated) — gets more informative the longer the tool is used against a symbol"}
+      expectancy: {weight: 0.25, note: "average forward return of past recommendations, bias-aligned"}
+      pattern_success: {weight: 0.20, note: "hit rate conditioned on matching directional bias; falls back to the unconditioned rate below 5 same-bias samples"}
+      monte_carlo_confidence: {weight: 0.20, note: "historical bootstrap (fixed seed, ~750 resamples) of day-over-day returns from the trailing price history, estimating P(price finishes past breakeven) — a model-free cross-check against risk.py's closed-form Black-Scholes probability_of_profit"}
+    confidence_cap: 70   # this is a proxy, never allowed to read as more certain than that
+    weight_cap: 0.10      # enforced by every entry in weighting_profiles below
+
+weighting_profiles:
+  # Each profile's weights sum to exactly 1.00. One global action-threshold
+  # table (see recommendation_thresholds) applies regardless of profile —
+  # the profile changes how the composite is built, not how it's read.
+  day_trade:
+    technical: 0.30
+    liquidity: 0.20
+    risk: 0.15
+    relative_strength: 0.10
+    statistical_edge: 0.10
+    sentiment: 0.10
+    fundamental: 0.03
+    macro: 0.02
+  swing:   # default
+    technical: 0.20
+    risk: 0.15
+    liquidity: 0.10
+    fundamental: 0.15
+    macro: 0.10
+    sentiment: 0.10
+    relative_strength: 0.10
+    statistical_edge: 0.10
+  long_term:
+    technical: 0.10
+    risk: 0.10
+    liquidity: 0.05
+    fundamental: 0.25
+    macro: 0.15
+    sentiment: 0.05
+    relative_strength: 0.20
+    statistical_edge: 0.10
+default_weighting_profile: swing
+
+composite_engine:
+  module: agentic_options_reporter.analysis.composite_score
+  function: compute_composite_score(domain_scores, source, weighting_profile, contract_symbol) -> TradeQualityScore
+  renormalization: >
+    A domain absent from the passed-in domain_scores dict is excluded from
+    both the numerator and the weight sum — the composite is a fair
+    average of whatever IS known, not a fabricated-neutral score.
+  confidence_discount: >
+    confidence = weighted_avg(present domain confidences) * (present
+    weight / total weight). This coverage discount is what keeps a
+    thin-data composite (e.g. a keyless deployment missing macro/news)
+    from reading as falsely authoritative. Consumers (UI, PDF export)
+    MUST always present composite_score and confidence together, never
+    the score alone.
+  explainability: >
+    A deterministic list[str] of "Domain (weight X%): score/100 —
+    strongest/weakest contributor" bullets, ranking the present domains —
+    part of the persisted, API-visible TradeQualityScore record, not just
+    UI text.
+  provider_agnostic: >
+    The SAME function is called from analysis/scoring.py (source="quant")
+    and thesis/orchestrator.py (source="agent") — it has no notion of
+    "quant" or "agent" beyond the source tag it's told to stamp on the
+    result. Per the design brief's "keep composite engine provider-
+    agnostic" recommendation.
+
+recommendation_thresholds:
+  # Unchanged from v1, now applied to composite_score instead of the flat
+  # opportunity score.
   strong_buy: 75
   buy: 60
   hold: 40
   avoid: 0
-recommendation:
   action_map:
     - min_score: 75
       action: STRONG_BUY
@@ -48,10 +208,21 @@ recommendation:
       action: HOLD
     - min_score: 0
       action: AVOID
-  confidence: score / 100
-  rationale_fields:
-    - trend_alignment
-    - volume_confirmation
-    - support_resistance_proximity
-    - liquidity
-    - risk_reward
+  confidence: TradeQualityScore.confidence (already 0-100, coverage-discounted — NOT recomputed from composite_score)
+
+weighting_profile_selection: >
+  GET /analyze/{symbol} gains a weighting_profile query param
+  (day_trade|swing|long_term, default swing — see specs/api.yaml),
+  persisted on AnalysisRun (specs/database.yaml) so GET /runs/{id} replays
+  the same profile. The Agents-tab pipeline does NOT get an independent
+  selector — thesis/orchestrator.py reads analysis_result.weighting_profile
+  so the quant-vs-agent composite comparison stays apples-to-apples.
+
+migration_note: >
+  ScoredCandidate.score_breakdown (dict[str, float], 5 keys, values 0-1)
+  and QuantInterpretation.score_breakdown/overall_score are REMOVED
+  outright (breaking change, no back-compat shim — pre-1.0 internal tool)
+  in favor of ScoredCandidate.domain_scores (dict[str, DomainScore], up to
+  8 keys, values 0-100) and QuantInterpretation.quant_trade_quality/
+  technical_domain_score. See specs/database.yaml for the corresponding
+  column changes and the migration id.

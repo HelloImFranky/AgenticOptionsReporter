@@ -126,10 +126,10 @@ def cash_flow_tone(value: str) -> str:
     return _CASH_FLOW_TONES.get(value, TONE_NEUTRAL)
 
 
-def quant_score_tone(score: float) -> str:
-    """Tone for the quant overall_score (0-100), aligned with the
-    recommendation thresholds in specs/scoring.yaml: BUY/STRONG_BUY (>=60)
-    reads success, HOLD (>=40) warning, AVOID danger."""
+def trade_quality_tone(score: float) -> str:
+    """Tone for a Trade Quality Score composite_score (0-100), aligned
+    with the recommendation thresholds in specs/scoring.yaml: BUY/
+    STRONG_BUY (>=60) reads success, HOLD (>=40) warning, AVOID danger."""
     if score >= 60:
         return TONE_SUCCESS
     if score >= 40:
@@ -162,42 +162,100 @@ def recommended_candidate(
     return None
 
 
-def score_breakdown_items(score_breakdown: dict[str, float] | None) -> list[tuple[str, float]]:
-    """Convert raw score factor names into display labels and numeric values."""
-    if not score_breakdown:
-        return []
+# Canonical domain order for the Trade Quality Score (specs/scoring.yaml).
+DOMAIN_ORDER = [
+    "technical", "risk", "liquidity", "fundamental",
+    "macro", "sentiment", "relative_strength", "statistical_edge",
+]
+DOMAIN_LABELS = {
+    "technical": "Technical",
+    "risk": "Risk",
+    "liquidity": "Liquidity",
+    "fundamental": "Fundamental",
+    "macro": "Macro",
+    "sentiment": "Sentiment",
+    "relative_strength": "Relative Strength",
+    "statistical_edge": "Statistical Edge",
+}
 
-    labels = {
-        "trend_alignment": "Trend Alignment",
-        "volume_confirmation": "Volume Confirmation",
-        "support_resistance_proximity": "Support Resistance Proximity",
-        "liquidity": "Liquidity",
-        "risk_reward": "Risk Reward",
-    }
-    return [(labels.get(key, key.replace("_", " ").title()), float(value)) for key, value in score_breakdown.items()]
+
+def domain_label(domain_id: str) -> str:
+    return DOMAIN_LABELS.get(domain_id, domain_id.replace("_", " ").title())
 
 
-def score_breakdown_summary(score_breakdown: dict[str, float] | None) -> str:
-    """A one-line, plain-language read of the score breakdown — what carried
-    the score and what dragged on it — to caption the breakdown chart
-    instead of restating every factor as raw text. Deterministic (no LLM);
-    derived straight from the factor values."""
-    items = score_breakdown_items(score_breakdown)
-    if not items:
+def domain_score_items(
+    domain_scores: dict[str, Any] | None,
+) -> list[tuple[str, float, float, list[str]]]:
+    """(label, score 0-100, confidence 0-100, evidence) for each PRESENT
+    domain, in canonical order. A domain absent from domain_scores is
+    omitted here (never fabricated as 0) — see missing_domain_labels for
+    what to render instead."""
+    domain_scores = domain_scores or {}
+    items: list[tuple[str, float, float, list[str]]] = []
+    for domain_id in DOMAIN_ORDER:
+        entry = domain_scores.get(domain_id)
+        if not entry:
+            continue
+        items.append(
+            (
+                domain_label(domain_id),
+                float(entry.get("score", 0.0)),
+                float(entry.get("confidence", 0.0)),
+                list(entry.get("evidence") or []),
+            )
+        )
+    return items
+
+
+def missing_domain_labels(domain_scores: dict[str, Any] | None) -> list[str]:
+    """Labels for domains with no data source this run — rendered as a
+    muted 'Not available' row rather than silently omitted or faked."""
+    domain_scores = domain_scores or {}
+    return [domain_label(d) for d in DOMAIN_ORDER if d not in domain_scores]
+
+
+def trade_quality_summary(trade_quality: dict[str, Any] | None) -> str:
+    """The composite engine's own explainability bullets (analysis/
+    composite_score.py), joined into a one-line caption. Deterministic —
+    generated once by the engine, not recomputed here."""
+    if not trade_quality:
         return ""
-    ordered = sorted(items, key=lambda kv: kv[1], reverse=True)
-    if len(ordered) == 1:
-        label, value = ordered[0]
-        return f"Score reflects {label.lower()} ({value:.2f})."
-    (top_label, top_value) = ordered[0]
-    (bottom_label, bottom_value) = ordered[-1]
-    # When every factor sits in a tight band, "strongest vs weakest" is
-    # misleading — call it balanced instead.
-    if top_value - bottom_value < 0.15:
-        return f"Score is balanced across {len(ordered)} factors, all near {top_value:.2f}."
+    explainability = trade_quality.get("explainability") or []
+    return " ".join(explainability[:2])
+
+
+def trade_quality_agreement_summary(
+    quant: dict[str, Any] | None, agent: dict[str, Any] | None
+) -> str:
+    """Names the domain(s) where the quant and agent Trade Quality Scores
+    diverge most, or reports broad alignment when they don't — the
+    caption for the Agents-tab 'Quant vs. Agents' comparison card."""
+    if not quant or not agent:
+        return ""
+    quant_domains = quant.get("domain_scores") or {}
+    agent_domains = agent.get("domain_scores") or {}
+    shared = sorted(set(quant_domains) & set(agent_domains))
+
+    quant_score = float(quant.get("composite_score") or 0.0)
+    agent_score = float(agent.get("composite_score") or 0.0)
+    overall_delta = abs(quant_score - agent_score)
+
+    deltas = [
+        (
+            domain,
+            abs(float(quant_domains[domain].get("score", 0)) - float(agent_domains[domain].get("score", 0))),
+        )
+        for domain in shared
+    ]
+    deltas.sort(key=lambda kv: kv[1], reverse=True)
+    diverging = [domain for domain, delta in deltas if delta >= 15]
+
+    if not diverging:
+        return f"Quant ({quant_score:.0f}) and agents ({agent_score:.0f}) are broadly aligned."
+    labels = ", ".join(domain_label(d) for d in diverging[:2])
     return (
-        f"Score is led by {top_label.lower()} ({top_value:.2f}) and held back by "
-        f"{bottom_label.lower()} ({bottom_value:.2f})."
+        f"Quant ({quant_score:.0f}) and agents ({agent_score:.0f}) diverge by "
+        f"{overall_delta:.0f} points — see {labels}."
     )
 
 

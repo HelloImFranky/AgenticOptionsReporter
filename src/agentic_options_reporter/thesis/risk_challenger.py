@@ -10,29 +10,49 @@ computes (see specs/agents.yaml).
 
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from agentic_options_reporter.models.schemas import (
     RiskAssessment,
+    RiskLevel,
     ScoredCandidate,
     SupportResistanceLevel,
     TrendAssessment,
 )
+from agentic_options_reporter.thesis.agent_domain_score import (
+    DOMAIN_SCORE_PROMPT_FIELD,
+    DOMAIN_SCORE_PROMPT_RULE,
+    LlmDomainScoreFields,
+    assemble_domain_score,
+)
 from agentic_options_reporter.thesis.llm_client import LlmClient
 from agentic_options_reporter.thesis.parsing import parse_response
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT = f"""\
 You are a skeptical risk manager reviewing a proposed options trade. Your
 job is to argue against the trade: identify concrete reasons it could
 fail, given the data provided. Do not recompute any numbers; reason about
-the ones you are given.
+the ones you are given. You ALSO independently score the Risk domain of a
+Trade Quality Score (0-100) from this same material — a HIGH score means
+LOW risk (a well-managed, favorable risk profile), not high danger —
+{DOMAIN_SCORE_PROMPT_RULE}
 
 Respond with a single JSON object with exactly these keys:
-{"risk_level": "low" | "medium" | "high",
+{{"risk_level": "low" | "medium" | "high",
  "concerns": ["<short concrete concern>", "..."],
- "position_sizing_note": "<one sentence position-sizing guidance>"}
+ "position_sizing_note": "<one sentence position-sizing guidance>",
+ {DOMAIN_SCORE_PROMPT_FIELD}}}
 
 concerns should have 1-5 items. Output ONLY the JSON object, no markdown
 fences, no extra text.
 """
+
+
+class _LlmAuthoredFields(BaseModel):
+    risk_level: RiskLevel
+    concerns: list[str]
+    position_sizing_note: str
+    domain_score: LlmDomainScoreFields
 
 
 def _build_prompt(
@@ -68,4 +88,10 @@ def run(
 ) -> RiskAssessment:
     user_prompt = _build_prompt(top_candidate, trend, levels)
     raw = llm_client.complete(_SYSTEM_PROMPT, user_prompt)
-    return parse_response(RiskAssessment, raw, "risk_challenger")
+    parsed = parse_response(_LlmAuthoredFields, raw, "risk_challenger")
+    return RiskAssessment(
+        risk_level=parsed.risk_level,
+        concerns=parsed.concerns,
+        position_sizing_note=parsed.position_sizing_note,
+        domain_score=assemble_domain_score("risk", parsed.domain_score),
+    )
