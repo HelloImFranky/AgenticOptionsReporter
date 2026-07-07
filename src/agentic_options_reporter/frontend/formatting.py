@@ -198,8 +198,122 @@ DOMAIN_LABELS = {
 }
 
 
+_LABEL_TO_DOMAIN_ID = {label: domain_id for domain_id, label in DOMAIN_LABELS.items()}
+
+
 def domain_label(domain_id: str) -> str:
     return DOMAIN_LABELS.get(domain_id, domain_id.replace("_", " ").title())
+
+
+def domain_id_for_label(label: str) -> str | None:
+    """Reverse of domain_label — recovers the domain id from its display
+    label, so a row renderer that only received the label back can still
+    look up domain-specific extras (e.g. factors) from the raw
+    domain_scores dict."""
+    return _LABEL_TO_DOMAIN_ID.get(label)
+
+
+# ---------------------------------------------------------------------------
+# Domain-specific label vocabularies (beyond the generic score_severity_label)
+# for Relative Strength and Statistical Edge. Each nests cleanly inside
+# trade_quality_tone's existing 60/40 color breakpoints, so the same score
+# always reads the same color everywhere in the app — only the WORDS get
+# more specific for these two domains.
+# ---------------------------------------------------------------------------
+
+
+def relative_strength_performance_label(score: float) -> str:
+    """A 6-tier Relative Strength vocabulary, nested inside the same
+    success(>=60)/warning(40-59)/danger(<40) bands trade_quality_tone uses."""
+    if score >= 85:
+        return "Exceptional"
+    if score >= 70:
+        return "Very Strong"
+    if score >= 60:
+        return "Strong"
+    if score >= 40:
+        return "Neutral"
+    if score >= 20:
+        return "Weak"
+    return "Very Weak"
+
+
+def relative_strength_performance_tone(score: float) -> str:
+    return trade_quality_tone(score)
+
+
+def relative_strength_leadership(factors: list[dict[str, Any]] | None) -> tuple[str, str] | None:
+    """A Market/Sector Leader-or-Laggard label derived from the vs_market/
+    vs_sector sub-factors (analysis/domain_scoring.py relative_strength_
+    domain_score) — whichever benchmark shows the larger deviation from
+    neutral (0.5) drives the label. "Peer Average" is the neutral middle
+    (in line with its benchmark), not a claim about literal peer-group
+    data this app doesn't have. Returns None when neither sub-factor is
+    present (e.g. an agent-authored DomainScore, which never populates
+    factors — see thesis/agent_domain_score.py)."""
+    values = {f.get("name"): f.get("value") for f in (factors or [])}
+    vs_market = values.get("vs_market")
+    vs_sector = values.get("vs_sector")
+    if vs_market is None and vs_sector is None:
+        return None
+
+    market_dev = abs(vs_market - 0.5) if vs_market is not None else -1.0
+    sector_dev = abs(vs_sector - 0.5) if vs_sector is not None else -1.0
+    if market_dev >= sector_dev:
+        value, leader, laggard = vs_market, "Market Leader", "Market Laggard"
+    else:
+        value, leader, laggard = vs_sector, "Sector Leader", "Sector Laggard"
+
+    if value >= 0.65:
+        return leader, TONE_SUCCESS
+    if value <= 0.35:
+        return laggard, TONE_DANGER
+    return "Peer Average", TONE_NEUTRAL
+
+
+def statistical_edge_confidence_label(confidence: float) -> str:
+    """A 5-tier Statistical Edge vocabulary over the domain's OWN confidence
+    value — which already encodes sample-size/data-sufficiency (capped at
+    70, omitted below the 5-run minimum for 3 of its 4 sub-factors; see
+    analysis/statistical_edge.py), so "Insufficient Data" reflects a real
+    data-sufficiency signal, not a guess."""
+    if confidence >= 65:
+        return "Very High Confidence"
+    if confidence >= 50:
+        return "High Confidence"
+    if confidence >= 35:
+        return "Moderate Confidence"
+    if confidence >= 20:
+        return "Low Confidence"
+    return "Insufficient Data"
+
+
+def statistical_edge_confidence_tone(confidence: float) -> str:
+    if confidence >= 50:
+        return TONE_SUCCESS
+    if confidence >= 35:
+        return TONE_WARNING
+    return TONE_DANGER
+
+
+def domain_badges(
+    domain_id: str | None, score: float, confidence: float, factors: list[dict[str, Any]] | None
+) -> list[tuple[str, str]]:
+    """(label, tone) badge(s) for a domain row. Relative Strength gets a
+    Performance tier plus an optional Leadership tier; Statistical Edge
+    gets a Confidence tier; every other domain falls back to the generic
+    score_severity_label/tone pair already used for the composite score."""
+    if domain_id == "relative_strength":
+        badges = [
+            (relative_strength_performance_label(score), relative_strength_performance_tone(score))
+        ]
+        leadership = relative_strength_leadership(factors)
+        if leadership:
+            badges.append(leadership)
+        return badges
+    if domain_id == "statistical_edge":
+        return [(statistical_edge_confidence_label(confidence), statistical_edge_confidence_tone(confidence))]
+    return [(score_severity_label(score), score_severity_tone(score))]
 
 
 def domain_score_items(

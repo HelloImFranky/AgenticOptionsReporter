@@ -33,6 +33,8 @@ from reportlab.platypus import (
 from agentic_options_reporter.frontend.formatting import (
     company_health_tone,
     consensus_tone,
+    domain_badges,
+    domain_id_for_label,
     domain_score_items,
     earnings_surprise_facts,
     format_next_earnings,
@@ -45,7 +47,10 @@ from agentic_options_reporter.frontend.formatting import (
     recommendation_facts,
     recommendation_tone,
     risk_level_tone,
+    score_severity_label,
+    score_severity_tone,
     technical_snapshot_facts,
+    trade_quality_agreement_summary,
     trade_quality_summary,
     trade_quality_tone,
     trend_tone,
@@ -59,6 +64,14 @@ _TONE_COLORS = {
     "warning": colors.HexColor("#B26A00"),
     "danger": colors.HexColor("#C62828"),
     "neutral": colors.HexColor("#546E7A"),
+}
+# Hex strings for the same tones, for inline <font color="..."> markup
+# inside Paragraph text (colors.Color objects aren't directly usable there).
+_TONE_HEX = {
+    "success": "#2E7D32",
+    "warning": "#B26A00",
+    "danger": "#C62828",
+    "neutral": "#546E7A",
 }
 _INK = colors.HexColor("#1A1C1E")
 _MUTED = colors.HexColor("#5F6368")
@@ -197,13 +210,100 @@ def _bullets(items: list[str], styles: dict[str, ParagraphStyle]) -> list[Any]:
     ]
 
 
+def _inline_badges(badges: list[tuple[str, str]]) -> str:
+    """Small colored '[Label]' fragments for a Paragraph — the print
+    equivalent of the UI's rounded severity/domain-specific pills
+    (app.py _domain_score_row). Callers embed this inside a Paragraph
+    whose OTHER dynamic text is escaped separately; each badge label here
+    is escaped individually so the surrounding <font>/<b> markup survives."""
+    parts = []
+    for label, tone in badges:
+        hex_color = _TONE_HEX.get(tone, _TONE_HEX["neutral"])
+        parts.append(f'&nbsp;&nbsp;<font color="{hex_color}"><b>[{escape(label)}]</b></font>')
+    return "".join(parts)
+
+
+def _domain_block_flowables(
+    domain_id: str | None,
+    label: str,
+    score: float,
+    confidence: float,
+    evidence: list[str],
+    factors: list[dict[str, Any]] | None,
+    styles: dict[str, ParagraphStyle],
+) -> list[Any]:
+    """One domain's block: label + severity/domain-specific badge(s), a
+    score/confidence meter bar, and evidence — mirrors app.py's
+    _domain_score_row exactly (same badge vocabulary via domain_badges,
+    same 0-100 meter, same evidence line)."""
+    cell_style = styles.get("cell", styles.get("body", getSampleStyleSheet()["BodyText"]))
+    muted_style = styles.get("muted", cell_style)
+    tone = score_severity_tone(score)
+    color = _TONE_COLORS.get(tone, _TONE_COLORS["neutral"])
+    badges = domain_badges(domain_id, score, confidence, factors)
+
+    header = Paragraph(f"<b>{escape(label)}</b>{_inline_badges(badges)}", cell_style)
+
+    ratio = max(0.0, min(1.0, score / 100))
+    track_width = 1.6 * inch
+    bar_height = 7
+    filled_width = track_width * ratio
+    # A fixed-height meter drawn as a two-column track (filled portion +
+    # remainder). The cells are empty strings, not Paragraphs, with zero
+    # padding — so a 0% (or tiny) fill leaves a zero-width column with no
+    # flowable to wrap, instead of a Paragraph handed a negative available
+    # width (the reportlab crash this replaces).
+    bar = Table(
+        [["", ""]],
+        colWidths=[filled_width, track_width - filled_width],
+        rowHeights=[bar_height],
+        hAlign="LEFT",
+    )
+    bar.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (0, 0), color),
+                ("BACKGROUND", (1, 0), (1, 0), _TABLE_HEADER_BG),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    meter_row = Table(
+        [[bar, Paragraph(f"{score:.0f}/100 · {confidence:.0f}% conf.", muted_style)]],
+        colWidths=[track_width + 6, None],
+        hAlign="LEFT",
+    )
+    meter_row.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+
+    flowables: list[Any] = [header, Spacer(1, 2), meter_row]
+    if evidence:
+        flowables.append(Paragraph(escape(" · ".join(evidence[:2])), muted_style))
+    flowables.append(Spacer(1, 5))
+    return flowables
+
+
 def trade_quality_flowables(
     trade_quality: dict[str, Any] | None, styles: dict[str, ParagraphStyle]
 ) -> list[Any]:
     """Renders a Trade Quality Score (specs/scoring.yaml): a composite
-    score/confidence/recommendation heading, then one row per domain
-    (present domains as a score/confidence bar, absent domains as a
-    muted 'Not available' row)."""
+    score/severity/recommendation/confidence heading, then one block per
+    domain (present domains as a badge + score/confidence meter + evidence,
+    absent domains as a muted 'Not available' line) — the print
+    counterpart of app.py's _trade_quality_panel."""
     if not trade_quality:
         return []
     domain_scores = trade_quality.get("domain_scores") or {}
@@ -212,71 +312,83 @@ def trade_quality_flowables(
     if not items and not missing:
         return []
 
-    body_style = styles.get("body", styles.get("cell", getSampleStyleSheet()["BodyText"]))
-    cell_style = styles.get("cell", body_style)
+    cell_style = styles.get("cell", styles.get("body", getSampleStyleSheet()["BodyText"]))
     muted_style = styles.get("muted", cell_style)
-    track_width = 1.2 * inch
-    bar_height = 7
-
-    rows: list[list[Any]] = []
-    for label, score, confidence, _evidence in items:
-        ratio = max(0.0, min(1.0, score / 100))
-        if ratio >= 0.75:
-            color = _TONE_COLORS["success"]
-        elif ratio >= 0.4:
-            color = _TONE_COLORS["warning"]
-        else:
-            color = _TONE_COLORS["danger"]
-
-        # A fixed-height meter drawn as a two-column track (filled portion +
-        # remainder). The cells are empty strings, not Paragraphs, with zero
-        # padding — so a 0% (or tiny) fill leaves a zero-width column with no
-        # flowable to wrap, instead of a Paragraph handed a negative
-        # available width (the reportlab crash this replaces).
-        filled_width = track_width * ratio
-        bar = Table(
-            [["", ""]],
-            colWidths=[filled_width, track_width - filled_width],
-            rowHeights=[bar_height],
-            hAlign="LEFT",
-        )
-        bar.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (0, 0), color),
-                    ("BACKGROUND", (1, 0), (1, 0), _TABLE_HEADER_BG),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                    ("TOPPADDING", (0, 0), (-1, -1), 0),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ]
-            )
-        )
-        rows.append(
-            [Paragraph(escape(label), cell_style), bar, Paragraph(f"{score:.0f}/{confidence:.0f}%", cell_style)]
-        )
-    for label in missing:
-        rows.append([Paragraph(escape(label), muted_style), "", Paragraph("Not available", muted_style)])
-
-    table = Table(rows, colWidths=[1.8 * inch, 1.35 * inch, 0.6 * inch], hAlign="LEFT")
-    table.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
     heading_style = styles.get("cellhead", cell_style)
+
     composite = float(trade_quality.get("composite_score") or 0.0)
     confidence = float(trade_quality.get("confidence") or 0.0)
     action = trade_quality.get("recommendation_action", "—")
-    heading = f"Trade Quality Score: {composite:.0f}/100 ({action}, confidence {confidence:.0f}%)"
-    return [Paragraph(escape(heading), heading_style), Spacer(1, 3), table, Spacer(1, 4)]
+    severity = score_severity_label(composite)
+    heading = (
+        f"Trade Quality Score: {composite:.0f}/100 ({action}, {severity}, "
+        f"confidence {confidence:.0f}%)"
+    )
+    flowables: list[Any] = [Paragraph(escape(heading), heading_style), Spacer(1, 3)]
+
+    summary = trade_quality_summary(trade_quality)
+    if summary:
+        flowables.append(Paragraph(escape(summary), muted_style))
+        flowables.append(Spacer(1, 3))
+
+    for label, score, confidence_pct, evidence in items:
+        domain_id = domain_id_for_label(label)
+        factors = (domain_scores.get(domain_id) or {}).get("factors") if domain_id else None
+        flowables.extend(
+            _domain_block_flowables(domain_id, label, score, confidence_pct, evidence, factors, styles)
+        )
+    for label in missing:
+        flowables.append(Paragraph(f"{escape(label)}: <i>Not available</i>", muted_style))
+        flowables.append(Spacer(1, 3))
+
+    return flowables
+
+
+def trade_quality_comparison_flowables(
+    quant: dict[str, Any] | None, agent: dict[str, Any] | None, styles: dict[str, ParagraphStyle]
+) -> list[Any]:
+    """Mirrors the Agents-tab 'Trade Quality Score — Quant vs. Agents'
+    comparison card (app.py _render_final): an agreement/divergence
+    caption, then the quant and agent Trade Quality Score side by side."""
+    if not quant and not agent:
+        return []
+    muted_style = styles.get("muted", styles["body"])
+    cellhead_style = styles.get("cellhead", styles["body"])
+
+    flowables: list[Any] = []
+    agreement = trade_quality_agreement_summary(quant, agent)
+    if agreement:
+        flowables.append(Paragraph(escape(agreement), muted_style))
+        flowables.append(Spacer(1, 6))
+
+    quant_col: list[Any] = [Paragraph("Quant", cellhead_style), Spacer(1, 3)]
+    quant_col.extend(
+        trade_quality_flowables(quant, styles)
+        if quant
+        else [Paragraph("No Trade Quality Score available", muted_style)]
+    )
+    agent_col: list[Any] = [Paragraph("Agents", cellhead_style), Spacer(1, 3)]
+    agent_col.extend(
+        trade_quality_flowables(agent, styles)
+        if agent
+        else [Paragraph("No Trade Quality Score available", muted_style)]
+    )
+
+    table = Table([[quant_col, agent_col]], colWidths=[3.25 * inch, 3.25 * inch], hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (0, 0), 0),
+                ("LEFTPADDING", (1, 0), (1, 0), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    flowables.append(table)
+    return flowables
 
 
 def _recommendation_block(
@@ -333,17 +445,30 @@ def _short_date(value: str) -> str:
 def _insider_timeseries_chart(insider: dict[str, Any] | None, styles: dict[str, ParagraphStyle]) -> list[Any]:
     """Time series of net insider share flow: a signed column per date drawn
     on a zero baseline — green above the line for net buying, red below for
-    net selling. Print counterpart of the Analyze tab's chart."""
+    net selling. Print counterpart of the Analyze tab's chart.
+
+    Vertical layout, bottom to top, all FIXED (not bar-height-dependent) so
+    a full-height column's value label can never collide with the date row
+    below it:
+      dates row -> gap -> value-label row -> gap -> bar plot area.
+    """
     series = insider_activity_series(insider)
     if not series:
         return []
 
     width = 6.6 * inch
-    label_band = 16          # room for the date ticks under the plot
-    plot_half = 46           # column reach above / below the baseline
+    date_row_y = 4              # date-tick text baseline
+    value_label_y = 17          # sell-side peak value label baseline (fixed)
+    bar_bottom_gap = 6          # clearance between the lowest possible bar and the value label
+    label_band = value_label_y + 7 + bar_bottom_gap  # ~30pt reserved below the baseline
+    plot_half = 46               # column reach above / below the baseline
     height = label_band + 2 * plot_half + 12
     baseline_y = label_band + plot_half
-    left_pad, right_pad = 6, 6
+
+    # Reserve room on the left for the y-axis's tick labels (share counts),
+    # so the magnitude scale is visible instead of only inferable from bar height.
+    axis_label_width = 38
+    left_pad, right_pad = axis_label_width, 6
     plot_width = width - left_pad - right_pad
     step = plot_width / len(series)
     col_width = min(step * 0.5, 16)
@@ -351,8 +476,24 @@ def _insider_timeseries_chart(insider: dict[str, Any] | None, styles: dict[str, 
     peak = max(range(len(series)), key=lambda i: abs(series[i]["net"]))
 
     drawing = Drawing(width, height)
-    # Recessive zero baseline.
+
+    # Y-axis: a vertical rule plus tick marks + share-count labels at
+    # 0/±50%/±100% of the largest magnitude, so the scale reads at a
+    # glance instead of only via the single peak-value label.
+    axis_x = left_pad - 6
+    drawing.add(Line(axis_x, 4, axis_x, height - 4, strokeColor=_HAIRLINE, strokeWidth=0.75))
+    for frac in (1.0, 0.5, 0.0, -0.5, -1.0):
+        tick_y = baseline_y + frac * plot_half
+        drawing.add(Line(axis_x - 3, tick_y, axis_x, tick_y, strokeColor=_HAIRLINE, strokeWidth=0.75))
+        tick_label = f"{frac * max_mag:+,.0f}" if frac else "0"
+        drawing.add(
+            String(axis_x - 4, tick_y - 2.5, tick_label, fontName="Helvetica", fontSize=6,
+                   fillColor=_MUTED, textAnchor="end")
+        )
+
+    # Recessive zero baseline across the plot area.
     drawing.add(Line(left_pad, baseline_y, width - right_pad, baseline_y, strokeColor=_HAIRLINE, strokeWidth=0.75))
+
     for i, p in enumerate(series):
         cx = left_pad + step * i + step / 2
         col_h = (abs(p["net"]) / max_mag) * plot_half
@@ -362,12 +503,15 @@ def _insider_timeseries_chart(insider: dict[str, Any] | None, styles: dict[str, 
             Rect(cx - col_width / 2, y, col_width, col_h, rx=2, ry=2, fillColor=color, strokeColor=None)
         )
         drawing.add(
-            String(cx, 4, _short_date(p["date"]), fontName="Helvetica", fontSize=6.5,
+            String(cx, date_row_y, _short_date(p["date"]), fontName="Helvetica", fontSize=6.5,
                    fillColor=_MUTED, textAnchor="middle")
         )
-        # Selective direct label: only the largest-magnitude column.
+        # Selective direct label: only the largest-magnitude column. The
+        # sell-side (negative) label sits at a FIXED y — below the lowest
+        # point any bar can reach, with its own gap above the date row —
+        # so it never touches the dates, regardless of that bar's height.
         if i == peak:
-            ly = baseline_y + col_h + 3 if p["is_buy"] else baseline_y - col_h - 8
+            ly = baseline_y + col_h + 3 if p["is_buy"] else value_label_y
             drawing.add(
                 String(cx, ly, f"{p['net']:+,.0f}", fontName="Helvetica-Bold", fontSize=6.5,
                        fillColor=color, textAnchor="middle")
@@ -673,16 +817,10 @@ def _pipeline_blocks(thesis: dict[str, Any], styles: dict[str, ParagraphStyle]) 
                      body=[Paragraph(escape(investment.get("thesis", "")), styles["body"])])
     )
 
-    agent_trade_quality = thesis.get("agent_trade_quality")
-    if agent_trade_quality:
-        agent_score = agent_trade_quality.get("composite_score") or 0.0
-        blocks.append(
-            _agent_block(
-                "Agent Trade Quality Score", styles,
-                badge=(f"SCORE {agent_score:.0f}/100", trade_quality_tone(agent_score)),
-                body=trade_quality_flowables(agent_trade_quality, styles),
-            )
-        )
+    # The agent-side Trade Quality Score is no longer shown here in
+    # isolation — it renders in the dedicated "Trade Quality Score — Quant
+    # vs. Agents" section (build_report_pdf), side by side with the quant
+    # score, mirroring the Agents-tab comparison card.
     return blocks
 
 
@@ -735,6 +873,19 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
 
     thesis = report.get("thesis")
     if thesis:
+        # Mirrors the Agents-tab layout order: the Trade Quality Score
+        # comparison (final_output_card) appears before the per-agent
+        # conversation transcript (conversation_card).
+        quant_trade_quality = (
+            (thesis.get("quant_interpretation") or {}).get("quant_trade_quality")
+            or report.get("trade_quality")
+        )
+        agent_trade_quality = thesis.get("agent_trade_quality")
+        comparison = trade_quality_comparison_flowables(quant_trade_quality, agent_trade_quality, styles)
+        if comparison:
+            story.extend(_section_header("Trade Quality Score — Quant vs. Agents", styles))
+            story.extend(comparison)
+
         story.extend(_section_header("Agent pipeline", styles))
         warnings = thesis.get("pipeline_warnings") or []
         if warnings:

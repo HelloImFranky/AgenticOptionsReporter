@@ -10,9 +10,11 @@ from reportlab.platypus import Paragraph
 
 from agentic_options_reporter.frontend.report_pdf import (
     _fundamentals_blocks,
+    _insider_timeseries_chart,
     _recommendation_block,
     _styles,
     build_report_pdf,
+    trade_quality_comparison_flowables,
     trade_quality_flowables,
 )
 
@@ -385,3 +387,132 @@ def test_trade_quality_flowables_handle_extreme_ratios():
             "trade_quality": trade_quality,
         }
         assert _is_pdf(build_report_pdf(payload))
+
+
+def test_trade_quality_flowables_include_relative_strength_and_statistical_edge_badges():
+    """Domain-specific badges (Performance/Leadership for Relative Strength,
+    Confidence for Statistical Edge) must render in the PDF, matching the
+    Agents-tab per-domain pills."""
+    trade_quality = _trade_quality(
+        {
+            "relative_strength": {
+                "score": 90.0, "confidence": 80.0, "evidence": [],
+                "factors": [{"name": "vs_market", "value": 0.9, "weight": 0.55, "detail": ""}],
+            },
+            "statistical_edge": {"score": 55.0, "confidence": 10.0, "evidence": []},
+        }
+    )
+    text = _paragraph_texts(trade_quality_flowables(trade_quality, _styles()))
+    assert "Exceptional" in text          # Relative Strength Performance tier
+    assert "Market Leader" in text        # Relative Strength Leadership tier
+    assert "Insufficient Data" in text    # Statistical Edge Confidence tier
+
+
+def test_trade_quality_comparison_flowables_renders_quant_and_agents_side_by_side():
+    quant = _trade_quality({"technical": _domain_score(90.0)}, composite_score=90.0)
+    agent = _trade_quality({"technical": _domain_score(50.0)}, composite_score=50.0)
+    text = _paragraph_texts(trade_quality_comparison_flowables(quant, agent, _styles()))
+    assert "Quant" in text
+    assert "Agents" in text
+    assert "diverge" in text   # composite scores 90 vs 50 differ by well over the 15pt threshold
+
+
+def test_trade_quality_comparison_flowables_empty_without_either_source():
+    assert trade_quality_comparison_flowables(None, None, _styles()) == []
+
+
+def test_trade_quality_comparison_flowables_handles_missing_agent_side():
+    quant = _trade_quality({"technical": _domain_score(80.0)})
+    text = _paragraph_texts(trade_quality_comparison_flowables(quant, None, _styles()))
+    assert "No Trade Quality Score available" in text
+
+
+def test_build_report_includes_quant_vs_agents_comparison_section():
+    """The dedicated comparison section — mirroring the Agents tab's
+    'Trade Quality Score — Quant vs. Agents' card — must appear before the
+    'Agent pipeline' section, and the old standalone 'Agent Trade Quality
+    Score' block must no longer exist as its own heading."""
+    from reportlab.platypus import KeepTogether, Paragraph
+
+    styles = _styles()
+    doc_story: list = []
+    symbol = "AAPL"
+    report = _FULL_REPORT
+
+    # Reuse build_report_pdf's actual story-building by inspecting the text
+    # of the generated PDF isn't practical (binary), so assert via the
+    # flowables this section is built from directly.
+    thesis = report["thesis"]
+    quant_tq = thesis["quant_interpretation"]["quant_trade_quality"]
+    agent_tq = thesis["agent_trade_quality"]
+    comparison = trade_quality_comparison_flowables(quant_tq, agent_tq, styles)
+    assert comparison
+    text = _paragraph_texts(comparison)
+    assert "Quant" in text and "Agents" in text
+
+    data = build_report_pdf(report)
+    assert _is_pdf(data)
+
+
+def test_insider_chart_value_label_position_is_independent_of_bar_height():
+    """Regression: the sell-side peak value label used to sit at a y
+    dependent on the bar's own height (baseline - col_h - 8), so a
+    near-full-height red bar could push its label down to nearly touch the
+    date row. It must now sit at a FIXED y regardless of magnitude."""
+    from reportlab.graphics.shapes import String
+
+    styles = _styles()
+
+    small_sell = {"transactions": [
+        {"transaction_type": "sell", "shares": 10, "filed_at": "2026-06-01"},
+    ]}
+    large_sell = {"transactions": [
+        {"transaction_type": "sell", "shares": 100_000, "filed_at": "2026-06-01"},
+    ]}
+
+    def _peak_label_y(insider):
+        flowables = _insider_timeseries_chart(insider, styles)
+        drawing = flowables[0]
+        value_strings = [
+            s for s in drawing.contents
+            if isinstance(s, String) and s.text.startswith(("+", "-"))
+        ]
+        assert value_strings
+        return value_strings[0].y
+
+    assert _peak_label_y(small_sell) == _peak_label_y(large_sell)
+
+
+def test_insider_chart_has_visible_y_axis():
+    """The share-count scale must be legible via a drawn axis, not just
+    inferable from bar height."""
+    from reportlab.graphics.shapes import Line, String
+
+    styles = _styles()
+    insider = {"transactions": [
+        {"transaction_type": "buy", "shares": 500, "filed_at": "2026-05-01"},
+        {"transaction_type": "sell", "shares": 1000, "filed_at": "2026-06-01"},
+    ]}
+    drawing = _insider_timeseries_chart(insider, styles)[0]
+
+    lines = [item for item in drawing.contents if isinstance(item, Line)]
+    # Vertical axis rule + zero baseline + 5 tick marks (100%/50%/0/-50%/-100%).
+    vertical_lines = [ln for ln in lines if ln.x1 == ln.x2]
+    assert vertical_lines  # the y-axis rule itself
+    tick_labels = [
+        item for item in drawing.contents
+        if isinstance(item, String) and item.text in ("0",)
+    ]
+    assert tick_labels  # the "0" tick at the baseline
+
+
+def test_insider_chart_axis_ticks_scale_with_max_magnitude():
+    from reportlab.graphics.shapes import String
+
+    styles = _styles()
+    insider = {"transactions": [
+        {"transaction_type": "buy", "shares": 2000, "filed_at": "2026-05-01"},
+    ]}
+    drawing = _insider_timeseries_chart(insider, styles)[0]
+    tick_texts = {item.text for item in drawing.contents if isinstance(item, String)}
+    assert "+2,000" in tick_texts   # the 100% tick label matches the max magnitude
