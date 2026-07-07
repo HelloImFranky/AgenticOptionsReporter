@@ -536,13 +536,15 @@ def _insider_timeseries_chart(insider: dict[str, Any] | None, styles: dict[str, 
     return [drawing, Spacer(1, 2), legend]
 
 
-def _fundamentals_blocks(
+def _fundamentals_key_facts_blocks(
     fundamentals: dict[str, Any], data_warnings: list[Any] | None, styles: dict[str, ParagraphStyle]
 ) -> list[Any]:
-    """The cross-provider fundamentals snapshot (metrics, next earnings,
-    recent surprises, insider activity) — mirrors the Analyze tab's
-    Fundamentals card, sharing the same formatting helpers so the two can't
-    drift. Absent sections are simply omitted."""
+    """The 'Fundamentals' section proper: key metrics + the next-earnings
+    line + any data-source warnings. Recent earnings surprises and insider
+    activity render as their OWN sections (_recent_earnings_blocks /
+    _insider_activity_blocks) so build_report_pdf can position each
+    independently — mirrors the Analyze tab's Fundamentals card, sharing
+    the same formatting helpers so the two can't drift."""
     blocks: list[Any] = []
 
     metric_facts = fundamentals_metric_facts(fundamentals.get("metrics"))
@@ -554,18 +556,6 @@ def _fundamentals_blocks(
     if next_earnings:
         blocks.append(Spacer(1, 4))
         blocks.append(Paragraph(escape(next_earnings), styles["body"]))
-
-    surprise_facts = earnings_surprise_facts(fundamentals.get("earnings_history"))
-    if surprise_facts:
-        blocks.append(Spacer(1, 4))
-        blocks.append(Paragraph("Recent earnings (actual vs. estimate)", styles["agent"]))
-        blocks.extend(_facts_table(surprise_facts, styles, cols=2))
-
-    insider_header = insider_activity_header(fundamentals.get("insider_activity"))
-    if insider_header:
-        blocks.append(Spacer(1, 4))
-        blocks.append(Paragraph(escape(insider_header), styles["agent"]))
-        blocks.extend(_insider_timeseries_chart(fundamentals.get("insider_activity"), styles))
 
     if data_warnings:
         blocks.append(Spacer(1, 4))
@@ -580,6 +570,30 @@ def _fundamentals_blocks(
     if not blocks:
         return [Paragraph("No fundamentals available for this symbol.", styles["muted"])]
     return blocks
+
+
+def _recent_earnings_blocks(
+    fundamentals: dict[str, Any], styles: dict[str, ParagraphStyle]
+) -> list[Any]:
+    """Recent earnings surprises (actual vs. estimate), as its own section
+    — empty when the provider has no earnings history, so the caller can
+    skip the section header entirely rather than rendering an empty page."""
+    surprise_facts = earnings_surprise_facts(fundamentals.get("earnings_history"))
+    if not surprise_facts:
+        return []
+    return _facts_table(surprise_facts, styles, cols=2)
+
+
+def _insider_activity_blocks(
+    fundamentals: dict[str, Any], styles: dict[str, ParagraphStyle]
+) -> list[Any]:
+    """Insider buy/sell activity (header + time-series chart), as its own
+    section — empty when there's nothing to show."""
+    insider = fundamentals.get("insider_activity")
+    header = insider_activity_header(insider)
+    if not header:
+        return []
+    return _insider_timeseries_chart(insider, styles)
 
 
 def _candidates_table(candidates: list[dict[str, Any]], styles: dict[str, ParagraphStyle]) -> list[Any]:
@@ -835,8 +849,11 @@ def _pipeline_blocks(thesis: dict[str, Any], styles: dict[str, ParagraphStyle]) 
     return blocks
 
 
-def build_report_pdf(report: dict[str, Any]) -> bytes:
-    """Build a PDF from a combined analysis/thesis payload and return its bytes.
+def _build_story(report: dict[str, Any]) -> tuple[str, list[Any]]:
+    """Build the flowable story for a combined analysis/thesis payload.
+    Split out from build_report_pdf so tests can inspect the resulting
+    flowables (e.g. PageBreak placement) directly, instead of only being
+    able to check the rendered PDF's text-per-page. Returns (symbol, story).
 
     Expected keys (all optional except an implicit best-effort render):
       symbol, generated_at, recommendation, trend, volume, indicators,
@@ -857,14 +874,23 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
     story.append(Paragraph(subtitle, styles["subtitle"]))
     story.append(HRFlowable(width="100%", thickness=1.2, color=_HAIRLINE, spaceBefore=8, spaceAfter=2))
 
-    # The title isn't a section itself, so it follows different rules: the
-    # FIRST section shares its page with the title/subtitle above (no
-    # PageBreak), and every section after that opens its own fresh page.
+    # The title isn't a section itself, so the FIRST section rendered
+    # shares its page with the title/subtitle above (no PageBreak) instead
+    # of getting a near-empty page of its own.
+    #
+    # Report order: Recommendation, Technical Snapshot, Fundamentals,
+    # Recent Earnings, and Insider Activity flow together with no forced
+    # break between them — they share pages when they fit and only spill
+    # onto more as needed (force_new_page=False). Scored Candidates and
+    # the thesis sections (Trade Quality comparison, Agent Pipeline) each
+    # always get a fresh page of their own (force_new_page=True) — except
+    # that the very first section overall still shares the cover page,
+    # whichever section that turns out to be.
     on_first_section = True
 
-    def add_section(text: str) -> None:
+    def add_section(text: str, *, force_new_page: bool = False) -> None:
         nonlocal on_first_section
-        story.extend(_section_header(text, styles, new_page=not on_first_section))
+        story.extend(_section_header(text, styles, new_page=force_new_page and not on_first_section))
         on_first_section = False
 
     recommendation = report.get("recommendation")
@@ -883,14 +909,25 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
         add_section("Technical snapshot")
         story.extend(_facts_table(technical_snapshot_facts(trend, volume, indicators), styles))
 
-    if report.get("candidates") is not None:
-        add_section("Scored candidates")
-        story.extend(_candidates_table(report.get("candidates") or [], styles))
-
     fundamentals = report.get("fundamentals")
     if fundamentals:
         add_section("Fundamentals")
-        story.extend(_fundamentals_blocks(fundamentals, report.get("data_warnings"), styles))
+        story.extend(_fundamentals_key_facts_blocks(fundamentals, report.get("data_warnings"), styles))
+
+        recent_earnings = _recent_earnings_blocks(fundamentals, styles)
+        if recent_earnings:
+            add_section("Recent earnings")
+            story.extend(recent_earnings)
+
+        insider_header = insider_activity_header(fundamentals.get("insider_activity"))
+        insider_blocks = _insider_activity_blocks(fundamentals, styles)
+        if insider_blocks:
+            add_section(insider_header)
+            story.extend(insider_blocks)
+
+    if report.get("candidates") is not None:
+        add_section("Scored candidates", force_new_page=True)
+        story.extend(_candidates_table(report.get("candidates") or [], styles))
 
     thesis = report.get("thesis")
     if thesis:
@@ -904,10 +941,10 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
         agent_trade_quality = thesis.get("agent_trade_quality")
         comparison = trade_quality_comparison_flowables(quant_trade_quality, agent_trade_quality, styles)
         if comparison:
-            add_section("Trade Quality Score — Quant vs. Agents")
+            add_section("Trade Quality Score — Quant vs. Agents", force_new_page=True)
             story.extend(comparison)
 
-        add_section("Agent pipeline")
+        add_section("Agent pipeline", force_new_page=True)
         warnings = thesis.get("pipeline_warnings") or []
         if warnings:
             story.append(_badge("PIPELINE WARNINGS", "warning", styles))
@@ -915,6 +952,14 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
             story.extend(_bullets([str(w) for w in warnings], styles))
             story.append(Spacer(1, 4))
         story.extend(_pipeline_blocks(thesis, styles))
+
+    return symbol, story
+
+
+def build_report_pdf(report: dict[str, Any]) -> bytes:
+    """Build a PDF from a combined analysis/thesis payload and return its
+    bytes. See _build_story for the expected payload shape."""
+    symbol, story = _build_story(report)
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(
