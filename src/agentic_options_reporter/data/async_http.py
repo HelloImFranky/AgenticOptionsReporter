@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from abc import abstractmethod
@@ -26,18 +27,41 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 # Query-param names that carry credentials — never written to the log
-# buffer the frontend's Log tab reads from.
+# buffer the frontend's Log tab reads from, and never returned in an API
+# error response either (see scrub_secrets below).
 _SENSITIVE_PARAM_NAMES = {"apikey", "api_key", "token", "access_key", "key", "secret"}
+
+# Matches `?apikey=VALUE` / `&token=VALUE` query-string fragments — anchored
+# on the preceding `?`/`&` so this only fires on an actual query parameter,
+# not on an unrelated word that happens to contain "key".
+_SECRET_QUERY_PATTERN = re.compile(
+    r"([?&])(" + "|".join(re.escape(name) for name in _SENSITIVE_PARAM_NAMES) + r")=[^&\s'\"]+",
+    re.IGNORECASE,
+)
 
 
 def redact_params(params: dict[str, Any]) -> dict[str, Any]:
     """Replace credential-shaped query params with a placeholder before a
-    request/URL is logged, so an API key never lands in the in-memory log
+    request is logged, so an API key never lands in the in-memory log
     buffer (or the console) that GET /logs and the Log tab expose."""
     return {
         name: ("***" if name.lower() in _SENSITIVE_PARAM_NAMES else value)
         for name, value in params.items()
     }
+
+
+def scrub_secrets(text: str) -> str:
+    """Mask credential-shaped query params inside arbitrary text — in
+    particular an httpx exception's string form, which embeds the FULL
+    request URL (including the real `?apikey=...`) via `response.url` or
+    `request.url`. `redact_params` only covers the structured params dict
+    on the request-log line; this covers the free-text exception messages
+    that `_classify_httpx_error` builds, which is the one chokepoint every
+    failure path funnels through — logged warnings/errors, provider-router
+    failover messages, workflow data_warnings, and API error responses
+    (main.py's `HTTPException(detail=str(exc))`) all consume the resulting
+    exception's `str()`, so scrubbing here covers all of them at once."""
+    return _SECRET_QUERY_PATTERN.sub(lambda m: f"{m.group(1)}{m.group(2)}=***", text)
 
 
 class ProviderHealth(BaseModel):
@@ -93,18 +117,24 @@ class AsyncHttpProviderBase:
         import httpx
 
         label = self.PROVIDER_LABEL
+        # httpx bakes the FULL request URL — including the real ?apikey=...
+        # — into these exceptions' str(); scrub it here, at the one
+        # chokepoint every failure path funnels through, so the key can
+        # never surface downstream (logs, provider-router messages,
+        # workflow warnings, or an API error response's `detail`).
+        detail = scrub_secrets(str(exc))
         if isinstance(exc, httpx.TimeoutException):
-            return self.TIMEOUT_CLS(f"{label} request timed out: {exc}")
+            return self.TIMEOUT_CLS(f"{label} request timed out: {detail}")
         if isinstance(exc, httpx.HTTPStatusError):
             status_code = exc.response.status_code
             if status_code == 429:
-                return self.RATE_LIMITED_CLS(f"{label} rate limited: {exc}")
+                return self.RATE_LIMITED_CLS(f"{label} rate limited: {detail}")
             if status_code >= 500:
-                return self.UNAVAILABLE_CLS(f"{label} is unavailable: {exc}")
-            return self.ERROR_CLS(f"{label} request failed: {exc}")
+                return self.UNAVAILABLE_CLS(f"{label} is unavailable: {detail}")
+            return self.ERROR_CLS(f"{label} request failed: {detail}")
         if isinstance(exc, httpx.TransportError):
-            return self.UNAVAILABLE_CLS(f"{label} is unreachable: {exc}")
-        return self.ERROR_CLS(f"{label} request failed: {exc}")
+            return self.UNAVAILABLE_CLS(f"{label} is unreachable: {detail}")
+        return self.ERROR_CLS(f"{label} request failed: {detail}")
 
     def _check_payload(self, payload: Any) -> None:
         """Hook for providers whose errors arrive as HTTP-200 bodies
@@ -136,8 +166,13 @@ class AsyncHttpProviderBase:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             elapsed_ms = (time.monotonic() - started) * 1000
+            # exc's str() embeds the full request URL (real apikey and
+            # all) before it's classified below — scrub it here too, not
+            # just inside _classify_httpx_error, since this line logs the
+            # raw exception directly.
             logger.warning(
-                "%s ✗ GET %s failed after %.0fms: %s", self.PROVIDER_LABEL, url, elapsed_ms, exc
+                "%s ✗ GET %s failed after %.0fms: %s",
+                self.PROVIDER_LABEL, url, elapsed_ms, scrub_secrets(str(exc)),
             )
             raise self._classify_httpx_error(exc) from exc
 

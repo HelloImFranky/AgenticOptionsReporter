@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from agentic_options_reporter.data.async_http import redact_params
+from agentic_options_reporter.data.async_http import redact_params, scrub_secrets
 from agentic_options_reporter.logging_config import (
     _BUFFER_HANDLER,
     clear_log_entries,
@@ -83,3 +83,38 @@ def test_redact_params_leaves_non_sensitive_keys_untouched():
     redacted = redact_params({"symbol": "AAPL", "period": "annual"})
 
     assert redacted == {"symbol": "AAPL", "period": "annual"}
+
+
+def test_scrub_secrets_masks_query_string_key_in_free_text():
+    """This is what an httpx exception's str() actually looks like — the
+    full request URL, including the real key, embedded in a sentence.
+    redact_params can't touch this (it operates on a structured dict, not
+    free text); scrub_secrets is the backstop for exactly this shape."""
+    text = (
+        "Client error '429 Too Many Requests' for url "
+        "'https://financialmodelingprep.com/stable/profile?symbol=AAPL&apikey=SUPERSECRET999'"
+    )
+
+    scrubbed = scrub_secrets(text)
+
+    assert "SUPERSECRET999" not in scrubbed
+    assert "apikey=***" in scrubbed
+    assert "symbol=AAPL" in scrubbed  # non-sensitive params are left readable
+
+
+def test_scrub_secrets_does_not_touch_unrelated_words_containing_key():
+    text = "GET /monkey?symbol=AAPL failed: primary key violation"
+
+    scrubbed = scrub_secrets(text)
+
+    assert scrubbed == text
+
+
+def test_scrub_secrets_handles_multiple_and_case_insensitive_params():
+    text = "url 'https://x.test/y?TOKEN=abc123&other=1&Api_Key=zzz'"
+
+    scrubbed = scrub_secrets(text)
+
+    assert "abc123" not in scrubbed
+    assert "zzz" not in scrubbed
+    assert "other=1" in scrubbed

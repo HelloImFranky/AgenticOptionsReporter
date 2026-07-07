@@ -155,6 +155,23 @@ def test_fmp_empty_response_falls_back_to_defaults():
     assert profile.market_cap is None
 
 
+def test_fmp_rate_limit_error_does_not_leak_api_key():
+    """Regression: httpx.HTTPStatusError.__str__ embeds the FULL request
+    URL — including the real ?apikey=... — so a naive `f"...: {exc}"` would
+    leak the key into whatever consumes this exception's message (logs,
+    provider-router failure text, workflow data_warnings, and the
+    HTTPException `detail` an API caller sees). _classify_httpx_error must
+    scrub it before the message is ever built."""
+    transport = RecordingTransport((429, {"error": "slow down"}))
+    provider = FmpFinancialProvider(api_key="SUPERSECRET999", client=_client(transport))
+
+    with pytest.raises(FinancialProviderRateLimited) as exc_info:
+        asyncio.run(provider.get_company_profile("AAPL"))
+
+    assert "SUPERSECRET999" not in str(exc_info.value)
+    assert "apikey=***" in str(exc_info.value)
+
+
 # -- Finnhub --
 
 
