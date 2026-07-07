@@ -102,6 +102,26 @@ def test_get_run_builds_expected_path(monkeypatch):
     assert captured["url"] == "http://localhost:8000/runs/42"
 
 
+def test_get_logs_builds_expected_request(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, params=None, json=None, timeout=None):
+        captured["method"] = method
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse(payload=[{"seq": 1, "level": "INFO", "logger": "x", "message": "hi"}])
+
+    monkeypatch.setattr(requests_module, "request", fake_request)
+    client = ApiClient()
+
+    result = client.get_logs(since_seq=7, limit=100)
+
+    assert captured["method"] == "GET"
+    assert captured["url"] == "http://localhost:8000/logs"
+    assert captured["params"] == {"since_seq": 7, "limit": 100}
+    assert result[0]["message"] == "hi"
+
+
 def test_generate_thesis_builds_expected_request(monkeypatch):
     captured = {}
 

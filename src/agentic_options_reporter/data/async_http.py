@@ -13,6 +13,7 @@ so a "Regenerate" click seconds later must not re-spend quota — and a
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -21,6 +22,22 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+# Query-param names that carry credentials — never written to the log
+# buffer the frontend's Log tab reads from.
+_SENSITIVE_PARAM_NAMES = {"apikey", "api_key", "token", "access_key", "key", "secret"}
+
+
+def redact_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Replace credential-shaped query params with a placeholder before a
+    request/URL is logged, so an API key never lands in the in-memory log
+    buffer (or the console) that GET /logs and the Log tab expose."""
+    return {
+        name: ("***" if name.lower() in _SENSITIVE_PARAM_NAMES else value)
+        for name, value in params.items()
+    }
 
 
 class ProviderHealth(BaseModel):
@@ -98,14 +115,18 @@ class AsyncHttpProviderBase:
     ) -> Any:
         import httpx
 
+        safe_params = redact_params(params)
         cache_key = (type(self).__name__, url, tuple(sorted(params.items())))
         with AsyncHttpProviderBase._cache_lock:
             cached = AsyncHttpProviderBase._shared_cache.get(cache_key)
             if cached is not None:
                 cached_at, payload = cached
                 if time.monotonic() - cached_at < self.CACHE_TTL_SECONDS:
+                    logger.debug("%s cache hit: GET %s %s", self.PROVIDER_LABEL, url, safe_params)
                     return payload
 
+        started = time.monotonic()
+        logger.info("%s → GET %s %s", self.PROVIDER_LABEL, url, safe_params)
         try:
             if self._client is not None:
                 response = await self._client.get(url, params=params, headers=headers)
@@ -114,8 +135,16 @@ class AsyncHttpProviderBase:
                     response = await client.get(url, params=params, headers=headers)
             response.raise_for_status()
         except httpx.HTTPError as exc:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            logger.warning(
+                "%s ✗ GET %s failed after %.0fms: %s", self.PROVIDER_LABEL, url, elapsed_ms, exc
+            )
             raise self._classify_httpx_error(exc) from exc
 
+        elapsed_ms = (time.monotonic() - started) * 1000
+        logger.info(
+            "%s ← %d GET %s (%.0fms)", self.PROVIDER_LABEL, response.status_code, url, elapsed_ms
+        )
         payload = response.json()
         self._check_payload(payload)
         with AsyncHttpProviderBase._cache_lock:

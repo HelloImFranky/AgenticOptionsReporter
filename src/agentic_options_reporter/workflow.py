@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import sessionmaker
@@ -49,6 +51,8 @@ from agentic_options_reporter.persistence import (
     make_session_factory,
     persist_analysis_run,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def _fetch_market_data(
@@ -248,6 +252,11 @@ def run_analysis(
     news_provider: NewsProvider | None = None,
     weighting_profile: WeightingProfileId = "swing",
 ) -> AnalysisResult:
+    started = time.monotonic()
+    logger.info(
+        "Analysis pipeline started: symbol=%s lookback_days=%d expiration=%s weighting_profile=%s",
+        symbol, lookback_days, expiration or "nearest", weighting_profile,
+    )
     settings = get_settings()
     provider = provider or build_market_data_provider()
     if financial_provider is None:
@@ -261,6 +270,9 @@ def run_analysis(
     # The providers are async; this pipeline is sync, so bridge with a
     # private event loop and fetch the technicals + every best-effort
     # Trade Quality Score signal concurrently.
+    logger.info(
+        "%s: fetching market data, fundamentals, macro, and news concurrently", symbol
+    )
     (
         history,
         chain,
@@ -275,15 +287,19 @@ def run_analysis(
             provider, financial_provider, macro_provider, news_provider, symbol, lookback_days, expiration
         )
     )
+    if data_warnings:
+        logger.warning("%s: %d data source(s) degraded — %s", symbol, len(data_warnings), "; ".join(data_warnings))
     # No provider serves 1w/1m high/low, but we already have the daily bars,
     # so derive them and fold them into the fundamentals metrics snapshot.
     fundamentals = _augment_price_ranges(fundamentals, history, symbol)
 
+    logger.info("%s: computing indicators, trend, volume, and support/resistance levels", symbol)
     indicators = compute_indicators(history)
     trend = detect_trend(history, indicators)
     volume = analyze_volume(history, indicators)
     levels = detect_levels(history)
 
+    logger.info("%s: evaluating %d option contract(s) and scoring candidates", symbol, len(chain.contracts))
     evaluated_contracts = evaluate_chain(chain, history)
     risk_profiles = compute_risk(evaluated_contracts)
 
@@ -310,6 +326,10 @@ def run_analysis(
             weighting_profile=weighting_profile,
         )
         recommendation, trade_quality = build_recommendation(candidates, weighting_profile)
+        logger.info(
+            "%s: recommendation=%s confidence=%.0f%% (%d candidate(s) scored)",
+            symbol, recommendation.action, (recommendation.confidence or 0.0) * 100, len(candidates),
+        )
 
         run_id = persist_analysis_run(
             session,
@@ -327,6 +347,9 @@ def run_analysis(
             fundamentals=fundamentals,
             data_warnings=data_warnings,
         )
+
+    elapsed_ms = (time.monotonic() - started) * 1000
+    logger.info("Analysis pipeline finished: symbol=%s run_id=%d (%.0fms)", symbol, run_id, elapsed_ms)
 
     return AnalysisResult(
         symbol=symbol,

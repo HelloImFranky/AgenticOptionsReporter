@@ -415,12 +415,12 @@ interfaces:
       - name: FmpFinancialProvider
         api_key_env_var: FMP_API_KEY
         free_tier: ~250 requests/day; full interface coverage (why it leads the default fallback order)
-        base_url: https://financialmodelingprep.com/api/v3
+        base_url: https://financialmodelingprep.com/stable   # migrated off /api/v3; stable takes the symbol as a query param, not a path segment
         endpoints:
-          get_company_profile: GET /profile/{ticker}
-          get_financial_statements: GET /income-statement/{ticker}, /cash-flow-statement/{ticker} (period=annual, limit=1)
-          get_ratios: GET /ratios/{ticker} (limit=1)
-          get_analyst_estimates: GET /analyst-estimates/{ticker} (limit=1)
+          get_company_profile: GET /profile?symbol={ticker}
+          get_financial_statements: GET /income-statement?symbol={ticker}, /cash-flow-statement?symbol={ticker} (period=annual, limit=1)
+          get_ratios: GET /ratios?symbol={ticker} (limit=1)
+          get_analyst_estimates: GET /analyst-estimates?symbol={ticker} (period=annual, limit=1)
       - name: FinnhubFinancialProvider
         api_key_env_var: FINNHUB_API_KEY   # same key as the Finnhub news adapter
         free_tier: ~60 requests/min; PARTIAL interface coverage

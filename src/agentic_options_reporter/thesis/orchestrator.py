@@ -14,6 +14,7 @@ analysis/composite_score.py engine the quant path uses.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -52,6 +53,8 @@ from agentic_options_reporter.thesis import (
 )
 from agentic_options_reporter.thesis.llm_client import LlmClient, LlmError, RecordingLlmClient
 from agentic_options_reporter.thesis.parsing import ThesisGenerationError
+
+logger = logging.getLogger(__name__)
 
 # Callback invoked with a per-agent AgentEvent as the pipeline runs, for a
 # live view (thesis.streaming / the SSE endpoint). None = run silently, the
@@ -221,6 +224,12 @@ def run_thesis_pipeline(
         detail: str | None = None,
         with_exchange: bool = False,
     ) -> None:
+        if phase == "failed":
+            logger.warning("agent=%s phase=%s — %s", agent, phase, detail or "no detail")
+        elif phase == "skipped":
+            logger.info("agent=%s phase=%s — %s", agent, phase, detail or "no detail")
+        else:
+            logger.info("agent=%s phase=%s", agent, phase)
         if on_event is None:
             return
         exchange = None
@@ -243,6 +252,10 @@ def run_thesis_pipeline(
     def _reset_exchange() -> None:
         if recorder is not None:
             recorder.last_exchange = None
+
+    logger.info(
+        "Thesis pipeline started: run_id=%s symbol=%s", analysis_result.run_id, analysis_result.symbol
+    )
 
     recommendation = analysis_result.recommendation
     top_candidate = next(
@@ -502,6 +515,12 @@ def run_thesis_pipeline(
         )
         if agent_domain_scores
         else None
+    )
+
+    logger.info(
+        "Thesis pipeline finished: run_id=%s symbol=%s consensus=%s%s",
+        analysis_result.run_id, analysis_result.symbol, thesis.consensus,
+        f" ({len(pipeline_warnings)} warning(s))" if pipeline_warnings else "",
     )
 
     return AgentThesisResult(

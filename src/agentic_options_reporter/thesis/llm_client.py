@@ -23,8 +23,12 @@ logged or persisted (see main.py's ThesisGenerationRequest handling).
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from abc import ABC, abstractmethod
+
+logger = logging.getLogger(__name__)
 
 
 class LlmError(RuntimeError):
@@ -137,6 +141,8 @@ class AnthropicLlmClient(LlmClient):
         import anthropic
 
         client = anthropic.Anthropic(api_key=self._api_key)
+        logger.info("%s → completion request (model=%s)", self.PROVIDER_LABEL, self._model)
+        started = time.monotonic()
         try:
             response = client.messages.create(
                 model=self._model,
@@ -145,8 +151,11 @@ class AnthropicLlmClient(LlmClient):
                 messages=[{"role": "user", "content": user_prompt}],
             )
         except anthropic.APIError as exc:
+            logger.warning("%s ✗ completion request failed: %s", self.PROVIDER_LABEL, exc)
             raise _classify_openai_style_error(exc, anthropic, self.PROVIDER_LABEL) from exc
 
+        elapsed_ms = (time.monotonic() - started) * 1000
+        logger.info("%s ← completion received (%.0fms)", self.PROVIDER_LABEL, elapsed_ms)
         text = "".join(
             block.text for block in response.content if getattr(block, "type", None) == "text"
         )
@@ -185,6 +194,8 @@ class _OpenAiCompatibleLlmClient(LlmClient):
         import openai
 
         client = openai.OpenAI(api_key=self._api_key, base_url=self.BASE_URL)
+        logger.info("%s → completion request (model=%s)", self.PROVIDER_LABEL, self._model)
+        started = time.monotonic()
         try:
             response = client.chat.completions.create(
                 model=self._model,
@@ -195,8 +206,11 @@ class _OpenAiCompatibleLlmClient(LlmClient):
                 ],
             )
         except openai.APIError as exc:
+            logger.warning("%s ✗ completion request failed: %s", self.PROVIDER_LABEL, exc)
             raise _classify_openai_style_error(exc, openai, self.PROVIDER_LABEL) from exc
 
+        elapsed_ms = (time.monotonic() - started) * 1000
+        logger.info("%s ← completion received (%.0fms)", self.PROVIDER_LABEL, elapsed_ms)
         text = (response.choices[0].message.content or "").strip() if response.choices else ""
         if not text:
             raise LlmError(f"{self.PROVIDER_LABEL} API returned no text content")
@@ -285,6 +299,8 @@ class GeminiLlmClient(LlmClient):
         from google.genai import types as genai_types
 
         client = genai.Client(api_key=self._api_key)
+        logger.info("%s → completion request (model=%s)", self.PROVIDER_LABEL, self._model)
+        started = time.monotonic()
         try:
             response = client.models.generate_content(
                 model=self._model,
@@ -295,10 +311,14 @@ class GeminiLlmClient(LlmClient):
                 ),
             )
         except genai_errors.APIError as exc:
+            logger.warning("%s ✗ completion request failed: %s", self.PROVIDER_LABEL, exc)
             raise self._classify_error(exc) from exc
         except Exception as exc:  # network/transport failures, not wrapped in APIError
+            logger.warning("%s ✗ completion request failed: %s", self.PROVIDER_LABEL, exc)
             raise self._classify_error(exc) from exc
 
+        elapsed_ms = (time.monotonic() - started) * 1000
+        logger.info("%s ← completion received (%.0fms)", self.PROVIDER_LABEL, elapsed_ms)
         text = (response.text or "").strip() if response is not None else ""
         if not text:
             raise LlmError("Gemini API returned no text content")
@@ -348,10 +368,14 @@ class LlmRouter(LlmClient):
         failures: list[str] = []
         for name, client in self._clients:
             try:
-                return client.complete(system_prompt, user_prompt)
+                result = client.complete(system_prompt, user_prompt)
             except _RETRYABLE_ERRORS as exc:
+                logger.warning("LLM router: %s failed, trying next provider: %s", name, exc)
                 failures.append(f"{name}: {exc}")
                 continue
+            logger.info("LLM router: %s answered", name)
+            return result
+        logger.error("LLM router: every provider failed — %s", "; ".join(failures))
         raise LlmError(
             "All configured LLM providers failed: " + "; ".join(failures)
         )

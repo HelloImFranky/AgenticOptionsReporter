@@ -78,6 +78,73 @@ def test_get_run_not_found(client):
     assert response.status_code == 404
 
 
+def test_get_logs_serves_buffered_entries(client):
+    import logging
+
+    from agentic_options_reporter.logging_config import clear_log_entries
+
+    clear_log_entries()
+    test_client, _ = client
+    logging.getLogger("agentic_options_reporter.test_api").info("hello from a test")
+
+    response = test_client.get("/logs")
+
+    assert response.status_code == 200
+    entries = response.json()
+    assert any(e["message"] == "hello from a test" and e["level"] == "INFO" for e in entries)
+
+
+def test_get_logs_since_seq_filters_out_seen_entries(client):
+    import logging
+
+    from agentic_options_reporter.logging_config import clear_log_entries
+
+    clear_log_entries()
+    test_client, _ = client
+    test_logger = logging.getLogger("agentic_options_reporter.test_api")
+
+    test_logger.info("first")
+    last_seq = test_client.get("/logs").json()[-1]["seq"]
+    test_logger.info("second")
+
+    newer = test_client.get(f"/logs?since_seq={last_seq}").json()
+
+    assert [e["message"] for e in newer] == ["second"]
+
+
+def test_analyze_endpoint_logs_pipeline_activity(client):
+    """The /analyze handler and workflow.run_analysis both log through the
+    standard logging module (see logging_config.py); a successful run
+    should leave a trace an operator can find in the Log tab."""
+    from agentic_options_reporter.logging_config import clear_log_entries
+    from agentic_options_reporter.models.schemas import AnalysisResult
+
+    test_client, _ = client
+    clear_log_entries()
+
+    with patch.object(main_module, "run_analysis") as mock_run:
+        mock_run.return_value = AnalysisResult(
+            symbol="AAPL",
+            run_id=1,
+            generated_at=datetime(2026, 1, 1),
+            indicators=_indicator_snapshot(),
+            trend=TrendAssessment(direction="bullish", strength="moderate", adx=25),
+            volume=VolumeAssessment(relative_volume=1.2, flags=["normal_volume"]),
+            support_resistance=[],
+            candidates=[],
+            recommendation=Recommendation(action="AVOID", contract_symbol=None, confidence=0.0, rationale=""),
+            trade_quality=None,
+            weighting_profile="swing",
+            fundamentals=None,
+            data_warnings=[],
+        )
+        response = test_client.get("/analyze/AAPL")
+
+    assert response.status_code == 200
+    messages = [e["message"] for e in test_client.get("/logs").json()]
+    assert any("/analyze/AAPL" in m for m in messages)
+
+
 def _scored_candidate() -> ScoredCandidate:
     return ScoredCandidate(
         contract_symbol="TESTC00100000",

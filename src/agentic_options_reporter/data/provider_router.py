@@ -17,12 +17,15 @@ See specs/providers.yaml: provider_router for the full design.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from agentic_options_reporter.data.provider_errors import RetryableProviderError
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 M = TypeVar("M", bound=BaseModel)
@@ -70,10 +73,14 @@ def call_with_fallback(
     failures: list[str] = []
     for name, client in clients:
         try:
-            return getattr(client, method_name)(*args, **kwargs)
+            result = getattr(client, method_name)(*args, **kwargs)
         except RetryableProviderError as exc:
+            logger.warning("%s.%s() failed, trying next provider: %s", name, method_name, exc)
             failures.append(f"{name}: {exc}")
             continue
+        logger.info("%s.%s() succeeded (failover)", name, method_name)
+        return result
+    logger.error("%s(): every provider failed — %s", method_name, "; ".join(failures))
     raise all_failed_error_cls(
         f"All configured providers failed for {method_name}(): " + "; ".join(failures)
     )
@@ -91,10 +98,14 @@ async def acall_with_fallback(
     failures: list[str] = []
     for name, client in clients:
         try:
-            return await getattr(client, method_name)(*args, **kwargs)
+            result = await getattr(client, method_name)(*args, **kwargs)
         except RetryableProviderError as exc:
+            logger.warning("%s.%s() failed, trying next provider: %s", name, method_name, exc)
             failures.append(f"{name}: {exc}")
             continue
+        logger.info("%s.%s() succeeded (failover)", name, method_name)
+        return result
+    logger.error("%s(): every provider failed — %s", method_name, "; ".join(failures))
     raise all_failed_error_cls(
         f"All configured providers failed for {method_name}(): " + "; ".join(failures)
     )
@@ -170,6 +181,8 @@ async def acall_and_merge(
     of stopping at the first one. A client that fails (for any reason)
     simply doesn't contribute — best-effort, "get all the data we can."
     Raises `all_failed_error_cls` only if every client failed."""
+    names = [name for name, _ in clients]
+    logger.info("Fan-out %s() across %s", method_name, names)
     results = await asyncio.gather(
         *(getattr(client, method_name)(*args, **kwargs) for _, client in clients),
         return_exceptions=True,
@@ -178,13 +191,21 @@ async def acall_and_merge(
     failures: list[str] = []
     for (name, _), result in zip(clients, results):
         if isinstance(result, Exception):
+            logger.warning("%s.%s() failed: %s", name, method_name, result)
             failures.append(f"{name}: {result}")
         else:
+            logger.info("%s.%s() succeeded", name, method_name)
             successes.append(result)
     if not successes:
+        logger.error("%s(): every provider failed — %s", method_name, "; ".join(failures))
         raise all_failed_error_cls(
             f"All configured providers failed for {method_name}(): " + "; ".join(failures)
         )
+    logger.info(
+        "%s(): merged %d/%d provider result(s)%s",
+        method_name, len(successes), len(clients),
+        f" ({len(failures)} failed)" if failures else "",
+    )
     return combine(successes)
 
 
