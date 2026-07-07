@@ -23,6 +23,7 @@ from reportlab.graphics.shapes import Drawing, Line, Rect, String
 from reportlab.platypus import (
     HRFlowable,
     KeepTogether,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -95,8 +96,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=13, textColor=_MUTED,
         ),
         "section": ParagraphStyle(
-            "AorSection", parent=base, fontName="Helvetica-Bold", fontSize=13,
-            leading=16, textColor=_INK, spaceBefore=4, spaceAfter=4,
+            "AorSection", parent=base, fontName="Helvetica-Bold", fontSize=17,
+            leading=21, textColor=_INK, spaceBefore=0, spaceAfter=6,
         ),
         "agent": ParagraphStyle(
             "AorAgent", parent=base, fontName="Helvetica-Bold", fontSize=11,
@@ -195,8 +196,12 @@ def _badge(text: str, tone: str, styles: dict[str, ParagraphStyle]) -> Table:
 
 
 def _section_header(text: str, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    """Starts a fresh page for this section and puts the section name at
+    the very top of it — each report section ('domain') gets its own
+    page, header first, then its data — instead of flowing sections
+    together with just a divider line between them."""
     return [
-        Spacer(1, 10),
+        PageBreak(),
         Paragraph(escape(text), styles["section"]),
         HRFlowable(width="100%", thickness=1, color=_HAIRLINE, spaceAfter=6, spaceBefore=0),
     ]
