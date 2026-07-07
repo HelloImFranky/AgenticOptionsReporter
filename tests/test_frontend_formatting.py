@@ -21,15 +21,22 @@ from agentic_options_reporter.frontend.formatting import (
     insider_activity_header,
     insider_activity_series,
     macro_regime_tone,
+    domain_badges,
+    domain_id_for_label,
     domain_score_items,
     missing_domain_labels,
     recommendation_facts,
     recommendation_tone,
     recommended_candidate,
+    relative_strength_leadership,
+    relative_strength_performance_label,
+    relative_strength_performance_tone,
     risk_level_tone,
     runs_to_rows,
     score_severity_label,
     score_severity_tone,
+    statistical_edge_confidence_label,
+    statistical_edge_confidence_tone,
     technical_snapshot_facts,
     trade_quality_agreement_summary,
     trade_quality_summary,
@@ -452,3 +459,95 @@ def test_insider_activity_series_keeps_most_recent_within_limit():
     series = insider_activity_series({"transactions": txns}, limit=3)
     # Most recent 3 dates, still oldest-first.
     assert [p["date"] for p in series] == ["2026-01-05", "2026-01-06", "2026-01-07"]
+
+
+def test_relative_strength_performance_label_tiers():
+    assert relative_strength_performance_label(95) == "Exceptional"
+    assert relative_strength_performance_label(75) == "Very Strong"
+    assert relative_strength_performance_label(65) == "Strong"
+    assert relative_strength_performance_label(50) == "Neutral"
+    assert relative_strength_performance_label(25) == "Weak"
+    assert relative_strength_performance_label(5) == "Very Weak"
+
+
+def test_relative_strength_performance_tone_matches_trade_quality_bands():
+    # Tone nests inside trade_quality_tone's 60/40 bands so the same score
+    # always reads the same color everywhere in the app.
+    assert relative_strength_performance_tone(95) == TONE_SUCCESS
+    assert relative_strength_performance_tone(65) == TONE_SUCCESS
+    assert relative_strength_performance_tone(50) == TONE_WARNING
+    assert relative_strength_performance_tone(25) == TONE_DANGER
+
+
+def test_relative_strength_leadership_none_without_factors():
+    assert relative_strength_leadership([]) is None
+    assert relative_strength_leadership(None) is None
+
+
+def test_relative_strength_leadership_picks_larger_deviation():
+    # vs_market strongly positive, vs_sector only mildly so -> Market Leader.
+    factors = [
+        {"name": "vs_market", "value": 0.9},
+        {"name": "vs_sector", "value": 0.55},
+    ]
+    assert relative_strength_leadership(factors) == ("Market Leader", TONE_SUCCESS)
+
+
+def test_relative_strength_leadership_laggard_and_sector_only():
+    assert relative_strength_leadership([{"name": "vs_market", "value": 0.1}]) == (
+        "Market Laggard", TONE_DANGER,
+    )
+    assert relative_strength_leadership([{"name": "vs_sector", "value": 0.85}]) == (
+        "Sector Leader", TONE_SUCCESS,
+    )
+    assert relative_strength_leadership([{"name": "vs_sector", "value": 0.15}]) == (
+        "Sector Laggard", TONE_DANGER,
+    )
+
+
+def test_relative_strength_leadership_neutral_is_peer_average():
+    assert relative_strength_leadership([{"name": "vs_market", "value": 0.52}]) == (
+        "Peer Average", TONE_NEUTRAL,
+    )
+
+
+def test_statistical_edge_confidence_label_tiers():
+    assert statistical_edge_confidence_label(70) == "Very High Confidence"
+    assert statistical_edge_confidence_label(55) == "High Confidence"
+    assert statistical_edge_confidence_label(40) == "Moderate Confidence"
+    assert statistical_edge_confidence_label(25) == "Low Confidence"
+    assert statistical_edge_confidence_label(5) == "Insufficient Data"
+
+
+def test_statistical_edge_confidence_tone_tiers():
+    assert statistical_edge_confidence_tone(70) == TONE_SUCCESS
+    assert statistical_edge_confidence_tone(40) == TONE_WARNING
+    assert statistical_edge_confidence_tone(5) == TONE_DANGER
+
+
+def test_domain_badges_relative_strength_includes_performance_and_leadership():
+    factors = [{"name": "vs_market", "value": 0.9}, {"name": "vs_sector", "value": 0.6}]
+    badges = domain_badges("relative_strength", 90.0, 80.0, factors)
+    assert badges[0] == ("Exceptional", TONE_SUCCESS)
+    assert badges[1] == ("Market Leader", TONE_SUCCESS)
+
+
+def test_domain_badges_relative_strength_without_factors_is_performance_only():
+    badges = domain_badges("relative_strength", 90.0, 80.0, None)
+    assert badges == [("Exceptional", TONE_SUCCESS)]
+
+
+def test_domain_badges_statistical_edge_is_confidence_only():
+    badges = domain_badges("statistical_edge", 55.0, 10.0, None)
+    assert badges == [("Insufficient Data", TONE_DANGER)]
+
+
+def test_domain_badges_other_domains_fall_back_to_generic_severity():
+    badges = domain_badges("technical", 65.0, 90.0, None)
+    assert badges == [(score_severity_label(65.0), score_severity_tone(65.0))]
+
+
+def test_domain_id_for_label_round_trips_domain_label():
+    assert domain_id_for_label("Relative Strength") == "relative_strength"
+    assert domain_id_for_label("Statistical Edge") == "statistical_edge"
+    assert domain_id_for_label("not a real label") is None

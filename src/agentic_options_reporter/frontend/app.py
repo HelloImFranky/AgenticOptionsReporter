@@ -24,6 +24,8 @@ from agentic_options_reporter.frontend.formatting import (
     cash_flow_tone,
     company_health_tone,
     consensus_tone,
+    domain_badges,
+    domain_id_for_label,
     domain_score_items,
     format_indicator_summary,
     format_next_earnings,
@@ -279,25 +281,31 @@ def _card(*controls: ft.Control, padding: int = 20, spacing: int = 12) -> ft.Car
     )
 
 
-def _domain_score_row(label: str, score: float, confidence: float, evidence: list[str]) -> ft.Column:
+def _domain_score_row(
+    label: str, score: float, confidence: float, evidence: list[str], badges: list[tuple[str, str]]
+) -> ft.Column:
     ratio = max(0.0, min(1.0, score / 100))
     tone = score_severity_tone(score)
     color, _ = _tone_colors(tone)
-    severity_label = score_severity_label(score)
+
+    badge_pills: list[ft.Control] = []
+    for badge_label, badge_tone in badges:
+        badge_color, _ = _tone_colors(badge_tone)
+        badge_pills.append(
+            ft.Container(
+                content=ft.Text(badge_label, size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                bgcolor=badge_color,
+                border_radius=12,
+                padding=ft.padding.symmetric(vertical=2, horizontal=8),
+            )
+        )
 
     return ft.Column(
         [
             ft.Row(
-                [
-                    ft.Text(label, size=11, weight=ft.FontWeight.W_600, expand=True),
-                    ft.Container(
-                        content=ft.Text(severity_label, size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
-                        bgcolor=color,
-                        border_radius=12,
-                        padding=ft.padding.symmetric(vertical=2, horizontal=8),
-                    ),
-                ],
-                spacing=8,
+                [ft.Text(label, size=11, weight=ft.FontWeight.W_600, expand=True), *badge_pills],
+                spacing=6,
+                wrap=True,
             ),
             ft.Row(
                 [
@@ -350,10 +358,12 @@ def _trade_quality_panel(trade_quality: dict | None) -> ft.Container:
     tone = trade_quality_tone(composite)
     color, _ = _tone_colors(tone)
 
-    rows: list[ft.Control] = [
-        _domain_score_row(label, score, conf, evidence)
-        for label, score, conf, evidence in domain_score_items(domain_scores)
-    ]
+    rows: list[ft.Control] = []
+    for label, score, conf, evidence in domain_score_items(domain_scores):
+        domain_id = domain_id_for_label(label)
+        factors = (domain_scores.get(domain_id) or {}).get("factors") if domain_id else None
+        badges = domain_badges(domain_id, score, conf, factors)
+        rows.append(_domain_score_row(label, score, conf, evidence, badges))
     rows.extend(_missing_domain_row(label) for label in missing_domain_labels(domain_scores))
 
     summary = trade_quality_summary(trade_quality)
