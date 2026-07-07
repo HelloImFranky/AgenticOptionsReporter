@@ -23,6 +23,7 @@ from reportlab.graphics.shapes import Drawing, Line, Rect, String
 from reportlab.platypus import (
     HRFlowable,
     KeepTogether,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -95,8 +96,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=13, textColor=_MUTED,
         ),
         "section": ParagraphStyle(
-            "AorSection", parent=base, fontName="Helvetica-Bold", fontSize=13,
-            leading=16, textColor=_INK, spaceBefore=4, spaceAfter=4,
+            "AorSection", parent=base, fontName="Helvetica-Bold", fontSize=17,
+            leading=21, textColor=_INK, spaceBefore=0, spaceAfter=6,
         ),
         "agent": ParagraphStyle(
             "AorAgent", parent=base, fontName="Helvetica-Bold", fontSize=11,
@@ -194,9 +195,19 @@ def _badge(text: str, tone: str, styles: dict[str, ParagraphStyle]) -> Table:
     return table
 
 
-def _section_header(text: str, styles: dict[str, ParagraphStyle]) -> list[Any]:
+def _section_header(text: str, styles: dict[str, ParagraphStyle], *, new_page: bool = True) -> list[Any]:
+    """Puts the section name at the top of its page — each report section
+    ('domain') gets its own page, header first, then its data — instead of
+    flowing sections together with just a divider line between them.
+
+    `new_page=False` is for the one exception: the FIRST section in the
+    report shares the cover page with the title/subtitle rather than
+    starting yet another page of its own, so a short report doesn't open
+    with a near-empty title page. Every section after that gets a real
+    PageBreak."""
+    lead: list[Any] = [PageBreak()] if new_page else [Spacer(1, 14)]
     return [
-        Spacer(1, 10),
+        *lead,
         Paragraph(escape(text), styles["section"]),
         HRFlowable(width="100%", thickness=1, color=_HAIRLINE, spaceAfter=6, spaceBefore=0),
     ]
@@ -846,9 +857,19 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
     story.append(Paragraph(subtitle, styles["subtitle"]))
     story.append(HRFlowable(width="100%", thickness=1.2, color=_HAIRLINE, spaceBefore=8, spaceAfter=2))
 
+    # The title isn't a section itself, so it follows different rules: the
+    # FIRST section shares its page with the title/subtitle above (no
+    # PageBreak), and every section after that opens its own fresh page.
+    on_first_section = True
+
+    def add_section(text: str) -> None:
+        nonlocal on_first_section
+        story.extend(_section_header(text, styles, new_page=not on_first_section))
+        on_first_section = False
+
     recommendation = report.get("recommendation")
     if recommendation:
-        story.extend(_section_header("Recommendation", styles))
+        add_section("Recommendation")
         story.extend(
             _recommendation_block(
                 recommendation, report.get("candidates"), report.get("trade_quality"), styles
@@ -859,16 +880,16 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
     volume = report.get("volume")
     indicators = report.get("indicators")
     if trend or volume or indicators:
-        story.extend(_section_header("Technical snapshot", styles))
+        add_section("Technical snapshot")
         story.extend(_facts_table(technical_snapshot_facts(trend, volume, indicators), styles))
 
     if report.get("candidates") is not None:
-        story.extend(_section_header("Scored candidates", styles))
+        add_section("Scored candidates")
         story.extend(_candidates_table(report.get("candidates") or [], styles))
 
     fundamentals = report.get("fundamentals")
     if fundamentals:
-        story.extend(_section_header("Fundamentals", styles))
+        add_section("Fundamentals")
         story.extend(_fundamentals_blocks(fundamentals, report.get("data_warnings"), styles))
 
     thesis = report.get("thesis")
@@ -883,10 +904,10 @@ def build_report_pdf(report: dict[str, Any]) -> bytes:
         agent_trade_quality = thesis.get("agent_trade_quality")
         comparison = trade_quality_comparison_flowables(quant_trade_quality, agent_trade_quality, styles)
         if comparison:
-            story.extend(_section_header("Trade Quality Score — Quant vs. Agents", styles))
+            add_section("Trade Quality Score — Quant vs. Agents")
             story.extend(comparison)
 
-        story.extend(_section_header("Agent pipeline", styles))
+        add_section("Agent pipeline")
         warnings = thesis.get("pipeline_warnings") or []
         if warnings:
             story.append(_badge("PIPELINE WARNINGS", "warning", styles))

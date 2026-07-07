@@ -5,13 +5,16 @@ and degrades gracefully when the thesis or individual agents are missing —
 without needing a Flet runtime or a real PDF viewer.
 """
 
+from io import BytesIO
+
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import Paragraph
+from reportlab.platypus import PageBreak, Paragraph
 
 from agentic_options_reporter.frontend.report_pdf import (
     _fundamentals_blocks,
     _insider_timeseries_chart,
     _recommendation_block,
+    _section_header,
     _styles,
     build_report_pdf,
     trade_quality_comparison_flowables,
@@ -175,6 +178,21 @@ def _is_pdf(data: bytes) -> bool:
     return data[:5] == b"%PDF-"
 
 
+def _page_texts(data: bytes) -> list[str]:
+    """Full extracted text of each page, in order."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(BytesIO(data))
+    return [(page.extract_text() or "").strip() for page in reader.pages]
+
+
+def _page_first_lines(data: bytes) -> list[str]:
+    """The first non-blank line of text on each page — used to assert a
+    section's header actually lands at the top of its own page, not just
+    that the text is present somewhere in the document."""
+    return [text.splitlines()[0] if text else "" for text in _page_texts(data)]
+
+
 _FUNDAMENTALS = {
     "ticker": "AAPL",
     "metrics": {
@@ -197,6 +215,84 @@ def test_build_full_report_returns_pdf_bytes():
     data = build_report_pdf(_FULL_REPORT)
     assert _is_pdf(data)
     assert len(data) > 1500  # a real multi-section document, not an empty shell
+
+
+def test_section_header_starts_a_new_page_by_default():
+    flowables = _section_header("Recommendation", _styles())
+    assert isinstance(flowables[0], PageBreak)
+
+
+def test_section_header_shares_the_page_when_new_page_is_false():
+    """The title isn't a section, so the FIRST section shares the cover
+    page with it rather than opening yet another page — new_page=False is
+    how build_report_pdf expresses that."""
+    flowables = _section_header("Recommendation", _styles(), new_page=False)
+    assert not isinstance(flowables[0], PageBreak)
+
+
+def test_title_and_first_section_share_the_cover_page():
+    """The title isn't a section itself: it and the FIRST section
+    (Recommendation, here) share page 1, rather than the title getting a
+    near-empty page of its own."""
+    payload = {**_FULL_REPORT, "fundamentals": _FUNDAMENTALS, "data_warnings": []}
+    data = build_report_pdf(payload)
+
+    pages = _page_texts(data)
+
+    assert pages[0].splitlines()[0] == "Options Analysis Report"
+    assert "Recommendation" in pages[0]
+
+
+def test_every_section_after_the_first_opens_its_own_page():
+    """Every report section ('domain') AFTER the first gets its own page,
+    with the section name as the first line of text on that page — not
+    sections flowing together, separated by only a divider line."""
+    payload = {**_FULL_REPORT, "fundamentals": _FUNDAMENTALS, "data_warnings": []}
+    data = build_report_pdf(payload)
+
+    first_lines = _page_first_lines(data)
+
+    assert first_lines[0] == "Options Analysis Report"  # cover page + Recommendation
+    expected_headers = [
+        "Technical snapshot",
+        "Scored candidates",
+        "Fundamentals",
+        "Trade Quality Score — Quant vs. Agents",
+        "Agent pipeline",
+    ]
+    # Each expected header opens its own page, in order (a section that
+    # overflows onto extra pages doesn't repeat its header, so this checks
+    # "appears as a page-opening line", not "is the Nth page").
+    remaining = first_lines[1:]
+    for header in expected_headers:
+        assert header in remaining, f"{header!r} did not open its own page: {first_lines}"
+    # And Recommendation, specifically, must NOT open its own page — it's
+    # the first section, so it shares page 1 with the title instead.
+    assert "Recommendation" not in remaining
+
+
+def test_whichever_section_is_actually_first_shares_the_cover_page():
+    """When Recommendation is absent, Technical Snapshot (the next section
+    in order) becomes the first one rendered — and it, not Recommendation,
+    should be the one sharing the cover page."""
+    payload = {k: v for k, v in _FULL_REPORT.items() if k not in ("recommendation", "thesis")}
+    data = build_report_pdf(payload)
+
+    pages = _page_texts(data)
+    first_lines = _page_first_lines(data)
+
+    assert pages[0].splitlines()[0] == "Options Analysis Report"
+    assert "Technical snapshot" in pages[0]
+    assert "Technical snapshot" not in first_lines[1:]
+
+
+def test_minimal_report_has_no_stray_blank_pages():
+    """A payload with no recommendation/candidates/fundamentals/thesis
+    should be just the cover page — no section headers fired, no
+    page-break-only sections left dangling."""
+    data = build_report_pdf({"symbol": "MSFT"})
+    first_lines = _page_first_lines(data)
+    assert first_lines == ["Options Analysis Report"]
 
 
 def test_fundamentals_blocks_render_metrics_earnings_and_insider():
