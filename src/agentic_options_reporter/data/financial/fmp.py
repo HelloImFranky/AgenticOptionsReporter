@@ -19,7 +19,10 @@ from agentic_options_reporter.models.schemas import (
 
 
 class FmpFinancialProvider(_HttpFinancialProvider):
-    BASE_URL = "https://financialmodelingprep.com/api/v3"
+    # FMP retired the /api/v3/{path}/{symbol} shape in favor of the stable
+    # API, which takes the symbol as a `?symbol=` query param on every
+    # endpoint instead of a path segment.
+    BASE_URL = "https://financialmodelingprep.com/stable"
     PROVIDER_LABEL = "Financial Modeling Prep"
     API_KEY_ENV_VAR = "FMP_API_KEY"
 
@@ -37,7 +40,7 @@ class FmpFinancialProvider(_HttpFinancialProvider):
         return {}
 
     async def get_company_profile(self, ticker: str) -> CompanyProfile:
-        item = self._first_or_empty(await self._get(f"/profile/{ticker.upper()}"))
+        item = self._first_or_empty(await self._get("/profile", {"symbol": ticker.upper()}))
         return CompanyProfile(
             ticker=ticker.upper(),
             name=item.get("companyName", ""),
@@ -49,10 +52,14 @@ class FmpFinancialProvider(_HttpFinancialProvider):
 
     async def get_financial_statements(self, ticker: str) -> FinancialStatementSummary:
         income = self._first_or_empty(
-            await self._get(f"/income-statement/{ticker.upper()}", {"period": "annual", "limit": 1})
+            await self._get(
+                "/income-statement", {"symbol": ticker.upper(), "period": "annual", "limit": 1}
+            )
         )
         cash_flow = self._first_or_empty(
-            await self._get(f"/cash-flow-statement/{ticker.upper()}", {"period": "annual", "limit": 1})
+            await self._get(
+                "/cash-flow-statement", {"symbol": ticker.upper(), "period": "annual", "limit": 1}
+            )
         )
         return FinancialStatementSummary(
             ticker=ticker.upper(),
@@ -64,7 +71,9 @@ class FmpFinancialProvider(_HttpFinancialProvider):
         )
 
     async def get_ratios(self, ticker: str) -> FinancialRatios:
-        item = self._first_or_empty(await self._get(f"/ratios/{ticker.upper()}", {"limit": 1}))
+        item = self._first_or_empty(
+            await self._get("/ratios", {"symbol": ticker.upper(), "limit": 1})
+        )
         return FinancialRatios(
             ticker=ticker.upper(),
             pe_ratio=item.get("priceEarningsRatio"),
@@ -78,7 +87,9 @@ class FmpFinancialProvider(_HttpFinancialProvider):
 
     async def get_analyst_estimates(self, ticker: str) -> AnalystEstimates:
         item = self._first_or_empty(
-            await self._get(f"/analyst-estimates/{ticker.upper()}", {"limit": 1})
+            await self._get(
+                "/analyst-estimates", {"symbol": ticker.upper(), "period": "annual", "limit": 1}
+            )
         )
         return AnalystEstimates(
             ticker=ticker.upper(),

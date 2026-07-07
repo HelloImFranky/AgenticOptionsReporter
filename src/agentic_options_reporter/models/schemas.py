@@ -740,3 +740,17 @@ class ThesisGenerationRequest(BaseModel):
     provider: str = "auto"
     api_key: str | None = None
     regenerate: bool = False
+
+
+class LogEntry(BaseModel):
+    """One record from the in-process log buffer (logging_config.py),
+    surfaced by GET /logs for the frontend's Log tab. `seq` is a
+    monotonically increasing id (not the record's position in the buffer,
+    which evicts) so a client can poll with `since_seq` and only receive
+    entries it hasn't seen yet."""
+
+    seq: int
+    timestamp: datetime
+    level: str        # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    logger: str        # dotted logger name, e.g. "agentic_options_reporter.data.financial.fmp"
+    message: str

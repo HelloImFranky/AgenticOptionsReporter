@@ -55,6 +55,9 @@ class ApiClient:
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/health")
 
+    def get_logs(self, since_seq: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+        return self._request("GET", "/logs", params={"since_seq": since_seq, "limit": limit})
+
     def analyze(
         self,
         symbol: str,

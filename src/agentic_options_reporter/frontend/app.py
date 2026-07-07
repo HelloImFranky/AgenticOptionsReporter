@@ -13,6 +13,7 @@ import argparse
 import os
 import re
 import tempfile
+import time
 
 import flet as ft
 
@@ -1860,6 +1861,224 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         expand=True,
     )
 
+    # ---- logs tab: live tail of the backend's in-process log buffer -----
+    _LOG_LEVEL_COLORS = {
+        "DEBUG": ft.Colors.GREY_600,
+        "INFO": ft.Colors.BLUE_700,
+        "WARNING": ft.Colors.AMBER_800,
+        "ERROR": ft.Colors.RED_700,
+        "CRITICAL": ft.Colors.RED_900,
+    }
+    _LOG_LEVELS = ["ALL", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+    def _short_logger_name(name: str) -> str:
+        """'agentic_options_reporter.data.financial.fmp' -> 'financial.fmp'
+        — trims the package prefix and keeps just enough of the dotted path
+        to tell providers/modules apart at a glance."""
+        trimmed = name.removeprefix("agentic_options_reporter.")
+        parts = trimmed.split(".")
+        return ".".join(parts[-2:]) if len(parts) > 2 else trimmed
+
+    def _log_time(timestamp: str) -> str:
+        # ISO datetime, e.g. "2026-07-07T14:03:21.512000" -> "14:03:21".
+        return timestamp[11:19] if len(timestamp) >= 19 else timestamp
+
+    def _log_row(entry: dict) -> ft.Container:
+        level = entry.get("level", "INFO")
+        color = _LOG_LEVEL_COLORS.get(level, ft.Colors.GREY_700)
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        content=ft.Text(level, size=9, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                        bgcolor=color,
+                        border_radius=4,
+                        padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                        width=68,
+                        alignment=ft.alignment.center,
+                    ),
+                    ft.Text(
+                        _log_time(entry.get("timestamp", "")),
+                        size=11,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                        width=64,
+                    ),
+                    ft.Container(
+                        content=ft.Text(_short_logger_name(entry.get("logger", "")), size=10, color=ft.Colors.ON_SURFACE_VARIANT),
+                        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                        border_radius=4,
+                        padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                    ),
+                    ft.Text(entry.get("message", ""), size=12, selectable=True, expand=True),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            padding=ft.padding.symmetric(horizontal=10, vertical=5),
+            border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+        )
+
+    log_entries: list[dict] = []
+    logs_last_seq = {"value": 0}
+    logs_auto_refresh = {"value": True}
+    logs_level_filter = {"value": "ALL"}
+    logs_polling = {"value": False}
+
+    logs_listview = ft.ListView(spacing=0, auto_scroll=True, expand=True, visible=False)
+    logs_empty_state = ft.Container(
+        padding=24,
+        alignment=ft.alignment.center,
+        content=ft.Column(
+            [
+                ft.Icon(ft.Icons.TERMINAL, size=28, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Text("No log entries yet — run an analysis to see activity here", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=6,
+        ),
+    )
+    logs_error_banner = ft.Container(
+        visible=False,
+        bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.RED),
+        border_radius=10,
+        padding=12,
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED_700, size=18),
+                ft.Text("", color=ft.Colors.RED_700, size=13, expand=True),
+            ],
+            spacing=8,
+        ),
+    )
+    logs_status_text = ft.Text("", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+
+    def _render_logs() -> None:
+        wanted = logs_level_filter["value"]
+        shown = log_entries if wanted == "ALL" else [e for e in log_entries if e.get("level") == wanted]
+        # Cap what's actually rendered — the buffer can hold thousands of
+        # entries, but only the most recent ones are useful on screen.
+        logs_listview.controls = [_log_row(entry) for entry in shown[-500:]]
+        logs_listview.visible = bool(shown)
+        logs_empty_state.visible = not shown
+        logs_status_text.value = (
+            f"{len(log_entries)} entries buffered · showing {min(len(shown), 500)}"
+            if log_entries else ""
+        )
+
+    def fetch_logs() -> None:
+        try:
+            new_entries = client.get_logs(since_seq=logs_last_seq["value"], limit=1000)
+        except ApiError as exc:
+            logs_error_banner.content.controls[1].value = str(exc)
+            logs_error_banner.visible = True
+            return
+        logs_error_banner.visible = False
+        if not new_entries:
+            return
+        log_entries.extend(new_entries)
+        logs_last_seq["value"] = max(e["seq"] for e in new_entries)
+        # Keep the client-side buffer bounded to match the server's ring buffer.
+        overflow = len(log_entries) - 2000
+        if overflow > 0:
+            del log_entries[:overflow]
+        _render_logs()
+
+    def refresh_logs_click(_: ft.ControlEvent) -> None:
+        fetch_logs()
+        page.update()
+
+    def clear_logs_click(_: ft.ControlEvent) -> None:
+        log_entries.clear()
+        logs_listview.controls = []
+        logs_listview.visible = False
+        logs_empty_state.visible = True
+        logs_status_text.value = "Cleared locally — new activity will still stream in."
+        page.update()
+
+    def _on_level_filter_change(e: ft.ControlEvent) -> None:
+        logs_level_filter["value"] = e.control.value or "ALL"
+        _render_logs()
+        page.update()
+
+    def _logs_poll_loop() -> None:
+        # Only one poller at a time: the guard lets the auto-refresh switch
+        # be flipped on/off repeatedly without stacking background threads.
+        if logs_polling["value"]:
+            return
+        logs_polling["value"] = True
+        try:
+            while logs_auto_refresh["value"]:
+                fetch_logs()
+                page.update()
+                time.sleep(2)
+        finally:
+            logs_polling["value"] = False
+
+    def _on_auto_refresh_change(e: ft.ControlEvent) -> None:
+        logs_auto_refresh["value"] = e.control.value
+        if logs_auto_refresh["value"]:
+            page.run_thread(_logs_poll_loop)
+
+    auto_refresh_switch = ft.Switch(label="Live tail", value=True, on_change=_on_auto_refresh_change)
+    level_filter_dropdown = ft.Dropdown(
+        label="Level",
+        value="ALL",
+        width=140,
+        border_radius=10,
+        text_size=13,
+        options=[ft.dropdown.Option(level) for level in _LOG_LEVELS],
+        on_change=_on_level_filter_change,
+    )
+    logs_refresh_button = ft.OutlinedButton(
+        "Refresh", icon=ft.Icons.REFRESH,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+        on_click=refresh_logs_click,
+    )
+    logs_clear_button = ft.OutlinedButton(
+        "Clear", icon=ft.Icons.CLEAR_ALL,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+        on_click=clear_logs_click,
+    )
+
+    logs_tab = ft.Container(
+        padding=20,
+        content=ft.Column(
+            [
+                _card(
+                    _section_title("Logs", ft.Icons.TERMINAL),
+                    ft.Text(
+                        "Live activity from the backend pipeline — provider requests, "
+                        "failover/merge decisions, analysis stages, and the agent thesis pipeline.",
+                        size=12,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    ft.Row(
+                        [auto_refresh_switch, level_filter_dropdown, logs_refresh_button, logs_clear_button],
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        wrap=True,
+                    ),
+                    logs_error_banner,
+                    logs_status_text,
+                ),
+                ft.Container(
+                    content=ft.Column([logs_empty_state, logs_listview], spacing=0, expand=True),
+                    bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                    border_radius=12,
+                    padding=4,
+                    expand=True,
+                ),
+            ],
+            spacing=16,
+            expand=True,
+        ),
+        expand=True,
+    )
+
+    # Start the live tail immediately so the tab has content without
+    # requiring a manual click, matching auto_refresh_switch's default-on state.
+    page.run_thread(_logs_poll_loop)
+
     # ---- app bar with theme toggle --------------------------------------
     theme_icon_button = ft.IconButton(
         icon=ft.Icons.DARK_MODE_OUTLINED,
@@ -1902,6 +2121,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
                 ft.Tab(text="Analyze", icon=ft.Icons.SEARCH, content=analyze_tab),
                 ft.Tab(text="Agents", icon=ft.Icons.FORUM_OUTLINED, content=agents_tab),
                 ft.Tab(text="History", icon=ft.Icons.HISTORY, content=history_tab),
+                ft.Tab(text="Logs", icon=ft.Icons.TERMINAL, content=logs_tab),
             ],
         )
     )

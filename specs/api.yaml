@@ -50,6 +50,23 @@ endpoints:
       limit: int = 20
     response: list[AnalysisRunSummary]
 
+  - path: /logs
+    method: GET
+    summary: >
+      Recent entries from the in-process log buffer (logging_config.py),
+      populated by every module's stdlib `logging` calls — provider HTTP
+      requests, provider-router failover/fan-out, the analysis pipeline
+      (workflow.py), and the thesis agent pipeline (thesis/orchestrator.py).
+      Backs the frontend's Log tab. `since_seq` lets a client poll for only
+      entries it hasn't already fetched (pass the highest `seq` seen so
+      far); omit it to get the most recent `limit` entries. Never contains
+      API keys — provider adapters redact credential-shaped query params
+      before logging a request (data/async_http.py: redact_params).
+    query_params:
+      since_seq: int = 0
+      limit: int = 500
+    response: list[LogEntry]
+
   - path: /runs/{run_id}/thesis
     method: POST
     summary: >
@@ -208,6 +225,13 @@ models:
     generated_at: datetime
     recommendation_action: str
     recommendation_confidence: float
+
+  LogEntry:
+    seq: int          # monotonically increasing; poll with since_seq=<last seq seen>
+    timestamp: datetime
+    level: str          # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    logger: str          # dotted logger name, e.g. "agentic_options_reporter.data.financial.fmp"
+    message: str
 
   # See specs/agents.yaml for the full agent pipeline contract.
   AgentThesisResult:

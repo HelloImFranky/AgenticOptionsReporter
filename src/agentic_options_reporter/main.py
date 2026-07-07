@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from agentic_options_reporter.config import get_settings
+from agentic_options_reporter.logging_config import configure_logging, get_log_entries
 from agentic_options_reporter.data.financial import (
     FinancialProvider,
     FinancialProviderError,
@@ -44,6 +46,7 @@ from agentic_options_reporter.models.schemas import (
     FundamentalsSnapshot,
     IndicatorSnapshot,
     InvestmentThesis,
+    LogEntry,
     MacroResearchFinding,
     NewsResearchFinding,
     QuantInterpretation,
@@ -70,6 +73,9 @@ from agentic_options_reporter.thesis.orchestrator import run_thesis_pipeline
 from agentic_options_reporter.thesis.parsing import ThesisGenerationError
 from agentic_options_reporter.thesis.streaming import run_thesis_streaming
 from agentic_options_reporter.workflow import run_analysis
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AgenticOptionsReporter", version="0.1.0")
 
@@ -381,6 +387,13 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/logs", response_model=list[LogEntry])
+def get_logs(since_seq: int = 0, limit: int = 500) -> list[LogEntry]:
+    """Entries with seq > since_seq (poll with the last seen seq to avoid
+    re-fetching what the client already has), newest `limit` of those."""
+    return get_log_entries(since_seq=since_seq, limit=limit)
+
+
 @app.get("/analyze/{symbol}", response_model=AnalysisResult)
 def analyze(
     symbol: str,
@@ -388,6 +401,7 @@ def analyze(
     expiration: str | None = None,
     weighting_profile: WeightingProfileId = "swing",
 ) -> AnalysisResult:
+    logger.info("API GET /analyze/%s lookback_days=%d expiration=%s", symbol, lookback_days, expiration)
     try:
         return run_analysis(
             symbol=symbol,
@@ -397,6 +411,7 @@ def analyze(
             weighting_profile=weighting_profile,
         )
     except MarketDataError as exc:
+        logger.error("API GET /analyze/%s failed: %s", symbol, exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
@@ -473,6 +488,9 @@ def _persist_generated_thesis(run_id: int, thesis_result: AgentThesisResult) -> 
 def generate_thesis(
     run_id: int, request: ThesisGenerationRequest = ThesisGenerationRequest()
 ) -> AgentThesisResult:
+    logger.info(
+        "API POST /runs/%d/thesis provider=%s regenerate=%s", run_id, request.provider, request.regenerate
+    )
     with _session_factory() as session:
         analysis_result = _load_run_for_thesis(session, run_id, request)
 
@@ -494,6 +512,7 @@ def generate_thesis(
         MacroProviderError,
         SecProviderError,
     ) as exc:
+        logger.error("API POST /runs/%d/thesis failed: %s", run_id, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     _persist_generated_thesis(run_id, thesis_result)
@@ -515,6 +534,9 @@ def generate_thesis_stream(
     the blocking endpoint) or an `error` frame if a required agent failed.
     The 404/409/422 guards run before streaming starts, so they still
     surface as normal HTTP errors."""
+    logger.info(
+        "API POST /runs/%d/thesis/stream provider=%s regenerate=%s", run_id, request.provider, request.regenerate
+    )
     with _session_factory() as session:
         analysis_result = _load_run_for_thesis(session, run_id, request)
 
@@ -523,6 +545,7 @@ def generate_thesis_stream(
     try:
         llm_client = _build_thesis_llm_client(request)
     except LlmError as exc:
+        logger.error("API POST /runs/%d/thesis/stream failed to build LLM client: %s", run_id, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     market_data_provider = build_market_data_provider()
     financial_provider = _optional_financial_provider()
@@ -550,6 +573,7 @@ def generate_thesis_stream(
                 _persist_generated_thesis(run_id, payload)
                 yield _sse_frame("result", payload.model_dump(mode="json"))
             else:  # "error" — a required agent failed (LlmError/ThesisGenerationError)
+                logger.error("API POST /runs/%d/thesis/stream failed: %s", run_id, payload)
                 yield _sse_frame("error", {"detail": str(payload)})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
