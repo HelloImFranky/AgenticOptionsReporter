@@ -303,9 +303,9 @@ def _domain_score_row(
     return ft.Column(
         [
             ft.Row(
-                [ft.Text(label, size=11, weight=ft.FontWeight.W_600, expand=True), *badge_pills],
+                [ft.Text(label, size=11, weight=ft.FontWeight.W_600), ft.Row(badge_pills, spacing=6, wrap=True)],
                 spacing=6,
-                wrap=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             ft.Row(
                 [
