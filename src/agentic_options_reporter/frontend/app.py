@@ -878,6 +878,10 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
             page.update()
             return
 
+        # Live-tail the Log tab for the duration of this run only — started
+        # here (not on page load) so it isn't polling forever in the
+        # background between runs.
+        _start_logs_live_tail()
         try:
             result = client.analyze(
                 symbol,
@@ -886,6 +890,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
                 weighting_profile=weighting_profile_dropdown.value or "swing",
             )
         except ApiError as exc:
+            _stop_logs_live_tail()
             progress.visible = False
             analyze_button.disabled = False
             set_error(str(exc))
@@ -902,6 +907,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         except Exception as exc:  # noqa: BLE001 — always resolve the run, never hang
             set_analysis_warnings([f"This run's results could not be fully rendered: {exc}"])
 
+        _stop_logs_live_tail()
         progress.visible = False
         analyze_button.disabled = False
         results_placeholder.visible = False
@@ -1690,6 +1696,7 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         finally:
             if not got_result and not thesis_error_banner.visible:
                 _show_stream_error("Thesis stream ended without a result.")
+            _stop_logs_live_tail()
             thesis_progress.visible = False
             thesis_button.disabled = False
             page.update()
@@ -1708,6 +1715,9 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         for agent_id in _AGENTS:
             _reset_agent(agent_id)
         conversation_card.visible = True
+        # Live-tail the Log tab for the duration of this run only — stopped
+        # in _stream_worker's finally block once the pipeline ends.
+        _start_logs_live_tail()
         page.update()
 
         page.run_thread(_stream_worker)
@@ -1920,7 +1930,11 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
 
     log_entries: list[dict] = []
     logs_last_seq = {"value": 0}
-    logs_auto_refresh = {"value": True}
+    # Off by default: live-tail runs only for the duration of an Analyze or
+    # Generate-thesis run (started/stopped by those handlers below), not
+    # continuously in the background. The switch still lets you turn it on
+    # by hand at any other time.
+    logs_auto_refresh = {"value": False}
     logs_level_filter = {"value": "ALL"}
     logs_polling = {"value": False}
 
@@ -2019,7 +2033,25 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         if logs_auto_refresh["value"]:
             page.run_thread(_logs_poll_loop)
 
-    auto_refresh_switch = ft.Switch(label="Live tail", value=True, on_change=_on_auto_refresh_change)
+    def _start_logs_live_tail() -> None:
+        """Turn on the Log tab's live tail — called when an Analyze or
+        Generate-thesis run starts, so the 2s poll only runs while a
+        pipeline is actually in flight, not forever in the background."""
+        logs_auto_refresh["value"] = True
+        auto_refresh_switch.value = True
+        page.run_thread(_logs_poll_loop)
+
+    def _stop_logs_live_tail() -> None:
+        """Turn off the live tail and do one last fetch to pick up
+        whatever the pipeline logged between the final poll tick and the
+        run actually completing (client.analyze()/stream_thesis() only
+        return after the server-side run is fully done, so every log line
+        it produced already exists by the time this is called)."""
+        logs_auto_refresh["value"] = False
+        auto_refresh_switch.value = False
+        fetch_logs()
+
+    auto_refresh_switch = ft.Switch(label="Live tail", value=False, on_change=_on_auto_refresh_change)
     level_filter_dropdown = ft.Dropdown(
         label="Level",
         value="ALL",
@@ -2048,7 +2080,9 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
                     _section_title("Logs", ft.Icons.TERMINAL),
                     ft.Text(
                         "Live activity from the backend pipeline — provider requests, "
-                        "failover/merge decisions, analysis stages, and the agent thesis pipeline.",
+                        "failover/merge decisions, analysis stages, and the agent thesis pipeline. "
+                        "Live tail turns on automatically for the duration of an Analyze or "
+                        "Generate-thesis run; toggle it manually to watch at other times.",
                         size=12,
                         color=ft.Colors.ON_SURFACE_VARIANT,
                     ),
@@ -2074,10 +2108,6 @@ def build_view(page: ft.Page, client: ApiClient, reports_dir: str | None = None)
         ),
         expand=True,
     )
-
-    # Start the live tail immediately so the tab has content without
-    # requiring a manual click, matching auto_refresh_switch's default-on state.
-    page.run_thread(_logs_poll_loop)
 
     # ---- app bar with theme toggle --------------------------------------
     theme_icon_button = ft.IconButton(
