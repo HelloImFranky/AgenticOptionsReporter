@@ -11,8 +11,11 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import PageBreak, Paragraph
 
 from agentic_options_reporter.frontend.report_pdf import (
-    _fundamentals_blocks,
+    _build_story,
+    _fundamentals_key_facts_blocks,
+    _insider_activity_blocks,
     _insider_timeseries_chart,
+    _recent_earnings_blocks,
     _recommendation_block,
     _section_header,
     _styles,
@@ -243,32 +246,80 @@ def test_title_and_first_section_share_the_cover_page():
     assert "Recommendation" in pages[0]
 
 
-def test_every_section_after_the_first_opens_its_own_page():
-    """Every report section ('domain') AFTER the first gets its own page,
-    with the section name as the first line of text on that page — not
-    sections flowing together, separated by only a divider line."""
+def _section_header_texts(story: list) -> list[str]:
+    """The text of every page-level section header ('AorSection' style) in
+    story order — filters out other Paragraphs (fact labels, narratives,
+    etc.) so this reads as just the sequence of section headers."""
+    return [
+        item.getPlainText()
+        for item in story
+        if isinstance(item, Paragraph) and item.style.name == "AorSection"
+    ]
+
+
+def test_flowing_sections_share_pages_with_no_forced_breaks_between_them():
+    """Recommendation, Technical Snapshot, Fundamentals, Recent Earnings,
+    and Insider Activity ('the combined three' + the two right after them)
+    flow together with no forced page break between them — 'could be on
+    one page if the contents fits', spilling onto more only as needed."""
     payload = {**_FULL_REPORT, "fundamentals": _FUNDAMENTALS, "data_warnings": []}
-    data = build_report_pdf(payload)
+    _, story = _build_story(payload)
 
-    first_lines = _page_first_lines(data)
+    scored_candidates_index = next(
+        i for i, item in enumerate(story)
+        if isinstance(item, Paragraph) and item.getPlainText() == "Scored candidates"
+    )
+    # Exclude index scored_candidates_index - 1 too: that's the PageBreak
+    # forcing Scored Candidates onto its own page, not part of the flowing
+    # group this test is checking.
+    flowing_group = story[: scored_candidates_index - 1]
 
-    assert first_lines[0] == "Options Analysis Report"  # cover page + Recommendation
-    expected_headers = [
+    assert not any(isinstance(item, PageBreak) for item in flowing_group)
+    assert _section_header_texts(flowing_group) == [
+        "Recommendation",
         "Technical snapshot",
-        "Scored candidates",
         "Fundamentals",
+        "Recent earnings",
+        "Insider activity — net selling (500 shares)",
+    ]
+
+
+def test_scored_candidates_trade_quality_and_agent_pipeline_each_force_a_new_page():
+    """Scored Candidates and the Agent Pipeline (plus the Trade Quality
+    comparison that precedes it) each 'live on its own page' — unlike the
+    flowing group above, every one of these is preceded by a PageBreak."""
+    payload = {**_FULL_REPORT, "fundamentals": _FUNDAMENTALS, "data_warnings": []}
+    _, story = _build_story(payload)
+
+    page_break_indices = [i for i, item in enumerate(story) if isinstance(item, PageBreak)]
+    assert len(page_break_indices) == 3  # Scored candidates, Trade Quality comparison, Agent pipeline
+
+    headers_right_after_a_break = []
+    for i in page_break_indices:
+        headers_right_after_a_break.append(story[i + 1].getPlainText())
+    assert headers_right_after_a_break == [
+        "Scored candidates",
         "Trade Quality Score — Quant vs. Agents",
         "Agent pipeline",
     ]
-    # Each expected header opens its own page, in order (a section that
-    # overflows onto extra pages doesn't repeat its header, so this checks
-    # "appears as a page-opening line", not "is the Nth page").
-    remaining = first_lines[1:]
-    for header in expected_headers:
-        assert header in remaining, f"{header!r} did not open its own page: {first_lines}"
-    # And Recommendation, specifically, must NOT open its own page — it's
-    # the first section, so it shares page 1 with the title instead.
-    assert "Recommendation" not in remaining
+
+
+def test_report_section_order():
+    """recommendation, technical snapshot, fundamentals, recent earnings,
+    insider activity, scored candidates, then the agent pipeline."""
+    payload = {**_FULL_REPORT, "fundamentals": _FUNDAMENTALS, "data_warnings": []}
+    _, story = _build_story(payload)
+
+    assert _section_header_texts(story) == [
+        "Recommendation",
+        "Technical snapshot",
+        "Fundamentals",
+        "Recent earnings",
+        "Insider activity — net selling (500 shares)",
+        "Scored candidates",
+        "Trade Quality Score — Quant vs. Agents",
+        "Agent pipeline",
+    ]
 
 
 def test_whichever_section_is_actually_first_shares_the_cover_page():
@@ -295,19 +346,48 @@ def test_minimal_report_has_no_stray_blank_pages():
     assert first_lines == ["Options Analysis Report"]
 
 
-def test_fundamentals_blocks_render_metrics_earnings_and_insider():
-    from reportlab.graphics.shapes import Drawing
-
+def test_fundamentals_key_facts_blocks_render_metrics_and_next_earnings():
+    """Recent earnings and insider activity are their OWN sections now
+    (see _recent_earnings_blocks / _insider_activity_blocks below) — this
+    block is just key metrics + next earnings + data-source warnings."""
     styles = _styles()
-    blocks = _fundamentals_blocks(_FUNDAMENTALS, ["statements: rate limited"], styles)
+    blocks = _fundamentals_key_facts_blocks(_FUNDAMENTALS, ["statements: rate limited"], styles)
     text = _paragraph_texts(blocks)
     assert "Key metrics" in text
     assert "Next earnings: 2026-08-01" in text
-    assert "Recent earnings" in text
-    assert "net selling" in text            # -500 net shares (insider header)
-    # The insider activity is drawn as a time-series chart (a Drawing).
-    assert any(isinstance(b, Drawing) for b in blocks)
     assert "statements: rate limited" in text   # data_warnings surfaced
+    assert "Recent earnings" not in text
+    assert "net selling" not in text
+
+
+def test_recent_earnings_blocks_render_facts_table():
+    styles = _styles()
+    blocks = _recent_earnings_blocks(_FUNDAMENTALS, styles)
+    text = _paragraph_texts(blocks)
+    assert "2026-03-31" in text
+    assert "vs" in text
+
+
+def test_recent_earnings_blocks_empty_when_no_history():
+    styles = _styles()
+    assert _recent_earnings_blocks({"ticker": "X"}, styles) == []
+
+
+def test_insider_activity_blocks_render_chart_without_the_header_text():
+    """The dynamic 'Insider activity — net selling (N shares)' header is
+    used as the section's page header by build_report_pdf, not rendered a
+    second time as a Paragraph inside the block itself."""
+    from reportlab.graphics.shapes import Drawing
+
+    styles = _styles()
+    blocks = _insider_activity_blocks(_FUNDAMENTALS, styles)
+    assert any(isinstance(b, Drawing) for b in blocks)
+    assert "net selling" not in _paragraph_texts(blocks)
+
+
+def test_insider_activity_blocks_empty_when_no_activity():
+    styles = _styles()
+    assert _insider_activity_blocks({"ticker": "X"}, styles) == []
 
 
 def test_insider_timeseries_chart_needs_datable_transactions():
@@ -328,19 +408,17 @@ def test_insider_timeseries_chart_needs_datable_transactions():
     assert _insider_timeseries_chart(None, styles) == []
 
 
-def test_fundamentals_blocks_omit_absent_sections():
+def test_fundamentals_key_facts_blocks_omit_absent_next_earnings():
     styles = _styles()
-    # Only metrics present — no earnings/insider headers should render.
-    blocks = _fundamentals_blocks({"ticker": "X", "metrics": {"pe_ratio": 12.0}}, None, styles)
+    blocks = _fundamentals_key_facts_blocks({"ticker": "X", "metrics": {"pe_ratio": 12.0}}, None, styles)
     text = _paragraph_texts(blocks)
     assert "Key metrics" in text
-    assert "Recent earnings" not in text
-    assert "Insider activity" not in text
+    assert "Next earnings" not in text
 
 
-def test_fundamentals_blocks_empty_snapshot_notes_none_available():
+def test_fundamentals_key_facts_blocks_empty_snapshot_notes_none_available():
     styles = _styles()
-    blocks = _fundamentals_blocks({"ticker": "X"}, None, styles)
+    blocks = _fundamentals_key_facts_blocks({"ticker": "X"}, None, styles)
     assert "No fundamentals available" in _paragraph_texts(blocks)
 
 
